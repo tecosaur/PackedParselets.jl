@@ -1,0 +1,39 @@
+#+title: PackedParselets.jl
+
+A parser compiler for bit-packed primitive types from declarative patterns.
+
+=PackedParselets= takes a pattern specification describing a structured string
+format and compiles it into a Julia ~primitive type~ with minimal bit-width
+storage. The generated code parses directly from byte arrays, prints to IO
+and memory buffers, and provides named property access, all without heap
+allocation or regular expressions.
+
+* What it does
+
+Given a pattern like:
+
+#+begin_src julia
+("PFX-", :id(digits(4, pad=4)), optional(".v", :ver(digits(max=255))))
+#+end_src
+
+=PackedParselets= generates:
+
++ A ~primitive type~ using \lceil{}total bits\rceil{} rounded to the next byte
++ A ~parsebytes~ function that validates and packs input bytes
++ ~print~, ~string~, ~show~, and ~isless~ methods
++ Named property access (~.id~, ~.ver~)
++ A positional constructor (~T(id, ver)~)
++ Segment introspection (~segments(T)~, ~segments(instance)~)
+
+* Design goals
+
++ *Zero allocation on parse*: no intermediate strings, no exception objects on
+  the hot path
++ *Minimal storage*: fields packed into the fewest bits, not bytes
++ *Compile-time optimisation*: SWAR digit parsing, perfect hashing for choices,
+  word-sized string matching, and length-check elision, all selected at macro
+  expansion time
++ *Extensibility*: custom segment types via the ~SegmentDef~ interface
+
+See [[file:usage.org][Usage]] for the API, [[file:segments.org][Segments]] for
+the pattern language, and [[file:opt/overview.org][Optimisations]] for internals.

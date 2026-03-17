@@ -1,0 +1,117 @@
+#+title: Usage
+
+* Entry point
+
+~maketype~ compiles a pattern into an expression that defines a primitive
+type and all its methods:
+
+#+begin_src julia
+block, state = maketype(CORE_SEGMENTS, @__MODULE__, :MyType, pattern;
+                        supertype = Any,
+                        casefold = true,
+                        globals = (;),
+                        global_kwargs = ())
+eval(block)
+#+end_src
+
+~maketype~ returns a ~(block, state)~ tuple. ~block~ is a =:toplevel=
+expression ready for ~eval~ or use inside a macro body. ~state~ is the
+~ParserState~ carrying compilation metadata (error messages, segment outputs,
+globals) that downstream packages can inspect to generate additional methods
+before evaluating the block.
+
+** Parameters
+
++ ~segments~ :: Segment registry (~NamedTuple~ of ~SegmentDef~). Use ~CORE_SEGMENTS~ for the built-in set, or ~merge~ to extend it.
++ ~mod~ :: Module for resolving expressions in the pattern (e.g. ~max~ values that are ~Expr~ rather than literals).
++ ~name~ :: Name of the generated type (~Symbol~).
++ ~pattern~ :: Pattern expression (see [[file:segments.org][Segments]]).
++ ~supertype~ :: Abstract supertype for the generated ~primitive type~.
++ ~casefold~ :: Whether literal and choice matching is case-insensitive (default =true=).
++ ~globals~ :: Keyword arguments stored in ~state.globals~ for downstream packages to read.
++ ~global_kwargs~ :: Additional keyword names accepted at the pattern level (for macro-level validation).
+
+* Generated methods
+
+For a type ~T~ created by ~maketype~:
+
+| Method                     | Description                        |                |
+|----------------------------+------------------------------------+----------------|
+| ~parsebytes(T, bytes)~       | Parse byte vector, return =(T      | errcode, pos)= |
+| ~T(field1, field2, ...)~     | Positional constructor             |                |
+| ~string(::T)~                | Canonical string form              |                |
+| ~print(io, ::T)~             | Print to IO                        |                |
+| ~show(io, ::T)~              | Constructor form or compact form   |                |
+| ~isless(::T, ::T)~           | Unsigned bit comparison            |                |
+| ~propertynames(::T)~         | Field names                        |                |
+| ~getproperty(::T, ::Symbol)~ | Field access                       |                |
+| ~tobytes(::T)~               | Returns =(Memory{UInt8}, length)=    |                |
+| ~nbits(T)~                   | Logical bit width                  |                |
+| ~parsebounds(T)~             | =(min_bytes, max_bytes)= for parsing |                |
+| ~printbounds(T)~             | =(min_bytes, max_bytes)= for output  |                |
+| ~segments(T)~                | Type-level schema                  |                |
+| ~segments(::T)~              | Instance-level values              |                |
+
+~parsebytes~ returns either an instance of ~T~ (on success) or an
+integer error index (on failure), paired with the byte position
+reached. This avoids exception overhead on the hot path; callers
+decide whether to throw.
+
+* Pattern syntax
+
+Patterns are Julia expressions describing the structure of the input.
+Tuples sequence their elements, bare strings are literals, and function
+call syntax invokes segment handlers:
+
+#+begin_src julia
+# Literal prefix, captured digit field, optional version suffix
+("PFX-", :id(digits(4, pad=4)), optional(".v", :ver(digits(max=255))))
+#+end_src
+
+Fields are captured with =:name(...)= syntax and become type properties.
+See [[file:segments.org][Segments]] for the full set of available constructs.
+
+* Extending with custom segments
+
+Define a ~SegmentDef~ and merge it into the registry:
+
+#+begin_src julia
+using PackedParselets
+
+my_def = SegmentDef(:myseg, compile_myseg, (:kwarg1,))
+my_segments = merge(CORE_SEGMENTS, (myseg = my_def,))
+
+expr = maketype(my_segments, @__MODULE__, :MyType, pattern)
+#+end_src
+
+A segment compile handler has the signature:
+
+#+begin_src julia
+compile_myseg(state::ParserState, nctx::NodeCtx,
+              def::SegmentDef, args::Vector{Any}) -> SegmentOutput
+#+end_src
+
+It returns a ~SegmentOutput~ containing bounds, codegen expressions,
+and metadata. The framework handles all state mutation via
+~process_segment_output!~. Use ~value_segment_output~ to build the
+return value for value-carrying segments; it handles the
+required/optional split automatically.
+
+An optional ~finalize~ field on ~SegmentDef~ provides a post-assembly
+hook for generating additional methods.
+
+* Post-processing
+
+Since ~maketype~ returns both the expression block and the compiler state,
+downstream packages can inspect ~state~ and push additional method definitions
+into ~block.args~ before evaluating:
+
+#+begin_src julia
+block, state = maketype(my_segments, @__MODULE__, :MyType, pattern)
+# Add custom methods using state.errconsts, state.globals, etc.
+push!(block.args, my_extra_methods(state, :MyType)...)
+eval(block)
+#+end_src
+
+This is how downstream packages add ~parse~/~tryparse~ with custom
+error types, or domain-specific accessors.

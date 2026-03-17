@@ -1,0 +1,14 @@
+name = "PackedParselets"
+uuid = "209b254f-b05f-46a6-8f5d-65983536c2bc"
+version = "1.0.0"
+authors = ["TEC <git@tecosaur.net>"]
+
+[compat]
+julia = "1.11"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+
+[targets]
+test = ["Test", "InteractiveUtils"]

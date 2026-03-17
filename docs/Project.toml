@@ -1,0 +1,7 @@
+[deps]
+PackedParselets = "209b254f-b05f-46a6-8f5d-65983536c2bc"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Org = "587fedb0-ad84-11e9-2bd6-d15ea4be1f9e"
+
+[sources]
+PackedParselets = {path = ".."}

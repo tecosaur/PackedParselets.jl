@@ -1,0 +1,76 @@
+#+title: Data Loading
+
+Several parts of the code generator need to load or store a known number of
+bytes using register-sized operations. [[file:stringmatch.org][String matching]]
+loads them for comparison, [[file:swar.org][SWAR]] loads them for digit parsing,
+and [[file:bufprint.org][buffer printing]] writes them for output. Since the
+same strategies come up repeatedly, they are centralised in ~loaders.jl~.
+
+* Register decomposition
+
+A byte count /n/ is broken into descending power-of-2 chunks (8, 4, 2, 1 byte),
+each mapped to its corresponding unsigned type (~UInt64~, ~UInt32~, ~UInt16~,
+~UInt8~). So for example 6 bytes becomes a ~UInt32~ at offset 0 and a ~UInt16~
+at offset 4.
+
+This same decomposition drives both ~unsafe_load~ during parsing and
+~unsafe_store!~ during buffer printing.
+
+* Load strategies
+
+There are four ways to get /n/ bytes into a register. Each use site picks the
+cheapest option that the static context allows, using the priority order:
+full-width > backward > forward overread > exact sub-loads.
+
+#+begin_example
+                forward u64
+backward u64 ╭───────────┴────╮
+  ╭───────┴──┼──────╮         │
+  ░ ░ ░ ░ ░ ░ a b c d e · · · ·
+  ╰──parsed──╯╰─target─╯
+              ╰──┬───╯╰╯
+                u32   u8
+                 exact
+#+end_example
+
+When /n/ equals the register size, a *full-width* ~unsafe_load~ is all we need
+with no shifts or masks. When enough already-parsed bytes precede ~pos~
+(specifically, ~parsed_min >= sizeof(T) - n~), a *backward-aligned* single wide
+load ending at the last target byte captures all /n/ bytes in the high positions;
+the extra low bytes are harmless since the subsequent masking step (the ASCII
+mask in SWAR, the fold mask in string matching) zeros them anyway. One load, no
+shift. This is the cheapest sub-width path.
+
+When static length analysis guarantees enough trailing bytes beyond our target
+range, a *forward overread* (a single full-width load at ~pos~) captures
+everything we need (plus some harmless trailing content). Both the
+forward-overread and exact paths are emitted behind a ~__static_length_check~
+sentinel, and branch folding eliminates whichever turns out to be unnecessary.
+
+When none of the above apply, we fall back to *exact sub-loads*: the register
+decomposition chunks are loaded individually, shifted to position, and OR-ed
+together. This reads exactly /n/ bytes with no out-of-bounds access, at the cost
+of multiple loads.
+
+Backward eligibility is determined by ~parsed_min~ (known at codegen time);
+forward overread eligibility depends on how the sentinels resolve.
+
+* Masked comparison
+
+For loads used in comparison (string matching, choice verification), each chunk
+carries a precomputed =(value, mask)= pair: =0xFF= per byte for exact match,
+=0xDF= per letter byte when casefolding (clearing the case bit), and =0x00= per
+overflow byte (beyond the string, or in backward padding). The runtime check
+then reduces to ~load & mask == value~. When the mask is all-ones (no
+casefolding, no overflow), the AND is elided entirely.
+
+* Wide/narrow dual paths
+
+When widening from multiple chunks to a single register load reduces the chunk
+count, both a wide path (one load) and a narrow path (multiple loads) are
+emitted. A ~__static_length_check~ sentinel gates the selection: if the
+resolved guarantees confirm enough bytes, the wide path wins and the narrow path
+is folded away (or vice versa). This pattern comes up in literal matching
+([[file:stringmatch.org][string matching]]), choice verification
+([[file:perfecthash.org][perfect hashing]]), and SWAR fixed-width loads
+([[file:swar.org][SWAR]]).

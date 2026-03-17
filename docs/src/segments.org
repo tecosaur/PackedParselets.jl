@@ -1,0 +1,156 @@
+#+title: Segments
+
+Segments are the building blocks of patterns. Each segment describes
+how to parse, pack, extract, and print a portion of the input.
+
+* Structural constructs
+
+** Tuples (sequencing)
+
+A tuple sequences its elements left to right:
+
+#+begin_src julia
+("prefix-", :id(digits(4)), "-suffix")
+#+end_src
+
+The explicit ~seq(args...)~ form is equivalent.
+
+** Field capture
+
+=:name(...)= wraps a segment (or sequence) and exposes it as a named
+property on the generated type. Single-segment fields return the
+extracted value directly; multi-segment fields concatenate their
+printed forms into a string.
+
+** Optional
+
+~optional(args...)~ wraps content that may be absent. On parse
+failure within the optional, ~pos~ is rewound and the optional is
+marked absent. Properties return ~nothing~ when absent.
+
+Absence is encoded via sentinels in the bit representation:
+typically by reserving a zero value or adding a presence bit. See
+[[file:opt/bitpacking.org][Bit-packing]] for encoding strategies.
+
+Optionals nest: each level forks its own branch for independent
+byte-count tracking.
+
+* Value segments
+
+** ~digits~
+
+Numeric fields parsed from digit characters.
+
+#+begin_src julia
+digits(n)          # exactly n digits
+digits(lo:hi)      # variable width, lo to hi digits
+digits(max=M)      # 1 to ceil(log_base(M)) digits, value <= M
+digits(n, base=16) # n hex digits
+digits(n, min=A, max=B, pad=P)
+#+end_src
+
+| Keyword | Default | Description                        |
+|---------+---------+------------------------------------|
+| ~base~  |      10 | Numeric base (2--62)               |
+| ~min~   |       0 | Minimum value                      |
+| ~max~   |     --- | Maximum value                      |
+| ~pad~   |       0 | Zero-pad printed output to width   |
+
+Fixed-width fields with base \le 16 use [[file:opt/swar.org][SWAR
+parsing]]; variable-width fields up to 8 digits also use SWAR with
+runtime digit counting. Wider or higher-base fields fall back to
+scalar ~parseint~.
+
+** ~letters~
+
+Alphabetic characters (A--Z, a--z).
+
+#+begin_src julia
+letters(n)              # exactly n letters
+letters(lo:hi)          # variable width
+letters(n, upper=true)  # store as uppercase
+letters(n, lower=true)  # store as lowercase
+letters(n, casefold=true)  # case-insensitive parse, uppercase store
+#+end_src
+
+Each character is packed into \lceil{}log_2(alphabet size)\rceil{} bits.
+
+** ~alphnum~
+
+Alphanumeric characters (0--9, A--Z, a--z). Same interface as ~letters~.
+
+** ~hex~
+
+Hexadecimal characters (0--9, A--F). Same interface as ~letters~.
+Default store is uppercase.
+
+** ~charset~
+
+Custom character set from explicit ranges.
+
+#+begin_src julia
+charset(n, 'A':'Z', '0':'9')            # fixed width
+charset(lo:hi, 'a':'f', '-')            # variable width, ranges + single chars
+charset(n, 'A':'Z', casefold=true)      # case-insensitive
+#+end_src
+
+The first argument is the length (integer or range). Subsequent
+arguments are character ranges (='a':'z'=) or single characters.
+
+** ~choice~
+
+Match one of several literal strings.
+
+#+begin_src julia
+choice("alpha", "beta", "gamma")         # value-carrying: stores index
+choice("http://", "https://", is="http") # fixed: stores bool (matched canonical?)
+#+end_src
+
+| Keyword     | Description                                    |
+|-------------+------------------------------------------------|
+| ~casefold~  | Case-insensitive matching (default from parent) |
+| ~is~        | Canonical form: store only whether it matched |
+
+When captured as a field, the property returns a ~Symbol~ (value form)
+or is unavailable (fixed form). Uses [[file:opt/perfecthash.org][perfect
+hashing]] when possible, with linear scan as fallback.
+
+Empty strings in the option list make the choice optional (zero-length
+match allowed).
+
+** ~embed~
+
+Embed another packed primitive type inline.
+
+#+begin_src julia
+embed(InnerType)
+#+end_src
+
+Delegates parsing to the inner type's ~parsebytes~ and printing to
+its ~tobytes~. The inner type must be a primitive subtype of the
+outer type's supertype.
+
+* Non-value segments
+
+** Literals / bare strings
+
+Required literal text. Bare strings in the pattern are shorthand:
+
+#+begin_src julia
+"PFX-"                  # equivalent to literal("PFX-")
+#+end_src
+
+Uses [[file:opt/stringmatch.org][word-sized comparisons]].
+
+** ~skip~
+
+Strip optional prefixes on parse. Does not store any value.
+
+#+begin_src julia
+skip("http://", "https://")         # strip if present, print nothing
+skip("http://", print="https://")   # strip if present, always print "https://"
+skip(print="-")                     # strip "-" if present, print "-" always
+#+end_src
+
+Prefixes are tried longest-first. The ~print~ keyword specifies what
+to emit on output (nothing if omitted).

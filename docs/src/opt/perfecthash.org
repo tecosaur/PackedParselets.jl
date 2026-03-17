@@ -1,0 +1,70 @@
+#+title: Perfect Hashing
+
+~choice~ nodes need to match input against a fixed set of string alternatives.
+A naive linear scan costs O(/k/ \times /n/) for /k/ options of length /n/.
+Instead, =PackedParselets= searches for a perfect hash at compile time: when
+one is found, it maps input to a candidate in O(1), reducing matching to a
+single verification step.
+
+* Candidate discovery
+
+A "candidate" is a byte window (1, 2, 4, or 8 bytes) at some position within
+the options that uniquely distinguishes all of them when loaded as an unsigned
+integer.
+
+#+begin_example
+options: ["alpha/", "beta/", "gamma/"]
+
+1-byte window at position 0: ['a', 'b', 'g'] → unique ✓
+1-byte window at position 4: ['a', '/', 'a'] → not unique ✗
+#+end_example
+
+With casefolding, bytes are OR-masked with =0x20= before comparison.
+
+* Hash families
+
+Each candidate's distinct values are fed through hash functions, searching for
+one that produces unique outputs in a small range. In order of preference:
+
++ Identity :: the loaded value directly. This is the simplest, and it's
+  /injective/: a bounds check alone confirms the match (see below).
++ Mod :: /v/ mod /m/ + 1.
++ Shift-mod :: (/v/ >> /k/) mod /m/ + 1.
++ Multiply-shift-mod :: (/v/ \times /c/) >> /k/ mod /m/ + 1 with well-chosen constants.
+
+The search stops at the first perfect hash found. The hash-to-index mapping is
+then classified as /direct/ (hash values are consecutive, so the index is a
+single subtraction) or /table/ (a compile-time tuple maps hash values to option
+indices). The search prefers direct mappings and stops early when one is found.
+
+* Verification
+
+A perfect hash identifies which option the input /might/ be, but unrecognised
+input could still produce a valid-looking index. Verification confirms the match
+using [[file:stringmatch.org][word-sized comparisons]] against a precomputed table of expected byte
+values.
+
+For variable-length options, the minimum-length prefix is verified by word-sized
+comparison, and tail bytes beyond the minimum are verified separately:
+word-sized when all tails share a length, byte-by-byte otherwise. When
+variable-length options share trailing bytes (aligned from the end), those bytes
+are checked as a constant using ~pos + optlen~ addressing, potentially
+eliminating per-option tail verification entirely.
+
+When enough already-parsed bytes precede ~pos~, a single
+[[file:dataloading.org][register load]] wider than the option length can verify
+all bytes at once, with the overflow masked to =0x00=.
+
+** Injective optimisation
+
+When the hash comes from the identity family, the loaded bytes /are/ the hash
+value. A successful bounds check already guarantees they match a known option.
+The optimiser determines which verification bytes overlap with the hash window
+and skips them, reducing or eliminating verification loads.
+
+* Linear scan fallback
+
+When no perfect hash exists, we fall back to a byte-by-byte loop over all
+options, sorted longest-first for greedy matching when options share prefixes.
+Both length-guarded and unguarded paths are emitted, with static branch folding
+selecting based on available byte guarantees.

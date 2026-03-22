@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Pattern dispatch and structural handlers (field capture, optional branching).
+# Pattern dispatch and structural handlers (field capture, choice/optional branching).
 
 ## Segment registries
 
@@ -31,6 +31,8 @@ function pattern_dispatch!(exprs::PatternExprs,
         end
     elseif node === :optional
         pattern_optional!(exprs, state, nctx, segments, global_kwargs, args)
+    elseif node === :choice && any(a -> !(a isa String), args)
+        pattern_choice!(exprs, state, nctx, segments, global_kwargs, args)
     elseif haskey(segments, node)
         def = getfield(segments, node)
         # Some segments (e.g. checkdigit) need exprs for field resolution
@@ -126,10 +128,8 @@ function pattern_field!(exprs::PatternExprs,
     end
 end
 
-## Optional branching
+## Choice/optional branching
 
-# Replace placeholder `true` conditions in optional segment extracts with the
-# resolved sentinel presence check.
 function patch_optional_extracts!(segments::Vector{ValueSegment},
                                   seg_range::UnitRange{Int}, check::Expr)
     for i in seg_range
@@ -142,36 +142,110 @@ function patch_optional_extracts!(segments::Vector{ValueSegment},
     end
 end
 
-# Build a parse-time cleanup expression that rewinds pos and (when multiple
-# bits were packed) clears the optional's stale bits via a bitmask.
-function optional_rewind_expr(state::ParserState, optvar::Symbol,
-                              savedpos::Symbol, bits_before::Int)
-    opt_bits = state.bits - bits_before
-    if opt_bits > 1
-        mT = cardtype(opt_bits)
-        mask = typemax(mT) >> (8 * sizeof(mT) - opt_bits)
-        clear = :(parsed = Core.Intrinsics.and_int(parsed,
-            Core.Intrinsics.not_int(
-                Core.Intrinsics.shl_int(
-                    __cast_to_id($mT, $mask),
-                    8 * sizeof($(esc(state.name))) - $(state.bits)))))
-        :(if !$optvar; pos = $savedpos; $clear end)
+function arm_clear_bits(state::ParserState, bits_before::Int)
+    arm_bits = state.bits - bits_before
+    arm_bits > 1 || return ExprVarLine[]
+    mT = cardtype(arm_bits)
+    mask = typemax(mT) >> (8 * sizeof(mT) - arm_bits)
+    ExprVarLine[:(parsed = Core.Intrinsics.and_int(parsed,
+        Core.Intrinsics.not_int(
+            Core.Intrinsics.shl_int(
+                __cast_to_id($mT, $mask),
+                8 * sizeof($(esc(state.name))) - $(state.bits)))))]
+end
+
+function arm_rewind_expr(state::ParserState, armvar::Symbol,
+                         savedpos::Symbol, bits_before::Int)
+    clear = arm_clear_bits(state, bits_before)
+    :(if !$armvar; pos = $savedpos; $(clear...) end)
+end
+
+function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx,
+                          segments::NamedTuple, global_kwargs::Tuple, arm)
+    if Meta.isexpr(arm, :tuple)
+        for a in arm.args
+            pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, a)
+        end
     else
-        :(if !$optvar; pos = $savedpos end)
+        pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, arm)
     end
 end
 
-function pattern_optional!(exprs::PatternExprs,
-                           state::ParserState, nctx::NodeCtx,
-                           segments::NamedTuple, global_kwargs::Tuple,
-                           args::Vector{Any})
+## Byte profiling for structured choice dispatch
+
+function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}})
+    narms = length(arm_spans)
+    narms >= 2 || return nothing
+    any(isempty, arm_spans) && return nothing
+    min_len = minimum(minimum(length, spans) for spans in arm_spans)
+    for iT in REGISTER_TYPES
+        bwidth = sizeof(iT)
+        bwidth > min_len && break
+        for pos in 1:min_len - bwidth + 1
+            expr, _ = search_hash_families(narms, iT) do fn, expr_fn, _injective, maxval
+                maxval + 1 > 512 && return nothing
+                groups = Dict{UInt64, Int}()
+                for (k, spans) in enumerate(arm_spans)
+                    for alt in spans
+                        window = @view alt[pos:pos+bwidth-1]
+                        for combo in Iterators.product(window...)
+                            regval = reduce(|, UInt64(b) << (8*(j-1))
+                                            for (j, b) in enumerate(combo); init=zero(UInt64))
+                            mv = fn(regval)
+                            prev = get(groups, mv, 0)
+                            (prev != 0 && prev != k) && return nothing
+                            groups[mv] = k
+                        end
+                    end
+                end
+                length(groups) < 2 && return nothing
+                table = zeros(UInt8, maxval + 1)
+                for (mv, k) in groups
+                    table[mv + 1] = k % UInt8
+                end
+                tup = Tuple(table)
+                (b -> :(@inbounds $tup[$(expr_fn(b)) + 1]), 0)
+            end
+            !isnothing(expr) && return (; offset = pos, iT, expr)
+        end
+    end
+    nothing
+end
+
+"""
+    pattern_choice!(exprs, state, nctx, segments, global_kwargs, arms)
+
+Unified handler for choice and optional branching. `arms` is a list of pattern
+nodes to try in order; `""` as an arm matches zero bytes (the optional absent
+case).
+
+Two paths:
+- Single pattern + `""` → sentinel-claiming optional (bit-efficient)
+- Multiple arms → explicit discriminant with dispatch or cascading try-rewind
+"""
+function pattern_choice!(exprs::PatternExprs,
+                         state::ParserState, nctx::NodeCtx,
+                         segments::NamedTuple, global_kwargs::Tuple,
+                         arms::Vector{Any})
+    nonempty_arms = filter(a -> a != "", arms)
+    if length(nonempty_arms) == 1 && length(arms) == 2
+        pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs,
+                                 only(nonempty_arms))
+    else
+        pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms)
+    end
+end
+
+function pattern_choice_optional!(exprs::PatternExprs,
+                                  state::ParserState, nctx::NodeCtx,
+                                  segments::NamedTuple, global_kwargs::Tuple,
+                                  arm)
     popt = get(nctx, :optional, nothing)
     optvar = gensym("optional")
     end_label = gensym("opt_end")
     nctx = NodeCtx(nctx, :optional, optvar)
     nctx = NodeCtx(nctx, :opt_label, end_label)
     nctx = NodeCtx(nctx, :oprint_detect, ExprVarLine[])
-    # Fork a child branch for this optional scope
     parent = nctx[:current_branch]
     child = ParseBranch(length(state.branches) + 1, parent, optvar,
                         parent.parsed_min, parent.parsed_max,
@@ -183,18 +257,10 @@ function pattern_optional!(exprs::PatternExprs,
     nctx = NodeCtx(nctx, :optional_sentinel, sentinel_ref)
     seg_start = length(exprs.segments)
     bits_before = state.bits
-    # Walk children into a separate parse/print accumulator
-    oexprs = (; parse = ExprVarLine[], print = ExprVarLine[], segments = exprs.segments, properties = exprs.properties)
-    if all(a -> a isa String, args)
-        def = getfield(segments, :choice)
-        output = def.compile(state, nctx, def, push!(Any[join(Vector{String}(args))], ""))
-        process_segment_output!(oexprs, state, nctx, :choice, output)
-    else
-        for arg in args
-            pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, arg)
-        end
-    end
-    # Ensure a sentinel exists (allocate an explicit presence bit if none was claimed)
+    oexprs = (; parse = ExprVarLine[], print = ExprVarLine[],
+                 segments = exprs.segments, properties = exprs.properties,
+                 bytespans = Vector{ByteSet}[])
+    walk_choice_arm!(oexprs, state, nctx, segments, global_kwargs, arm)
     if sentinel_ref[] === nothing
         flag_nbits = (state.bits += 1)
         push!(oexprs.parse, emit_pack(state, Bool, optvar, flag_nbits))
@@ -203,10 +269,8 @@ function pattern_optional!(exprs::PatternExprs,
     sentinel = sentinel_ref[]
     check = :(!iszero($(emit_extract(state, sentinel.position, sentinel.nbits))))
     patch_optional_extracts!(exprs.segments, seg_start+1:length(exprs.segments), check)
-    # Merge max back to parent; min stays unchanged (optional content doesn't raise the guarantee)
     parent.parsed_max += child.parsed_max - child.start_min
     parent.print_max = Base.max(parent.print_max, child.print_max)
-    # Emit parse-time guard, body, label, and cleanup
     savedpos = gensym("savedpos")
     branch_check = Expr(:call, :__branch_check, Bool, child.id)
     guard = if isnothing(popt); branch_check else :($popt && $branch_check) end
@@ -214,9 +278,160 @@ function pattern_optional!(exprs::PatternExprs,
     push!(exprs.parse, :($optvar = $guard))
     push!(exprs.parse, :(if $optvar; $(oexprs.parse...) end))
     push!(exprs.parse, :(@label $end_label))
-    push!(exprs.parse, optional_rewind_expr(state, optvar, savedpos, bits_before))
-    # Print-time presence detection
+    push!(exprs.parse, arm_rewind_expr(state, optvar, savedpos, bits_before))
     append!(exprs.print, nctx[:oprint_detect])
     push!(exprs.print, :($optvar = $check))
     push!(exprs.print, :(if $optvar; $(oexprs.print...) end))
+    if !isempty(oexprs.bytespans)
+        extend_bytespans!(exprs.bytespans, push!(copy(oexprs.bytespans), ByteSet[]))
+    end
+end
+
+function pattern_choice_multi!(exprs::PatternExprs,
+                               state::ParserState, nctx::NodeCtx,
+                               segments::NamedTuple, global_kwargs::Tuple,
+                               arms::Vector{Any})
+    narms = length(arms)
+    narms >= 2 || throw(ArgumentError("Structured choice requires at least 2 arms"))
+    popt = get(nctx, :optional, nothing)
+    parent = nctx[:current_branch]
+    savedpos = gensym("savedpos")
+    push!(exprs.parse, :($savedpos = pos))
+    discrim_bits = cardbits(narms + 1)
+    discrim_type = cardtype(discrim_bits)
+    discrim_pos = state.bits + discrim_bits
+    state.bits += discrim_bits
+    arm_data = map(enumerate(arms)) do (k, arm)
+        armvar = gensym("arm$k")
+        end_label = gensym("arm$(k)_end")
+        arm_nctx = NodeCtx(nctx, :optional, armvar)
+        arm_nctx = NodeCtx(arm_nctx, :opt_label, end_label)
+        arm_nctx = NodeCtx(arm_nctx, :oprint_detect, ExprVarLine[])
+        arm_nctx = NodeCtx(arm_nctx, :optional_sentinel, nothing)
+        child = ParseBranch(length(state.branches) + 1, parent, armvar,
+                            parent.parsed_min, parent.parsed_max,
+                            parent.parsed_min, parent.parsed_min,
+                            parent.print_min, parent.print_max)
+        push!(state.branches, child)
+        arm_nctx = NodeCtx(arm_nctx, :current_branch, child)
+        seg_start = length(exprs.segments)
+        bits_before = state.bits
+        oexprs = (; parse = ExprVarLine[], print = ExprVarLine[],
+                     segments = exprs.segments, properties = exprs.properties,
+                     bytespans = Vector{ByteSet}[])
+        if arm != ""
+            walk_choice_arm!(oexprs, state, arm_nctx, segments, global_kwargs, arm)
+        end
+        bits_after = state.bits
+        dval = gensym("discrim")
+        push!(oexprs.parse, :($dval = $(discrim_type(k))))
+        push!(oexprs.parse, emit_pack(state, discrim_type, dval, discrim_pos))
+        parent.parsed_max += child.parsed_max - child.start_min
+        parent.print_max = Base.max(parent.print_max, child.print_max)
+        (; armvar, end_label, child, oexprs, arm_nctx,
+           seg_range = seg_start+1:length(exprs.segments),
+           bits_before, bits_after)
+    end
+    for (k, ad) in enumerate(arm_data)
+        check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
+        patch_optional_extracts!(exprs.segments, ad.seg_range, check)
+    end
+    final_bits = state.bits
+    arm_spans = [ad.oexprs.bytespans for ad in arm_data]
+    dispatch = find_choice_dispatch(arm_spans)
+    popt_label = get(nctx, :opt_label, nothing)
+    has_empty = "" in arms
+    if !isnothing(dispatch)
+        emit_dispatch_parse!(exprs, state, popt, popt_label, savedpos, arm_data,
+                             dispatch, has_empty)
+    else
+        emit_cascade_parse!(exprs, state, popt, popt_label, savedpos, arm_data,
+                            has_empty)
+    end
+    state.bits = final_bits
+    # Separate `if` blocks (not if/elseif) so rewrite_bufprint! can reach print calls.
+    discrim_extract = emit_extract(state, discrim_pos, discrim_bits)
+    for (k, ad) in enumerate(arm_data)
+        append!(exprs.print, ad.arm_nctx[:oprint_detect])
+        push!(exprs.print, :(if $discrim_extract == $(discrim_type(k))
+                                 $(ad.oexprs.print...)
+                             end))
+    end
+end
+
+function emit_dispatch_parse!(exprs, state, popt, popt_label, savedpos, arm_data,
+                              dispatch, has_empty)
+    reg_var = gensym("dispatch_reg")
+    arm_idx_var = gensym("arm_idx")
+    (; offset, iT, expr) = dispatch
+    bwidth = sizeof(iT)
+    load_pos = if offset == 1; :pos else :(pos + $(offset - 1)) end
+    load = gen_load(iT, load_pos)
+    min_bytes_needed = offset - 1 + bwidth
+    push!(exprs.parse, :(if nbytes < pos + $(min_bytes_needed - 1)
+                             $arm_idx_var = UInt8(0)
+                         else
+                             $reg_var = $load
+                             $arm_idx_var = $(expr(reg_var))
+                         end))
+    for (k, ad) in enumerate(arm_data)
+        branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
+        guard = if isnothing(popt); branch_check else :($popt && $branch_check) end
+        state.bits = ad.bits_after
+        rewind = arm_rewind_expr(state, ad.armvar, savedpos, ad.bits_before)
+        push!(exprs.parse, :($(ad.armvar) = false))
+        push!(exprs.parse, :(if $arm_idx_var == $(UInt8(k))
+                                 $(ExprVarLine[
+                                     :($(ad.armvar) = $guard),
+                                     :(if $(ad.armvar); $(ad.oexprs.parse...) end),
+                                     :(@label $(ad.end_label)),
+                                     rewind]...)
+                             end))
+    end
+    if !has_empty || !isnothing(popt)
+        any_ok = reduce((a, ad) -> :($a || $(ad.armvar)), arm_data; init=false)
+        fail = if isnothing(popt)
+            erridx = register_errmsg!(state, "No choice arm matched")
+            :(return ($erridx, pos))
+        else
+            opt_fail_expr(popt, popt_label)
+        end
+        push!(exprs.parse, :(if !($any_ok); $fail end))
+    end
+end
+
+function emit_cascade_parse!(exprs, state, popt, popt_label, savedpos, arm_data, has_empty)
+    innermost = if has_empty && isnothing(popt)
+        ExprVarLine[]
+    elseif !isnothing(popt)
+        ExprVarLine[opt_fail_expr(popt, popt_label)]
+    else
+        erridx = register_errmsg!(state, "No choice arm matched")
+        ExprVarLine[:(return ($erridx, pos))]
+    end
+    cascade = foldr(enumerate(collect(arm_data)), init=innermost) do (k, ad), fallback
+        branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
+        guard = if isnothing(popt); branch_check else :($popt && $branch_check) end
+        state.bits = ad.bits_after
+        clear = arm_clear_bits(state, ad.bits_before)
+        ExprVarLine[
+            :($(ad.armvar) = $guard),
+            :(if $(ad.armvar); $(ad.oexprs.parse...) end),
+            :(@label $(ad.end_label)),
+            :(if !$(ad.armvar); pos = $savedpos; $(clear...); $(fallback...) end)]
+    end
+    append!(exprs.parse, cascade)
+end
+
+function pattern_optional!(exprs::PatternExprs,
+                           state::ParserState, nctx::NodeCtx,
+                           segments::NamedTuple, global_kwargs::Tuple,
+                           args::Vector{Any})
+    arm = if all(a -> a isa String, args)
+        choiceargs = push!(Any[join(Vector{String}(args))], "")
+        Expr(:call, :choice, choiceargs...)
+    else
+        Expr(:tuple, args...)
+    end
+    pattern_choice!(exprs, state, nctx, segments, global_kwargs, Any[arm, ""])
 end

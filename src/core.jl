@@ -33,6 +33,7 @@ const PatternExprs = @NamedTuple{
     print::Vector{ExprVarLine},
     segments::Vector{ValueSegment},
     properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
+    bytespans::Vector{Vector{ByteSet}},
 }
 
 ## Structs
@@ -199,7 +200,8 @@ function value_segment_output(;
         parse::Vector{ExprVarLine},
         extract_setup::Vector{ExprVarLine}, extract_value::Any,
         present_check::Any = true,
-        impart_body::Vector{Any}, print::Vector{ExprVarLine})
+        impart_body::Vector{Any}, print::Vector{ExprVarLine},
+        bytespans::Vector{Vector{ByteSet}} = Vector{ByteSet}[])
     seg_extract = if isnothing(option)
         ExprVarLine[extract_setup..., extract_value]
     else
@@ -215,7 +217,8 @@ function value_segment_output(;
     SegmentOutput(
         bounds,
         SegmentCodegen(parse, seg_extract, copy(extract_setup), seg_impart, print),
-        SegmentMeta(label, desc, shortform, seg_argtype, argvar))
+        SegmentMeta(label, desc, shortform, seg_argtype, argvar),
+        bytespans)
 end
 
 """
@@ -420,4 +423,16 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     push!(exprs.print, :(__segment_printed = $(length(exprs.segments))))
     # Store for assembly-phase use
     push!(state.segment_outputs, kind => output)
+    extend_bytespans!(exprs.bytespans, output.bytespans)
+end
+
+function extend_bytespans!(target::Vector{Vector{ByteSet}}, new::Vector{Vector{ByteSet}})
+    isempty(new) && return
+    if isempty(target)
+        append!(target, new)
+    else
+        combined = [vcat(prev, ext) for prev in target for ext in new]
+        empty!(target)
+        append!(target, combined)
+    end
 end

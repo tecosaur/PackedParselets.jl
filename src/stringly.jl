@@ -27,10 +27,12 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::
               $notfound
           end),
         :(pos += $litlen)]
+    spans = [[byte_set(codeunit(lit, i), casefold) for i in 1:litlen]]
     SegmentOutput(
         SegmentBounds(litlen:litlen, litlen:litlen, 0, nothing),
         SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[:(print(io, $lit))]),
-        SegmentMeta(:literal, sprint(show, lit), lit, nothing, nothing))
+        SegmentMeta(:literal, sprint(show, lit), lit, nothing, nothing),
+        spans)
 end
 
 function compile_skip(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
@@ -43,19 +45,22 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Vec
         throw(ArgumentError("Expected all arguments to be ASCII strings for skip with casefolding"))
     parse = ExprVarLine[gen_static_lchop(if casefold; map(lowercase, sargs) else sargs end, casefold=casefold)]
     parsed_max = maximum(ncodeunits, sargs)
+    arrangements = push!(
+        [[byte_set(codeunit(s, i), casefold) for i in 1:ncodeunits(s)] for s in sargs],
+        ByteSet[])
     if !isnothing(pval)
         plen = ncodeunits(pval)
         SegmentOutput(
             SegmentBounds(0:parsed_max, plen:plen, 0, nothing),
             SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[:(print(io, $pval))]),
-            SegmentMeta(:skip, "Skipped literal string \"$(join(sargs, ", "))\"", pval, nothing, nothing))
+            SegmentMeta(:skip, "Skipped literal string \"$(join(sargs, ", "))\"", pval, nothing, nothing),
+            arrangements)
     else
-        # Skip without print: still needs parse codegen and byte bounds,
-        # but no segment registration or print output
         SegmentOutput(
             SegmentBounds(0:parsed_max, 0:0, 0, nothing),
             SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[]),
-            SegmentMeta(:skip, "", "", nothing, nothing))
+            SegmentMeta(:skip, "", "", nothing, nothing),
+            arrangements)
     end
 end
 

@@ -2836,4 +2836,199 @@ end
     end
 end
 
+@testset "structured choice" begin
+    @testset "two-arm basic" begin
+        iddef = :(@defpacked StructChoice1 (:id(choice(("A", digits(2, pad=2)), ("B", digits(3, pad=3))))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:62)
+        eval(iddef)
+        @test string(parse(StructChoice1, "A42")) == "A42"
+        @test string(parse(StructChoice1, "B007")) == "B007"
+        @test tryparse(StructChoice1, "C99") === nothing
+        @test tryparse(StructChoice1, "A") === nothing
+        check_roundtrips(StructChoice1, ("A00", "A99", "B000", "B999"))
+    end
+    @testset "two-arm with fields" begin
+        iddef = :(@defpacked StructChoice2 (choice(:a(digits(2, pad=2)), ("X", :b(digits(3, pad=3))))))
+        @test parsebytes_complexity(iddef) == (branches=5:12, branch_total=12, ops=2:60)
+        eval(iddef)
+        @test parse(StructChoice2, "42").a == 42
+        @test parse(StructChoice2, "42").b === nothing
+        @test parse(StructChoice2, "X007").b == 7
+        @test parse(StructChoice2, "X007").a === nothing
+        check_roundtrips(StructChoice2, ("00", "99", "X000", "X999"))
+    end
+    @testset "with empty arm" begin
+        iddef = :(@defpacked StructChoiceOpt (choice(("A", :x(digits(2, pad=2))), ("B", :y(digits(3, pad=3))), "")))
+        @test parsebytes_complexity(iddef) == (branches=2:10, branch_total=10, ops=3:65)
+        eval(iddef)
+        @test parse(StructChoiceOpt, "A42").x == 42
+        @test parse(StructChoiceOpt, "A42").y === nothing
+        @test parse(StructChoiceOpt, "B007").y == 7
+        @test parse(StructChoiceOpt, "B007").x === nothing
+        @test tryparse(StructChoiceOpt, "C99") === nothing
+    end
+    @testset "letter-range dispatch" begin
+        iddef = :(@defpacked LetterChoice (choice(("X", :a(digits(3, pad=3))), ("Y", :b(digits(2, pad=2))), ("Z", :c(digits(1))))))
+        @test parsebytes_complexity(iddef) == (branches=5:19, branch_total=19, ops=2:83)
+        eval(iddef)
+        @test parse(LetterChoice, "X042").a == 42
+        @test parse(LetterChoice, "Y07").b == 7
+        @test parse(LetterChoice, "Z5").c == 5
+        @test tryparse(LetterChoice, "W1") === nothing
+        check_roundtrips(LetterChoice, ("X000", "X999", "Y00", "Y99", "Z0", "Z9"))
+    end
+    @testset "complex arm dispatch" begin
+        iddef = :(@defpacked ComplexChoice (choice(
+            (choice("O", "P", "Q"), :d1(digits(1)), :a1(alphnum(3)), :d2(digits(1))),
+            (charset(1, 'A':'N', 'R':'Z'), :d3(digits(1)), :a2(alphnum(8))))))
+        @test parsebytes_complexity(iddef) == (branches=5:17, branch_total=17, ops=2:75)
+        eval(iddef)
+        @test string(parse(ComplexChoice, "P3ABC5")) == "P3ABC5"
+        @test string(parse(ComplexChoice, "A1ABCDEFGH")) == "A1ABCDEFGH"
+        @test tryparse(ComplexChoice, "O") === nothing
+        @test tryparse(ComplexChoice, "") === nothing
+        check_roundtrips(ComplexChoice, ("O0AAA0", "Q9ZZZ9", "A0AAAAAAAA", "N9ZZZZZZZZ"))
+    end
+    @testset "casefold dispatch" begin
+        iddef = :(@defpacked CaseFoldChoice (choice(("ab", :x(digits(2, pad=2))), ("cd", :y(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:57)
+        eval(iddef)
+        @test parse(CaseFoldChoice, "ab42").x == 42
+        @test parse(CaseFoldChoice, "AB42").x == 42
+        @test parse(CaseFoldChoice, "cd07").y == 7
+        @test parse(CaseFoldChoice, "CD07").y == 7
+        @test tryparse(CaseFoldChoice, "ef01") === nothing
+        check_roundtrips(CaseFoldChoice, ("ab00", "ab99", "cd00", "cd99"))
+    end
+    @testset "cascade fallback" begin
+        iddef = :(@defpacked CascadeChoice (choice((:a(digits(2, pad=2)), "X"), (:b(digits(2, pad=2)), "Y"))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:58)
+        eval(iddef)
+        @test parse(CascadeChoice, "42X").a == 42
+        @test parse(CascadeChoice, "42X").b === nothing
+        @test parse(CascadeChoice, "07Y").b == 7
+        @test parse(CascadeChoice, "07Y").a === nothing
+        @test tryparse(CascadeChoice, "42Z") === nothing
+        check_roundtrips(CascadeChoice, ("00X", "99X", "00Y", "99Y"))
+    end
+    @testset "multi-byte window dispatch" begin
+        iddef = :(@defpacked MultiByteChoice (choice(("AX", :x(digits(2, pad=2))), ("AY", :y(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:58)
+        eval(iddef)
+        @test parse(MultiByteChoice, "AX42").x == 42
+        @test parse(MultiByteChoice, "AX42").y === nothing
+        @test parse(MultiByteChoice, "AY07").y == 7
+        @test parse(MultiByteChoice, "AY07").x === nothing
+        @test tryparse(MultiByteChoice, "AZ01") === nothing
+        check_roundtrips(MultiByteChoice, ("AX00", "AX99", "AY00", "AY99"))
+    end
+    @testset "four arms" begin
+        iddef = :(@defpacked FourArm (choice(
+            ("A", :a(digits(2, pad=2))), ("B", :b(digits(2, pad=2))),
+            ("C", :c(digits(2, pad=2))), ("D", :d(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:25, branch_total=25, ops=2:111)
+        eval(iddef)
+        @test parse(FourArm, "A42").a == 42
+        @test parse(FourArm, "B07").b == 7
+        @test parse(FourArm, "C99").c == 99
+        @test parse(FourArm, "D00").d == 0
+        @test parse(FourArm, "A42").b === nothing
+        @test tryparse(FourArm, "E01") === nothing
+        check_roundtrips(FourArm, ("A00", "B00", "C00", "D00", "A99", "D99"))
+    end
+    @testset "digit vs letter discrimination" begin
+        iddef = :(@defpacked DigitLetterChoice (choice((:n(digits(3, pad=3))), (letters(1), :m(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:12, branch_total=12, ops=2:68)
+        eval(iddef)
+        @test parse(DigitLetterChoice, "042").n == 42
+        @test parse(DigitLetterChoice, "042").m === nothing
+        @test parse(DigitLetterChoice, "A07").m == 7
+        @test parse(DigitLetterChoice, "A07").n === nothing
+        check_roundtrips(DigitLetterChoice, ("000", "999", "A00", "Z99"))
+    end
+    @testset "empty arm with dispatch" begin
+        iddef = :(@defpacked DispatchOpt (choice(("X", :x(digits(2, pad=2))), ("Y", :y(digits(2, pad=2))), "")))
+        @test parsebytes_complexity(iddef) == (branches=2:10, branch_total=10, ops=3:60)
+        eval(iddef)
+        @test parse(DispatchOpt, "X42").x == 42
+        @test parse(DispatchOpt, "Y07").y == 7
+        @test tryparse(DispatchOpt, "Z01") === nothing
+        @test string(tryparse(DispatchOpt, "")) == ""
+        check_roundtrips(DispatchOpt, ("X00", "X99", "Y00", "Y99"))
+    end
+    @testset "field wrapping structured choice" begin
+        iddef = :(@defpacked FieldChoice (:id(choice(("A", digits(2, pad=2)), ("B", digits(3, pad=3))))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:62)
+        eval(iddef)
+        @test parse(FieldChoice, "A42").id == "A42"
+        @test parse(FieldChoice, "B007").id == "B007"
+        @test propertynames(parse(FieldChoice, "A42")) == (:id,)
+        check_roundtrips(FieldChoice, ("A00", "A99", "B000", "B999"))
+    end
+    @testset "string choice inside arm" begin
+        iddef = :(@defpacked InnerChoice (choice((:tag(choice("alpha", "beta")), :n(digits(1))), ("X", :m(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:18, branch_total=18, ops=2:63)
+        eval(iddef)
+        @test parse(InnerChoice, "alpha3").tag == :alpha
+        @test parse(InnerChoice, "beta5").tag == :beta
+        @test parse(InnerChoice, "alpha3").n == 3
+        @test parse(InnerChoice, "X07").m == 7
+        @test parse(InnerChoice, "X07").tag === nothing
+        check_roundtrips(InnerChoice, ("alpha0", "beta9", "X00", "X99"))
+    end
+    @testset "optional inside arm" begin
+        iddef = :(@defpacked OptInArm (choice(("A", :x(digits(2, pad=2)), optional("-", :y(digits(1)))), ("B", :z(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:18, branch_total=18, ops=2:73)
+        eval(iddef)
+        @test parse(OptInArm, "A42").x == 42
+        @test parse(OptInArm, "A42").y === nothing
+        @test parse(OptInArm, "A42-5").y == 5
+        @test parse(OptInArm, "B07").z == 7
+        @test parse(OptInArm, "B07").x === nothing
+        check_roundtrips(OptInArm, ("A00", "A99-0", "A42-5", "B00", "B99"))
+    end
+    @testset "variable-length arms" begin
+        iddef = :(@defpacked VarArms (choice(("A", :x(digits(1:3))), ("B", :y(digits(2:4, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:23, branch_total=23, ops=2:115)
+        eval(iddef)
+        @test parse(VarArms, "A1").x == 1
+        @test parse(VarArms, "A123").x == 123
+        @test parse(VarArms, "B02").y == 2
+        @test parse(VarArms, "B1234").y == 1234
+        @test tryparse(VarArms, "A") === nothing
+        @test tryparse(VarArms, "B1") === nothing
+        check_roundtrips(VarArms, ("A1", "A99", "A999", "B02", "B99", "B0099", "B9999"))
+    end
+    @testset "cross-alternative dispatch" begin
+        iddef = :(@defpacked CrossAlt (choice((choice("AB", "CD"), :x(digits(1))), (choice("AD", "CB"), :y(digits(1))))))
+        @test parsebytes_complexity(iddef) == (branches=5:17, branch_total=17, ops=2:67)
+        eval(iddef)
+        @test parse(CrossAlt, "AB3").x == 3
+        @test parse(CrossAlt, "CD7").x == 7
+        @test parse(CrossAlt, "AD5").y == 5
+        @test parse(CrossAlt, "CB9").y == 9
+        @test parse(CrossAlt, "AB3").y === nothing
+        @test parse(CrossAlt, "AD5").x === nothing
+        check_roundtrips(CrossAlt, ("AB0", "CD9", "AD0", "CB9"))
+    end
+    @testset "nested: structured choice inside optional" begin
+        iddef = :(@defpacked ChoiceInOpt (:id(digits(max=99)),
+            optional("-", choice(("A", :x(digits(2, pad=2))), ("B", :y(digits(2, pad=2)))))))
+        @test parsebytes_complexity(iddef) == (branches=6:24, branch_total=24, ops=20:101)
+        eval(iddef)
+        bare = parse(ChoiceInOpt, "42")
+        @test bare.id == 42
+        @test bare.x === nothing
+        @test bare.y === nothing
+        ax = parse(ChoiceInOpt, "42-A07")
+        @test ax.id == 42
+        @test ax.x == 7
+        @test ax.y === nothing
+        by = parse(ChoiceInOpt, "42-B99")
+        @test by.y == 99
+        @test by.x === nothing
+        check_roundtrips(ChoiceInOpt, ("42", "0-A00", "99-B99"))
+    end
+end
+
 end # @testset "PackedParselets"

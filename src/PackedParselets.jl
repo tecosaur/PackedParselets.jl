@@ -9,6 +9,7 @@
 
 module PackedParselets
 
+include("bytemask.jl")
 include("types.jl")
 include("core.jl")
 include("loaders.jl")
@@ -25,7 +26,7 @@ export parsebytes, tobytes, segments, nbits, parsebounds, printbounds,
     maketype, CORE_SEGMENTS
 
 # Extension API for custom segment handlers
-public ExprVarLine, NodeCtx, PatternExprs, ParserState,
+public ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet,
     SegmentDef, SegmentOutput, SegmentBounds, SegmentCodegen, SegmentMeta,
     register_errmsg!, emit_pack, emit_extract, emit_lengthcheck,
     build_fail_expr!, unclaimed_sentinel,

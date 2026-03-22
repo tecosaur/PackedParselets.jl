@@ -115,7 +115,13 @@ function insert_length_checks!(pexprs::Vector{ExprVarLine}, branches::Vector{Par
             end
         end
     end
-    isempty(segments) && return pexprs
+    if isempty(segments)
+        # No top-level segment markers, but nested sentinels (e.g. inside
+        # structured choice arms) still need resolution.
+        strip_segment_markers!(pexprs)
+        resolve_remaining_sentinels!(pexprs, branches)
+        return pexprs
+    end
     # Pass 1b: collect inner sentinels within each segment
     sentinels = SentinelInfo[]
     for (si, seg) in enumerate(segments)

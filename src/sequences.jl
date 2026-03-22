@@ -111,13 +111,20 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::V
                           ", at most $(string(max; base, pad))"
                       else "" end)
     sentinel = if claims; SentinelSpec((0, dbits)) else nothing end
+    digit_set = if base <= 10
+        ByteSet(UInt8('0'):UInt8('0' + base - 1))
+    else
+        ByteSet(UInt8('0'):UInt8('9')) ∪ ByteSet(UInt8('A'):UInt8('A' + base - 11)) ∪
+        ByteSet(UInt8('a'):UInt8('a' + base - 11))
+    end
     value_segment_output(;
         bounds=SegmentBounds(mindigits:maxdigits, printmin:printmax, dbits, sentinel),
         fieldvar, desc=seg_desc, shortform=seg_shortform,
         argvar, base_argtype=:Integer, option,
         parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value=propvalue,
-        impart_body=body, print=print_exprs)
+        impart_body=body, print=print_exprs,
+        bytespans=[fill(digit_set, n) for n in mindigits:maxdigits])
 end
 
 function parse_digit_range(args, max, base)
@@ -354,6 +361,18 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         count = if variable; "$minlen:$maxlen" else "$maxlen" end
         "$charset × $count"
     end
+    char_set = reduce(∪, ByteSet(r) for r in ranges; init=ByteSet())
+    if cfold
+        folded = ByteSet()
+        for b in char_set
+            if UInt8('A') <= b <= UInt8('Z')
+                folded = folded ∪ ByteSet(b + 0x20)
+            elseif UInt8('a') <= b <= UInt8('z')
+                folded = folded ∪ ByteSet(b - 0x20)
+            end
+        end
+        char_set = char_set ∪ folded
+    end
     value_segment_output(;
         bounds=SegmentBounds(minlen:maxlen, minlen:maxlen, totalbits, sentinel),
         fieldvar,
@@ -363,7 +382,8 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         argvar, base_argtype=:AbstractString, option,
         parse=parse_exprs,
         extract_setup=extracts, extract_value=tostringex,
-        impart_body, print=ExprVarLine[printex])
+        impart_body, print=ExprVarLine[printex],
+        bytespans=[fill(char_set, n) for n in minlen:maxlen])
 end
 
 ## Embedded packed types

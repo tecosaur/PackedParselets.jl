@@ -97,6 +97,7 @@ struct SegmentOutput
     bounds::SegmentBounds
     codegen::SegmentCodegen
     meta::SegmentMeta
+    bytespans::Vector{Vector{ByteSet}}
 end
 
 ## SegmentDef — segment registry entry

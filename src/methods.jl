@@ -32,7 +32,7 @@ function maketype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
                         globals, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
     nctx = NodeCtx(:current_branch, root)
     nctx = NodeCtx(nctx, :casefold, casefold)
-    exprs = PatternExprs(([], [], [], []))
+    exprs = PatternExprs(([], [], [], [], Vector{ByteSet}[]))
     push!(exprs.parse, Expr(:call, :__branch_check, root.id, nothing))
     pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, pattern)
     assemble_type(exprs, state, name, segments)

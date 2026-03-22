@@ -24,9 +24,11 @@ printed forms into a string.
 
 ** Optional
 
-~optional(args...)~ wraps content that may be absent. On parse
-failure within the optional, ~pos~ is rewound and the optional is
-marked absent. Properties return ~nothing~ when absent.
+~optional(args...)~ wraps content that may be absent. Internally
+this is equivalent to ~choice(seq(args...), "")~ — a choice between
+the content and nothing. On parse failure within the optional,
+~pos~ is rewound and the optional is marked absent. Properties
+return ~nothing~ when absent.
 
 Absence is encoded via sentinels in the bit representation:
 typically by reserving a zero value or adding a presence bit. See
@@ -99,6 +101,8 @@ arguments are character ranges (='a':'z'=) or single characters.
 
 ** ~choice~
 
+*** String choice
+
 Match one of several literal strings.
 
 #+begin_src julia
@@ -117,6 +121,30 @@ hashing]] when possible, with linear scan as fallback.
 
 Empty strings in the option list make the choice optional (zero-length
 match allowed).
+
+*** Structured choice
+
+When any argument to ~choice~ is a compound pattern (tuple or call
+expression) rather than a plain string, it becomes a structured choice
+between alternative arm patterns.
+
+#+begin_src julia
+choice(
+  seq(choice("O", "P", "Q"), digits(1), alphnum(3), digits(1)),
+  seq(charset(1, 'A':'N', 'R':'Z'), digits(1), alphnum(8)))
+#+end_src
+
+Each arm is tried in order. A discriminant records which arm matched.
+Fields from non-active arms return ~nothing~. An empty string ~""~ as
+an arm matches zero bytes (equivalent to the absent case in ~optional~).
+
+#+begin_src julia
+choice(("A", :x(digits(2))), ("B", :y(digits(3))), "")
+#+end_src
+
+When the arms have a byte position where their possible values are
+disjoint, the compiler emits a dispatch table for O(1) arm selection
+instead of sequential try-and-rewind.
 
 ** ~embed~
 

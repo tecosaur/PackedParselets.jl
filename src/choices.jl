@@ -112,6 +112,9 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
     end
     sentinel = if claims; SentinelSpec((0, choicebits)) else nothing end
     pmax = maximum(ncodeunits, soptions)
+    casefold = get(nctx, :casefold, false) === true
+    arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
+                     for o in soptions]
     value_segment_output(;
         bounds=SegmentBounds(pmin:pmax, pmin:pmax, choicebits, sentinel),
         fieldvar, desc=join(soptions, " | "),
@@ -119,7 +122,8 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
         argvar, base_argtype=:Symbol, option=eopt,
         parse=parse_exprs,
         extract_setup=ExprVarLine[fextract], extract_value,
-        impart_body=impart_core, print=print_exprs)
+        impart_body=impart_core, print=print_exprs,
+        bytespans=arrangements)
 end
 
 function compile_choice_fixed(state::ParserState, nctx::NodeCtx, ctx)
@@ -132,13 +136,17 @@ function compile_choice_fixed(state::ParserState, nctx::NodeCtx, ctx)
     pmin = if allowempty; 0 else minimum(ncodeunits, soptions) end
     tlen = ncodeunits(target)
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
+    casefold = get(nctx, :casefold, false) === true
+    arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
+                     for o in soptions]
     SegmentOutput(
         SegmentBounds(pmin:maximum(ncodeunits, soptions), tlen:tlen, 0, nothing),
         SegmentCodegen(parse_exprs, ExprVarLine[], ExprVarLine[], Any[],
                        ExprVarLine[:(print(io, $target))]),
         SegmentMeta(label,
                     "Choice of literal string \"$(target)\" vs $(join(soptions, ", "))",
-                    join(soptions, " | "), nothing, nothing))
+                    join(soptions, " | "), nothing, nothing),
+        arrangements)
 end
 
 ## Matcher assembly
@@ -330,6 +338,48 @@ end
 ## Perfect hashing
 
 """
+    search_hash_families(try_fn, nopts, iT) -> (result, cost)
+
+Iterate hash families (identity, mod, shift-mod, multiply-shift-mod) for
+register type `iT` over `nopts` options. Calls `try_fn(fn, expr_fn, injective, maxval)`
+for each candidate, where `maxval` is the maximum value `fn` can return.
+`try_fn` returns `(result, cost::Int)` on success or `nothing` on failure.
+Returns the lowest-cost `(result, cost)` found, or `(nothing, typemax(Int))`
+if no hash worked.
+"""
+function search_hash_families(try_fn::F, nopts::Int, iT::DataType) where {F <: Function}
+    best = (nothing, typemax(Int))
+    accept!(result) =
+        if !isnothing(result) && last(result) < last(best)
+            best = result
+        end
+    # Identity family (injective — hash hit uniquely identifies the option)
+    accept!(try_fn(v -> v, v -> v, true, typemax(iT) % UInt64))
+    last(best) == 0 && return best
+    # Mod, shift-mod, and multiply-shift-mod families
+    one_t = one(iT)
+    for m in nopts:2*nopts
+        last(best) == 0 && break
+        mt = iT(m)
+        accept!(try_fn(v -> v % m + 1, v -> :($v % $mt + $one_t), false, UInt64(m)))
+        for k in 1:min(8 * sizeof(iT) - 1, 16)
+            last(best) == 0 && break
+            accept!(try_fn(v -> (v >> k) % m + 1, v -> :(($v >> $k) % $mt + $one_t), false, UInt64(m)))
+        end
+        for c in (0x9e3779b97f4a7c15, 0x517cc1b727220a95, 0x6c62272e07bb0142)
+            last(best) == 0 && break
+            ct = c % iT
+            for k in max(1, 8 * sizeof(iT) - 8):8 * sizeof(iT) - 1
+                last(best) == 0 && break
+                accept!(try_fn(v -> (iT(v) * ct) >> k % m + 1,
+                               v -> :(($v * $ct) >> $k % $mt + $one_t), false, UInt64(m)))
+            end
+        end
+    end
+    best
+end
+
+"""
     find_perfect_hash(options::Vector{String}, casefold::Bool)
         -> Union{NamedTuple, Nothing}
 
@@ -348,19 +398,6 @@ function find_perfect_hash(options::Vector{String}, casefold::Bool)
     nopts = length(options)
     iszero(nopts) && return nothing
     minlen = minimum(ncodeunits, options)
-    function try_hash(best, values, pos, iT, foldmask, fn, expr_fn, injective)
-        hvals = map(fn, values)
-        any(h -> h < 1, hvals) && return best
-        length(unique(hvals)) == nopts || return best
-        result = classify_hash(hvals, nopts, options, pos, iT, foldmask % iT, expr_fn)
-        isnothing(result) && return best
-        cost = result.cost + (result.ph.kind === :direct && !injective)
-        if cost < last(best)
-            (merge(result.ph, (; injective)), cost)
-        else
-            best
-        end
-    end
     # Collect discriminating window candidates
     candidates = @NamedTuple{pos::Int, iT::DataType, values::Vector{UInt64}, foldmask::UInt64}[]
     for iT in REGISTER_TYPES
@@ -389,30 +426,17 @@ function find_perfect_hash(options::Vector{String}, casefold::Bool)
     best = (nothing, typemax(Int))
     for (; pos, iT, values, foldmask) in candidates
         last(best) == 0 && break
-        # Identity family (injective — hash hit uniquely identifies the option)
-        best = try_hash(best, values, pos, iT, foldmask, v -> v, v -> v, true)
-        last(best) == 0 && continue
-        one_t = one(iT)
-        for m in nopts:2*nopts
-            last(best) == 0 && break
-            mt = iT(m)
-            best = try_hash(best, values, pos, iT, foldmask,
-                            v -> v % m + 1, v -> :($v % $mt + $one_t), false)
-            for k in 1:min(8 * sizeof(iT) - 1, 16)
-                last(best) == 0 && break
-                best = try_hash(best, values, pos, iT, foldmask,
-                                v -> (v >> k) % m + 1, v -> :(($v >> $k) % $mt + $one_t), false)
-            end
-            for c in (0x9e3779b97f4a7c15, 0x517cc1b727220a95, 0x6c62272e07bb0142)
-                last(best) == 0 && break
-                ct = c % iT
-                for k in max(1, 8 * sizeof(iT) - 8):8 * sizeof(iT) - 1
-                    last(best) == 0 && break
-                    best = try_hash(best, values, pos, iT, foldmask,
-                                    v -> (iT(v) * ct) >> k % m + 1,
-                                    v -> :(($v * $ct) >> $k % $mt + $one_t), false)
-                end
-            end
+        result = search_hash_families(nopts, iT) do fn, expr_fn, injective, _maxval
+            hvals = map(fn, values)
+            any(h -> h < 1, hvals) && return nothing
+            length(unique(hvals)) == nopts || return nothing
+            result = classify_hash(hvals, nopts, options, pos, iT, foldmask % iT, expr_fn)
+            isnothing(result) && return nothing
+            cost = result.cost + (result.ph.kind === :direct && !injective)
+            (merge(result.ph, (; injective)), cost)
+        end
+        if !isnothing(first(result)) && last(result) < last(best)
+            best = result
         end
     end
     first(best)

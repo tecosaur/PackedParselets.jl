@@ -7,7 +7,7 @@
 
 ## Digits
 
-function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
+function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
     length(args) ∈ (0, 1) || throw(ArgumentError("Expected at most one positional argument for digits, got $(length(args))"))
     base = get(nctx, :base, 10)::Int
     min = get(nctx, :min, 0)::Int
@@ -117,14 +117,14 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::V
         ByteSet(UInt8('0'):UInt8('9')) ∪ ByteSet(UInt8('A'):UInt8('A' + base - 11)) ∪
         ByteSet(UInt8('a'):UInt8('a' + base - 11))
     end
-    value_segment_output(;
-        bounds=SegmentBounds(mindigits:maxdigits, printmin:printmax, dbits, sentinel),
-        fieldvar, desc=seg_desc, shortform=seg_shortform,
-        argvar, base_argtype=:Integer, option,
-        parse=parse_exprs,
-        extract_setup=ExprVarLine[fextract], extract_value=propvalue,
-        impart_body=body, print=print_exprs,
-        bytespans=[fill(digit_set, n) for n in mindigits:maxdigits])
+    label = Symbol(chopprefix(String(fieldvar), "attr_"))
+    extract_setup = ExprVarLine[fextract]
+    seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, propvalue, body)
+    SegmentOutput(
+        SegmentBounds(mindigits:maxdigits, printmin:printmax, dbits, sentinel),
+        SegmentCodegen(parse_exprs, seg_extract, extract_setup, seg_impart, print_exprs),
+        SegmentMeta(label, seg_desc, seg_shortform, :Integer, argvar),
+        [fill(digit_set, n) for n in mindigits:maxdigits])
 end
 
 function parse_digit_range(args, max, base)
@@ -155,7 +155,7 @@ const NAMED_CHARSETS = (
     hex     = (UInt8('0'):UInt8('9'), UInt8('A'):UInt8('F')),
 )
 
-function compile_charseq(state::ParserState, nctx::NodeCtx,
+function compile_charseq(state::ParserState, nctx::NodeCtx, ::PatternExprs,
                          def::SegmentDef, args::Vector{Any})
     kind = def.name
     named = haskey(NAMED_CHARSETS, kind)
@@ -373,22 +373,21 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         end
         char_set = char_set ∪ folded
     end
-    value_segment_output(;
-        bounds=SegmentBounds(minlen:maxlen, minlen:maxlen, totalbits, sentinel),
-        fieldvar,
-        desc=string(if variable; "$minlen-$maxlen" else "$maxlen" end,
-                    " ", kind, if maxlen > 1; " characters" else " character" end),
-        shortform=seg_shortform,
-        argvar, base_argtype=:AbstractString, option,
-        parse=parse_exprs,
-        extract_setup=extracts, extract_value=tostringex,
-        impart_body, print=ExprVarLine[printex],
-        bytespans=[fill(char_set, n) for n in minlen:maxlen])
+    label = Symbol(chopprefix(String(fieldvar), "attr_"))
+    seg_desc = string(if variable; "$minlen-$maxlen" else "$maxlen" end,
+                      " ", kind, if maxlen > 1; " characters" else " character" end)
+    seg_extract, seg_impart = optional_wrap(option, argvar, extracts, tostringex, impart_body)
+    SegmentOutput(
+        SegmentBounds(minlen:maxlen, minlen:maxlen, totalbits, sentinel),
+        SegmentCodegen(parse_exprs, seg_extract, copy(extracts), seg_impart,
+                       ExprVarLine[printex]),
+        SegmentMeta(label, seg_desc, seg_shortform, :AbstractString, argvar),
+        [fill(char_set, n) for n in minlen:maxlen])
 end
 
 ## Embedded packed types
 
-function compile_embed(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Vector{Any})
+function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
     length(args) == 1 || throw(ArgumentError("embed takes exactly one argument (the type)"))
     T = Core.eval(state.mod, args[1])
     T isa DataType && T <: state.supertype && isprimitivetype(T) ||
@@ -426,13 +425,15 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::SegmentDef, args::Ve
         push!(body, emit_pack(state, Bool, true, nbits_pos))
     end
     sentinel = if claims; SentinelSpec((0, presbits)) else nothing end
-    value_segment_output(;
-        bounds=SegmentBounds(parsebounds(T)[1]:parsebounds(T)[2],
-                             printbounds(T)[1]:printbounds(T)[2],
-                             ebits + presbits, sentinel),
-        fieldvar, desc="embedded $(T)", shortform=string(T),
-        argvar, base_argtype=T, option,
-        parse=parse_exprs,
-        extract_setup=ExprVarLine[fextract], extract_value=fieldvar,
-        impart_body=body, print=ExprVarLine[:(__tobytes_print(io, $fieldvar))])
+    label = Symbol(chopprefix(String(fieldvar), "attr_"))
+    extract_setup = ExprVarLine[fextract]
+    seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, fieldvar, body)
+    SegmentOutput(
+        SegmentBounds(parsebounds(T)[1]:parsebounds(T)[2],
+                      printbounds(T)[1]:printbounds(T)[2],
+                      ebits + presbits, sentinel),
+        SegmentCodegen(parse_exprs, seg_extract, extract_setup, seg_impart,
+                       ExprVarLine[:(__tobytes_print(io, $fieldvar))]),
+        SegmentMeta(label, "embedded $(T)", string(T), T, argvar),
+        Vector{ByteSet}[])
 end

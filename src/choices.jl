@@ -14,7 +14,7 @@ Handle a `choice(...)` pattern node.
 Validates options, builds a matcher (via perfect hashing or linear scan),
 then delegates to `compile_choice_value` or `compile_choice_fixed`.
 """
-function compile_choice(state::ParserState, nctx::NodeCtx,
+function compile_choice(state::ParserState, nctx::NodeCtx, ::PatternExprs,
                         ::SegmentDef, options::Vector{Any})
     all(o -> o isa String, options) || throw(ArgumentError("Expected all options to be strings for choice"))
     ctx = choice_setup(state, nctx, options)
@@ -115,15 +115,15 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
     casefold = get(nctx, :casefold, false) === true
     arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
                      for o in soptions]
-    value_segment_output(;
-        bounds=SegmentBounds(pmin:pmax, pmin:pmax, choicebits, sentinel),
-        fieldvar, desc=join(soptions, " | "),
-        shortform=join(soptions, " | "),
-        argvar, base_argtype=:Symbol, option=eopt,
-        parse=parse_exprs,
-        extract_setup=ExprVarLine[fextract], extract_value,
-        impart_body=impart_core, print=print_exprs,
-        bytespans=arrangements)
+    label = Symbol(chopprefix(String(fieldvar), "attr_"))
+    extract_setup = ExprVarLine[fextract]
+    desc = join(soptions, " | ")
+    seg_extract, seg_impart = optional_wrap(eopt, argvar, extract_setup, extract_value, impart_core)
+    SegmentOutput(
+        SegmentBounds(pmin:pmax, pmin:pmax, choicebits, sentinel),
+        SegmentCodegen(parse_exprs, seg_extract, extract_setup, seg_impart, print_exprs),
+        SegmentMeta(label, desc, desc, :Symbol, argvar),
+        arrangements)
 end
 
 function compile_choice_fixed(state::ParserState, nctx::NodeCtx, ctx)

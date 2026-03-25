@@ -12,6 +12,15 @@
 
 ## Sentinel emission
 
+"""
+    emit_lengthcheck(state, nctx, n_expr[, n_min, n_max]) -> Expr
+
+Emit a `__length_check` sentinel that will be resolved after pattern walking.
+
+Resolves to `true` when the branch's static byte guarantee covers `n_max`,
+or to a runtime `nbytes - pos + 1 >= n_expr` check otherwise. `n_min` and
+`n_max` default to `n_expr` for fixed-width segments.
+"""
 function emit_lengthcheck(state::ParserState, nctx::NodeCtx, n_expr, n_min::Int=n_expr, n_max::Int=n_min)
     b = nctx[:current_branch]
     Expr(:call, :__length_check, b.id, b.parsed_max, n_min, n_max, n_expr)
@@ -63,8 +72,8 @@ const SegmentInfo = @NamedTuple{
     branch_id::Int,      # branch owning this segment
     parsed_min::Int,     # minimum bytes consumed by this segment
     parsed_max::Int,     # maximum bytes consumed by this segment
-    option::Any,         # optional scope symbol, or nothing if required
-    opt_label::Any,      # goto label for optional failure, or nothing
+    option::Union{Nothing, Symbol},    # optional scope symbol, or nothing if required
+    opt_label::Union{Nothing, Symbol}, # goto label for optional failure, or nothing
     desc::String,        # human-readable description for error messages
 }
 

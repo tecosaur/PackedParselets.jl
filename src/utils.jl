@@ -104,6 +104,15 @@ function parseint(::Type{I}, str::AbstractString, base::Integer, maxlen::Integer
     parseint(I, codeunits(str), 1, base, maxlen)
 end
 
+"""
+    fastparse(::Type{I}, c::Char, base) -> Union{I, Nothing}
+    fastparse(::Type{I}, str::AbstractString, base) -> Union{I, Nothing}
+
+Parse a single character or full string as an integer in the given base.
+
+Returns `nothing` on invalid input (non-digit character or incomplete parse).
+For strings, all codeunits must be consumed for the parse to succeed.
+"""
 function fastparse end
 
 function fastparse(::Type{I}, c::Char, base::Integer) where {I <: Integer}

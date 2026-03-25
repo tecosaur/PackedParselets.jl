@@ -32,7 +32,7 @@ function maketype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
                         globals, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
     nctx = NodeCtx(:current_branch, root)
     nctx = NodeCtx(nctx, :casefold, casefold)
-    exprs = PatternExprs(([], [], [], [], Vector{ByteSet}[]))
+    exprs = PatternExprs()
     push!(exprs.parse, Expr(:call, :__branch_check, root.id, nothing))
     pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, pattern)
     assemble_type(exprs, state, name, segments)
@@ -252,6 +252,8 @@ function assemble_constructor(segs::Vector{ValueSegment},
     params = [let seg = segs[si]
                   if isnothing(seg.argtype)
                       :($aname)
+                  elseif !isnothing(seg.condition)
+                      :($aname::Union{$(seg.argtype), Nothing})
                   else
                       :($aname::$(seg.argtype))
                   end
@@ -511,7 +513,7 @@ function bufprint_static(str::String)
             push!(exprs, :(buf[pos += 1] = $value))
         else
             push!(exprs,
-                  :(Base.unsafe_store!(Ptr{$iT}(pointer(buf, pos + 1)), $value)),
+                  :(Base.unsafe_store!(Ptr{$iT}(pointer(buf, pos + 1)), htol($value))),
                   :(pos += $width))
         end
     end

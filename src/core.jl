@@ -8,33 +8,45 @@
 # that every pattern handler calls to track bits, bytes, errors,
 # and segments.
 
-## Type aliases
+## Pipeline types
 
 # Hoisted optional sentinel: bit coordinates where absent = all-zero.
 const OptSentinel = @NamedTuple{position::Int, nbits::Int}
 
-# Schema for a single value-carrying pattern node in the packed representation.
-const ValueSegment = @NamedTuple{
-    nbits::Int,                            # bits consumed in packed representation
-    kind::Symbol,                          # :digits, :choice, :letters, :alphnum, :hex, :charset, :literal, :skip
-    label::Symbol,                         # attr_fieldname (inside field) or gensym (anonymous)
-    desc::String,                          # human-readable description
-    shortform::String,                     # compact pattern notation for error messages
-    argtype::Any,                          # :Integer, :Symbol, :AbstractString, or nothing (non-parameterisable)
-    argvar::Symbol,                        # gensym used as parameter placeholder in impart
-    extract::Vector{ExprVarLine},          # bits → typed value (last expr is the value)
-    impart::Vector{Any},                   # argvar → packed bits (validate + encode + orshift)
-    condition::Union{Nothing, Symbol},     # optional scope gensym, nothing if required
-}
+"""
+    ValueSegment
 
-# Accumulator for the expression vectors built during pattern walking.
-const PatternExprs = @NamedTuple{
-    parse::Vector{ExprVarLine},
-    print::Vector{ExprVarLine},
-    segments::Vector{ValueSegment},
-    properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
-    bytespans::Vector{Vector{ByteSet}},
-}
+Schema for a single value-carrying pattern node in the packed representation.
+"""
+struct ValueSegment
+    nbits::Int                            # bits consumed in packed representation
+    kind::Symbol                          # :digits, :choice, :letters, :alphnum, :hex, :charset, :literal, :skip
+    label::Symbol                         # attr_fieldname (inside field) or gensym (anonymous)
+    desc::String                          # human-readable description
+    shortform::String                     # compact pattern notation for error messages
+    argtype::Union{Symbol, DataType, Nothing}  # type annotation for constructor, or nothing (non-parameterisable)
+    argvar::Symbol                        # gensym used as parameter placeholder in impart
+    extract::Vector{ExprVarLine}          # bits → typed value (last expr is the value)
+    impart::Vector{Any}                   # argvar → packed bits (validate + encode + orshift)
+    condition::Union{Nothing, Symbol}     # optional scope gensym, nothing if required
+end
+
+"""
+    PatternExprs
+
+Accumulator for the expression vectors built during pattern walking.
+
+Choice/optional arms construct instances that share `segments` and `properties`
+with the parent while owning separate `parse`, `print`, and `bytespans` vectors.
+"""
+struct PatternExprs
+    parse::Vector{ExprVarLine}
+    print::Vector{ExprVarLine}
+    segments::Vector{ValueSegment}
+    properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}}
+    bytespans::Vector{Vector{ByteSet}}
+end
+PatternExprs() = PatternExprs([], [], [], [], [])
 
 ## Structs
 
@@ -182,42 +194,62 @@ end
 
 ## Segment and property assembly
 
-"""
-    value_segment_output(; nbits, fieldvar, desc, shortform,
-                          argvar, base_argtype, option,
-                          sentinel, parsed, printed,
-                          parse, extract_setup, extract_value,
-                          present_check, impart_body, print)
 
-Build a `SegmentOutput` for a value-carrying segment with the standard
-required/optional split: optional fields get a presence-guarded extract
-and isnothing-guarded impart.
+## Optional codegen wrapping
+
+"""
+    optional_wrap(option, argvar, extract_setup, extract_value, impart_body)
+        -> (extract::Vector{ExprVarLine}, impart::Vector{Any})
+
+Apply the standard required/optional split for value-carrying segments.
+
+In required context (`option === nothing`), returns extract and impart as-is.
+In optional context, wraps the extract value in a presence guard (`if true`)
+resolved later by `patch_optional_extracts!`, and wraps impart in an
+`isnothing` guard on the constructor argument.
+"""
+function optional_wrap(option::Union{Nothing, Symbol}, argvar::Symbol,
+                       extract_setup::Vector{ExprVarLine}, extract_value::ExprVarLine,
+                       impart_body::Vector{Any})
+    seg_extract = if isnothing(option)
+        ExprVarLine[extract_setup..., extract_value]
+    else
+        ExprVarLine[extract_setup..., :(if true; $extract_value end)]
+    end
+    seg_impart = if isnothing(option)
+        copy(impart_body)
+    else
+        Any[Expr(:if, :(!isnothing($argvar)), Expr(:block, impart_body...))]
+    end
+    seg_extract, seg_impart
+end
+
+## Extension API: SegmentOutput builder
+
+"""
+    value_segment_output(; bounds, fieldvar, desc, shortform,
+                          argvar, base_argtype, option,
+                          parse, extract_setup, extract_value,
+                          impart_body, print, [bytespans])
+
+Build a `SegmentOutput` for a value-carrying segment, applying the standard
+required/optional wrapping. Intended for extension segment handlers;
+core handlers construct `SegmentOutput` directly.
 """
 function value_segment_output(;
         bounds::SegmentBounds,
         fieldvar::Symbol, desc::String, shortform::String,
-        argvar::Symbol, base_argtype::Any, option::Union{Nothing, Symbol},
+        argvar::Symbol, base_argtype::Union{Symbol, DataType}, option::Union{Nothing, Symbol},
         parse::Vector{ExprVarLine},
-        extract_setup::Vector{ExprVarLine}, extract_value::Any,
-        present_check::Any = true,
+        extract_setup::Vector{ExprVarLine}, extract_value::ExprVarLine,
         impart_body::Vector{Any}, print::Vector{ExprVarLine},
         bytespans::Vector{Vector{ByteSet}} = Vector{ByteSet}[])
-    seg_extract = if isnothing(option)
-        ExprVarLine[extract_setup..., extract_value]
-    else
-        ExprVarLine[extract_setup..., :(if $present_check; $extract_value end)]
-    end
-    seg_impart, seg_argtype = if isnothing(option)
-        copy(impart_body), base_argtype
-    else
-        wrapped = Expr(:if, :(!isnothing($argvar)), Expr(:block, impart_body...))
-        Any[wrapped], :(Union{$base_argtype, Nothing})
-    end
+    seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, extract_value, impart_body)
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     SegmentOutput(
         bounds,
         SegmentCodegen(parse, seg_extract, copy(extract_setup), seg_impart, print),
-        SegmentMeta(label, desc, shortform, seg_argtype, argvar),
+        SegmentMeta(label, desc, shortform, base_argtype, argvar),
         bytespans)
 end
 
@@ -241,6 +273,7 @@ end
 
 ## Bit packing
 
+# zext_int requires output > input size, so 1-byte types need bitcast instead.
 function zero_int(@nospecialize(T::DataType))
     if sizeof(T) == 1
         Core.bitcast(T, 0x00)
@@ -256,11 +289,25 @@ zero_parsed_expr(state::ParserState) =
         :(Core.Intrinsics.zext_int($(esc(state.name)), 0x0))
     end
 
+"""
+    emit_pack(state, type, value, shift) -> Expr
+
+Emit an expression that OR-packs `value` (cast from `type` to the target
+primitive type) into the `parsed` accumulator at bit position `shift`
+(counted from MSB).
+"""
 function emit_pack(state::ParserState, type::Type, value::Union{Symbol, Expr, Bool}, shift::Int)
     valcast = Expr(:call, :__cast_to_id, type, value)
     :(parsed = Core.Intrinsics.or_int(parsed, Core.Intrinsics.shl_int($valcast, (8 * sizeof($(esc(state.name))) - $shift))))
 end
 
+"""
+    emit_extract(state, position, width[, fT]) -> Expr
+
+Emit an expression that extracts `width` bits ending at bit `position`
+(from MSB) from `id`, returning a value of type `fT` (defaults to
+`cardtype(width)`).
+"""
 function emit_extract(state::ParserState, position::Int, width::Int,
                             fT::Type=cardtype(width))
     fTbits = 8 * sizeof(fT)
@@ -350,8 +397,15 @@ function opt_fail_expr(flag::Symbol, label::Symbol)
     Expr(:block, :($flag = false), :(@goto $label))
 end
 
-# Build a parse-failure expression: `return (erridx, pos)` in required context,
-# `opt_fail_expr(...)` inside an optional scope.
+"""
+    build_fail_expr!(state, nctx, msg) -> Expr
+
+Build a parse-failure expression appropriate to the current scope.
+
+In required context, registers `msg` as an error and returns
+`:(return (erridx, pos))`. Inside an optional scope, returns an expression
+that sets the optional flag to `false` and jumps to the cleanup label.
+"""
 function build_fail_expr!(state::ParserState, nctx::NodeCtx, msg::String)
     option = get(nctx, :optional, nothing)
     if isnothing(option)
@@ -364,6 +418,13 @@ end
 
 ## Optional sentinel helpers
 
+"""
+    unclaimed_sentinel(nctx) -> Bool
+
+Return `true` when an enclosing optional scope has a sentinel reference
+that has not yet been claimed by a value segment. Segment handlers call
+this to decide whether to offer their zero-encoding as the absence sentinel.
+"""
 unclaimed_sentinel(nctx::NodeCtx) =
     (ref = get(nctx, :optional_sentinel, nothing)) !== nothing && ref[] === nothing
 
@@ -416,10 +477,10 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     append!(exprs.print, codegen.print)
     # Segment registration (ValueSegment for compatibility)
     argvar = if isnothing(meta.argvar); :_ else meta.argvar end
-    push!(exprs.segments, ValueSegment((
+    push!(exprs.segments, ValueSegment(
         bounds.nbits, kind, meta.label, meta.desc, meta.shortform,
         meta.argtype, argvar,
-        codegen.extract, codegen.impart, option)))
+        codegen.extract, codegen.impart, option))
     push!(exprs.print, :(__segment_printed = $(length(exprs.segments))))
     # Store for assembly-phase use
     push!(state.segment_outputs, kind => output)

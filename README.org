@@ -31,7 +31,7 @@ regular expressions, and no exceptions on the hot path.
 From a single pattern you get:
 + A ~primitive type~ with optimal bit-width storage
 + A speedy ~parsebytes~ function
-+ ~print~, ~string~, ~show~, ~isless~, and a positional constructors
++ ~print~, ~string~, ~show~, ~isless~, and a positional constructor
 + Named property access for captured fields
 + Segment introspection (~segments(T)~, ~segments(instance)~)
 

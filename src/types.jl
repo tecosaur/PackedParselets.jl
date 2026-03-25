@@ -69,7 +69,7 @@ Metadata describing a segment for introspection and error messages.
 - `label`: field name (from :fieldvar context) or gensym for anonymous segments
 - `desc`: human-readable description for error messages
 - `shortform`: compact pattern notation (e.g. "0-9 x 4")
-- `argtype`: constructor parameter type (:Integer, :Symbol, :AbstractString, or nothing)
+- `argtype`: constructor parameter type annotation (Symbol, DataType, or nothing)
 - `argvar`: gensym used as parameter placeholder in impart (nothing for non-value segments)
 - `context`: handler-specific data for finalize hooks (nothing by default)
 """
@@ -77,7 +77,7 @@ struct SegmentMeta
     label::Symbol                # field name or gensym for anonymous
     desc::String                 # human-readable description
     shortform::String            # compact pattern notation for error messages
-    argtype::Any                 # :Integer, :Symbol, :AbstractString, or nothing
+    argtype::Union{Symbol, DataType, Nothing}  # type annotation for constructor, or nothing
     argvar::Union{Nothing, Symbol} # parameter placeholder in impart
     context::Any                 # handler-specific data for finalize hooks
 end
@@ -108,7 +108,7 @@ end
 Description of a non-structural pattern node in the segment registry.
 
 - `name`: pattern node name (e.g. :digits, :choice), used as the registry key
-- `compile`: handler function with signature `(state, nctx, def, args) -> SegmentOutput`
+- `compile`: handler function with signature `(state, nctx, exprs, def, args) -> SegmentOutput`
 - `kwargs`: keyword argument names accepted by this segment (for validation)
 - `finalize`: optional post-assembly hook `(block, exprs, state, name) -> nothing`
 """

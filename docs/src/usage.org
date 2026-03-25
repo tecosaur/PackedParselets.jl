@@ -35,22 +35,22 @@ before evaluating the block.
 
 For a type ~T~ created by ~maketype~:
 
-| Method                     | Description                        |                |
-|----------------------------+------------------------------------+----------------|
-| ~parsebytes(T, bytes)~       | Parse byte vector, return =(T      | errcode, pos)= |
-| ~T(field1, field2, ...)~     | Positional constructor             |                |
-| ~string(::T)~                | Canonical string form              |                |
-| ~print(io, ::T)~             | Print to IO                        |                |
-| ~show(io, ::T)~              | Constructor form or compact form   |                |
-| ~isless(::T, ::T)~           | Unsigned bit comparison            |                |
-| ~propertynames(::T)~         | Field names                        |                |
-| ~getproperty(::T, ::Symbol)~ | Field access                       |                |
-| ~tobytes(::T)~               | Returns =(Memory{UInt8}, length)=    |                |
-| ~nbits(T)~                   | Logical bit width                  |                |
-| ~parsebounds(T)~             | =(min_bytes, max_bytes)= for parsing |                |
-| ~printbounds(T)~             | =(min_bytes, max_bytes)= for output  |                |
-| ~segments(T)~                | Type-level schema                  |                |
-| ~segments(::T)~              | Instance-level values              |                |
+| Method                     | Description                                  |
+|----------------------------+----------------------------------------------|
+| ~parsebytes(T, bytes)~       | Parse byte vector, return =(T/errcode, pos)= |
+| ~T(field1, field2, ...)~     | Positional constructor                       |
+| ~string(::T)~                | Canonical string form                        |
+| ~print(io, ::T)~             | Print to IO                                  |
+| ~show(io, ::T)~              | Constructor form or compact form             |
+| ~isless(::T, ::T)~           | Unsigned bit comparison                      |
+| ~propertynames(::T)~         | Field names                                  |
+| ~getproperty(::T, ::Symbol)~ | Field access                                 |
+| ~tobytes(::T)~               | Returns =(Memory{UInt8}, length)=             |
+| ~nbits(T)~                   | Logical bit width                            |
+| ~parsebounds(T)~             | =(min_bytes, max_bytes)= for parsing          |
+| ~printbounds(T)~             | =(min_bytes, max_bytes)= for output           |
+| ~segments(T)~                | Type-level schema                            |
+| ~segments(::T)~              | Instance-level values                        |
 
 ~parsebytes~ returns either an instance of ~T~ (on success) or an
 integer error index (on failure), paired with the byte position

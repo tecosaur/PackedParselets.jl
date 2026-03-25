@@ -510,7 +510,7 @@ end
 # --- Extension API: custom timestamp segment ---
 
 @testset "custom segment (timestamp)" begin
-    function compile_timestamp(state::PP.ParserState, nctx::PP.NodeCtx,
+    function compile_timestamp(state::PP.ParserState, nctx::PP.NodeCtx, ::PP.PatternExprs,
                                ::PP.SegmentDef, args::Vector{Any})
         isempty(args) || throw(ArgumentError("timestamp takes no arguments"))
         option = get(nctx, :optional, nothing)

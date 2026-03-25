@@ -143,8 +143,9 @@ choice(("A", :x(digits(2))), ("B", :y(digits(3))), "")
 #+end_src
 
 When the arms have a byte position where their possible values are
-disjoint, the compiler emits a dispatch table for O(1) arm selection
-instead of sequential try-and-rewind.
+disjoint (e.g. the first byte is ~"A"~ in one arm and ~"B"~ in another),
+the compiler emits a dispatch table for O(1) arm selection instead of
+sequential try-and-rewind.
 
 ** ~embed~
 

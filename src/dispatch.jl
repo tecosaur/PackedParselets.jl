@@ -35,12 +35,7 @@ function pattern_dispatch!(exprs::PatternExprs,
         pattern_choice!(exprs, state, nctx, segments, global_kwargs, args)
     elseif haskey(segments, node)
         def = getfield(segments, node)
-        # Some segments (e.g. checkdigit) need exprs for field resolution
-        output = if def.compile isa Function && applicable(def.compile, exprs, state, nctx, def, args)
-            def.compile(exprs, state, nctx, def, args)
-        else
-            def.compile(state, nctx, def, args)
-        end
+        output = def.compile(state, nctx, exprs, def, args)
         if node === :skip && isempty(output.meta.desc)
             # Skip without print: apply parse codegen and byte bounds only
             append!(exprs.parse, output.codegen.parse)
@@ -92,7 +87,7 @@ function pattern_dispatch!(exprs::PatternExprs,
         pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, name, args)
     elseif thing isa String
         def = getfield(segments, :literal)
-        output = def.compile(state, nctx, def, Any[thing])
+        output = def.compile(state, nctx, exprs, def, Any[thing])
         process_segment_output!(exprs, state, nctx, :literal, output)
     end
 end
@@ -257,9 +252,8 @@ function pattern_choice_optional!(exprs::PatternExprs,
     nctx = NodeCtx(nctx, :optional_sentinel, sentinel_ref)
     seg_start = length(exprs.segments)
     bits_before = state.bits
-    oexprs = (; parse = ExprVarLine[], print = ExprVarLine[],
-                 segments = exprs.segments, properties = exprs.properties,
-                 bytespans = Vector{ByteSet}[])
+    oexprs = PatternExprs(ExprVarLine[], ExprVarLine[],
+                          exprs.segments, exprs.properties, Vector{ByteSet}[])
     walk_choice_arm!(oexprs, state, nctx, segments, global_kwargs, arm)
     if sentinel_ref[] === nothing
         flag_nbits = (state.bits += 1)
@@ -316,9 +310,8 @@ function pattern_choice_multi!(exprs::PatternExprs,
         arm_nctx = NodeCtx(arm_nctx, :current_branch, child)
         seg_start = length(exprs.segments)
         bits_before = state.bits
-        oexprs = (; parse = ExprVarLine[], print = ExprVarLine[],
-                     segments = exprs.segments, properties = exprs.properties,
-                     bytespans = Vector{ByteSet}[])
+        oexprs = PatternExprs(ExprVarLine[], ExprVarLine[],
+                              exprs.segments, exprs.properties, Vector{ByteSet}[])
         if arm != ""
             walk_choice_arm!(oexprs, state, arm_nctx, segments, global_kwargs, arm)
         end

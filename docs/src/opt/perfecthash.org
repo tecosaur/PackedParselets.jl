@@ -32,10 +32,11 @@ one that produces unique outputs in a small range. In order of preference:
 + Shift-mod :: (/v/ >> /k/) mod /m/ + 1.
 + Multiply-shift-mod :: (/v/ \times /c/) >> /k/ mod /m/ + 1 with well-chosen constants.
 
-The search stops at the first perfect hash found. The hash-to-index mapping is
-then classified as /direct/ (hash values are consecutive, so the index is a
-single subtraction) or /table/ (a compile-time tuple maps hash values to option
-indices). The search prefers direct mappings and stops early when one is found.
+The search is cost-ranked across all candidates and hash families, keeping the
+lowest-cost result. The hash-to-index mapping is classified as /direct/ (hash
+values are consecutive, so the index is a single subtraction) or /table/ (a
+compile-time tuple maps hash values to option indices). Direct mappings cost
+less, and the search stops early when an optimal (zero-cost) hash is found.
 
 * Verification
 

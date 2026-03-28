@@ -1865,6 +1865,56 @@ end
             check_roundtrips(SuffixChoice, ("alpha/0", "alpha/999", "beta/42", "delta/1"))
             @test_neverthrow PP.parsebytes(SuffixChoice, ::Vector{UInt8})
         end
+        @testset "StringChoice (type=String)" begin
+            iddef = :(@defpacked StringChoice (:kind(choice("alpha", "beta", "gamma", type=String)),
+                       "-", :id(digits(max=999))))
+            @test parsebytes_complexity(iddef) == (branches=6:9, branch_total=9, ops=47:52)
+            eval(iddef)
+            # Extract returns String, not Symbol
+            id = parse(StringChoice, "alpha-42")
+            @test id.kind == "alpha"
+            @test id.kind isa String
+            @test id.id == 42
+            # Constructor accepts strings
+            @test StringChoice("beta", 99) == parse(StringChoice, "beta-99")
+            @test StringChoice("gamma", 0).kind == "gamma"
+            @test_throws ArgumentError StringChoice("delta", 1)
+            # Round-trips
+            check_roundtrips(StringChoice, ("alpha-0", "beta-500", "gamma-999"))
+            # Show uses string quoting
+            @test occursin("\"alpha\"", sprint(show, id))
+            @test_neverthrow PP.parsebytes(StringChoice, ::Vector{UInt8})
+        end
+
+        @testset "StringChoiceOpt (type=String, optional)" begin
+            iddef = :(@defpacked StringChoiceOpt (:id(digits(max=99)),
+                       optional("-", :tag(choice("rc", "dev", "final", type=String)))))
+            @test parsebytes_complexity(iddef) == (branches=6:16, branch_total=16, ops=20:57)
+            eval(iddef)
+            present = parse(StringChoiceOpt, "42-rc")
+            @test present.tag == "rc"
+            @test present.tag isa String
+            absent = parse(StringChoiceOpt, "42")
+            @test absent.tag === nothing
+            # Constructor
+            @test StringChoiceOpt(42, "dev") == parse(StringChoiceOpt, "42-dev")
+            @test StringChoiceOpt(42, nothing) == parse(StringChoiceOpt, "42")
+            check_roundtrips(StringChoiceOpt, ("1-rc", "99-dev", "50-final", "0"))
+            @test_neverthrow PP.parsebytes(StringChoiceOpt, ::Vector{UInt8})
+        end
+
+        @testset "SymbolChoiceExplicit (type=Symbol explicit)" begin
+            iddef = :(@defpacked SymbolChoiceExplicit (:kind(choice("x", "y", "z", type=Symbol)),
+                       :n(digits(2))))
+            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=22:23)
+            eval(iddef)
+            id = parse(SymbolChoiceExplicit, "x01")
+            @test id.kind === :x
+            @test id.kind isa Symbol
+            check_roundtrips(SymbolChoiceExplicit, ("x01", "y99", "z00"))
+            @test_neverthrow PP.parsebytes(SymbolChoiceExplicit, ::Vector{UInt8})
+        end
+
     end # choice
 
     @testset "skip" begin

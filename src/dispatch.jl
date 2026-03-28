@@ -14,7 +14,7 @@ const CORE_SEGMENTS = (
     hex     = SegmentDef(:hex,        compile_charseq,  (:upper, :lower, :casefold)),
     charset = SegmentDef(:charset,    compile_charseq,  (:upper, :lower, :casefold)),
     embed   = SegmentDef(:embed,      compile_embed,    ()),
-    choice  = SegmentDef(:choice,     compile_choice,   (:casefold, :is)),
+    choice  = SegmentDef(:choice,     compile_choice,   (:casefold, :is, :type)),
 )
 
 ## Pattern dispatch

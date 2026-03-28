@@ -71,12 +71,15 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
               end
           end)
     end
+    valtype = get(nctx, :type, :Symbol)
+    valtype in (:Symbol, :String) ||
+        throw(ArgumentError("choice type must be Symbol or String, got $valtype"))
     (; soptions, fieldvar, option, allowempty, choicebits, choiceint,
-       checkedmatch, matcher, target, claims)
+       checkedmatch, matcher, target, claims, valtype)
 end
 
 function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
-    (; soptions, fieldvar, option, allowempty, choicebits, choiceint, checkedmatch, claims) = ctx
+    (; soptions, fieldvar, option, allowempty, choicebits, choiceint, checkedmatch, claims, valtype) = ctx
     # Compute bit position without mutating state.bits
     nbits_pos = state.bits + choicebits
     pmin = if allowempty; 0 else minimum(ncodeunits, soptions) end
@@ -85,7 +88,6 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
           checkedmatch,
           emit_pack(state, choiceint, fieldvar, nbits_pos)]
     fextract = :($fieldvar = $(emit_extract(state, nbits_pos, choicebits)))
-    symoptions = Tuple(Symbol.(soptions))
     present = :(!iszero($fieldvar))
     printexpr = :(print(io, @inbounds $(Tuple(soptions))[$fieldvar]))
     # When allowempty without an enclosing optional, guard print on presence
@@ -95,14 +97,9 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
               printexpr
           end]
     argvar = gensym("arg_choice")
-    impart_core = Any[
-        :($fieldvar = let idx = findfirst(==(Symbol($argvar)), $symoptions)
-              isnothing(idx) && throw(ArgumentError(
-                  string("Invalid option :", $argvar, "; expected one of: ", $(join(soptions, ", ")))))
-              idx % $choiceint
-          end),
-        emit_pack(state, choiceint, fieldvar, nbits_pos)]
-    extract_value = :(@inbounds $(symoptions)[$fieldvar])
+    # Extract value and impart (constructor) logic depend on the user-facing type
+    extract_value, impart_core, argtype = choice_value_codegen(
+        valtype, soptions, fieldvar, argvar, choiceint, nbits_pos, state)
     # For allowempty without an enclosing optional, wrap extract in a presence guard
     eopt = if allowempty && isnothing(option)
         extract_value = :(if $present; $extract_value end)
@@ -122,8 +119,35 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
     SegmentOutput(
         SegmentBounds(pmin:pmax, pmin:pmax, choicebits, sentinel),
         SegmentCodegen(parse_exprs, seg_extract, extract_setup, seg_impart, print_exprs),
-        SegmentMeta(label, desc, desc, :Symbol, argvar),
+        SegmentMeta(label, desc, desc, argtype, argvar),
         arrangements)
+end
+
+function choice_value_codegen(valtype::Symbol, soptions, fieldvar, argvar,
+                               choiceint, nbits_pos, state)
+    if valtype === :Symbol
+        symoptions = Tuple(Symbol.(soptions))
+        extract_value = :(@inbounds $(symoptions)[$fieldvar])
+        impart_core = Any[
+            :($fieldvar = let idx = findfirst(==(Symbol($argvar)), $symoptions)
+                  isnothing(idx) && throw(ArgumentError(
+                      string("Invalid option :", $argvar, "; expected one of: ", $(join(soptions, ", ")))))
+                  idx % $choiceint
+              end),
+            emit_pack(state, choiceint, fieldvar, nbits_pos)]
+        (extract_value, impart_core, :Symbol)
+    else # :String
+        stroptions = Tuple(soptions)
+        extract_value = :(@inbounds $(stroptions)[$fieldvar])
+        impart_core = Any[
+            :($fieldvar = let idx = findfirst(==(String($argvar)), $stroptions)
+                  isnothing(idx) && throw(ArgumentError(
+                      string("Invalid option \"", $argvar, "\"; expected one of: ", $(join(soptions, ", ")))))
+                  idx % $choiceint
+              end),
+            emit_pack(state, choiceint, fieldvar, nbits_pos)]
+        (extract_value, impart_core, :AbstractString)
+    end
 end
 
 function compile_choice_fixed(state::ParserState, nctx::NodeCtx, ctx)

@@ -28,16 +28,22 @@ are lowercased before matching. Returns `(chars_consumed, packed_value)`.
 """
 function parsechars(::Type{P}, bytes::AbstractVector{UInt8}, pos::Int, maxlen::Int,
                     ranges::NTuple{N, UnitRange{UInt8}},
-                    casefold::Bool, oneindexed::Bool = false) where {P <: Unsigned, N}
+                    casefold::Bool, oneindexed::Bool = false,
+                    skip::NTuple{S, UInt8} = ()) where {P <: Unsigned, N, S}
     nvals = sum(length, ranges)
     bpc = cardbits(nvals + oneindexed)
     packed = zero(P)
-    endpos = min(pos + maxlen, length(bytes) + 1)
-    pos > length(bytes) && return 0, packed
+    endpos = if iszero(S); min(pos + maxlen, length(bytes) + 1) else length(bytes) + 1 end
+    pos > length(bytes) && return if iszero(S); (0, packed) else (0, packed, 0) end
     offset = UInt8(oneindexed)
     nread = 0
-    @inbounds while pos < endpos
+    startpos = pos
+    @inbounds while pos < endpos && nread < maxlen
         b = bytes[pos]
+        if !iszero(S) && b in skip
+            pos += 1
+            continue
+        end
         casefold && (b |= 0x20)
         idx = 0xff % UInt8
         base = offset
@@ -55,7 +61,11 @@ function parsechars(::Type{P}, bytes::AbstractVector{UInt8}, pos::Int, maxlen::I
         nread += 1
         pos += 1
     end
-    nread, packed
+    if iszero(S)
+        nread, packed
+    else
+        nread, packed, pos - startpos
+    end
 end
 
 function parsechars(::Type{P}, str::AbstractString, maxlen::Int,
@@ -81,23 +91,40 @@ function byte2int(b::UInt8, base::Integer)
     end
 end
 
-function parseint(::Type{I}, bytes::AbstractVector{UInt8}, pos::Int, base::Integer, maxlen::Integer) where {I <: Unsigned}
+function parseint(::Type{I}, bytes::AbstractVector{UInt8}, pos::Int, base::Integer,
+                  maxlen::Integer, skip::NTuple{S, UInt8} = ()) where {I <: Unsigned, S}
     num = zero(I)
     nread = 0
-    endpos = min(pos + maxlen, length(bytes) + 1)
-    pos > length(bytes) && return 0, zero(I)
-    # `while` is measurably faster than `for` here (~4ns vs ~7ns)
+    nbytes = length(bytes)
+    endpos = min(pos + maxlen, nbytes + 1)
+    pos > nbytes && return if iszero(S); (0, zero(I)) else (0, zero(I), 0) end
+    startpos = pos
+    # `while true` is measurably faster than `while cond` (~4ns vs ~7ns)
     @inbounds while true
-        digit = byte2int(bytes[pos], base)
-        digit == 0xff && return nread, num
+        b = bytes[pos]
+        if !iszero(S) && b in skip
+            pos += 1
+            pos <= nbytes || break
+            continue
+        end
+        digit = byte2int(b, base)
+        digit == 0xff && break
         numnext = muladd(widen(num), base % I, digit)
-        iszero(numnext & ~widen(typemax(I))) || return 0, zero(I)
+        iszero(numnext & ~widen(typemax(I))) || return if iszero(S); (0, zero(I)) else (0, zero(I), 0) end
         num = numnext % I
         nread += 1
         pos += 1
-        pos < endpos || break
+        if iszero(S)
+            pos < endpos || break
+        else
+            nread < maxlen && pos <= nbytes || break
+        end
     end
-    nread, num
+    if iszero(S)
+        nread, num
+    else
+        nread, num, pos - startpos
+    end
 end
 
 function parseint(::Type{I}, str::AbstractString, base::Integer, maxlen::Integer) where {I <: Unsigned}

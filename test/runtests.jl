@@ -2679,6 +2679,69 @@ end # charset
     end
 end # embed
 
+@testset "skip kwarg" begin
+    @testset "digits with skip (ORCID-like)" begin
+        iddef = :(@defpacked OrcidLike (:id(digits(16, skip="-"))))
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        eval(iddef)
+        # Parse with hyphens
+        @test parse(OrcidLike, "0000-0002-1825-0097").id == 21825_0097
+        # Parse without hyphens
+        @test parse(OrcidLike, "0000000218250097").id == 21825_0097
+        # Parse with hyphens in non-standard positions
+        @test parse(OrcidLike, "00000002-18250097").id == 21825_0097
+        # Round-trip prints without hyphens (no canonical grouping)
+        @test string(parse(OrcidLike, "0000-0002-1825-0097")) == "0000000218250097"
+        # Too few digits
+        @test tryparse(OrcidLike, "0000-0002-1825") === nothing
+        check_roundtrips(OrcidLike, ("0000000218250097", "9999999999999999"))
+        @test_neverthrow PP.parsebytes(OrcidLike, ::Vector{UInt8})
+    end
+    @testset "hex with skip (UUID-like)" begin
+        iddef = :(@defpacked UuidLike ("X", :id(hex(8, skip="-"))))
+        @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=9:9)
+        eval(iddef)
+        @test parse(UuidLike, "X550e-8400").id == "550E8400"
+        @test parse(UuidLike, "X550E8400").id == "550E8400"
+        @test parse(UuidLike, "X550e-8400") == parse(UuidLike, "X550E8400")
+        @test tryparse(UuidLike, "X550e84") === nothing
+        check_roundtrips(UuidLike, ("X550E8400", "XDEADBEEF", "X00000000"))
+        @test_neverthrow PP.parsebytes(UuidLike, ::Vector{UInt8})
+    end
+    @testset "letters with skip" begin
+        iddef = :(@defpacked SkipLetters (:code(letters(4, skip="."))))
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        eval(iddef)
+        @test parse(SkipLetters, "AB.CD").code == "ABCD"
+        @test parse(SkipLetters, "ABCD").code == "ABCD"
+        @test parse(SkipLetters, "A.B.C.D").code == "ABCD"
+        @test tryparse(SkipLetters, "ABC") === nothing
+        check_roundtrips(SkipLetters, ("ABCD", "ZZZZ", "ABAB"))
+        @test_neverthrow PP.parsebytes(SkipLetters, ::Vector{UInt8})
+    end
+    @testset "digits with multi-char skip" begin
+        iddef = :(@defpacked MultiSkipDigits (:id(digits(8, skip="- "))))
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        eval(iddef)
+        @test parse(MultiSkipDigits, "1234-5678").id == 12345678
+        @test parse(MultiSkipDigits, "1234 5678").id == 12345678
+        @test parse(MultiSkipDigits, "12-34 56-78").id == 12345678
+        @test parse(MultiSkipDigits, "12345678").id == 12345678
+        check_roundtrips(MultiSkipDigits, ("12345678", "00000000", "99999999"))
+        @test_neverthrow PP.parsebytes(MultiSkipDigits, ::Vector{UInt8})
+    end
+    @testset "digits skip with literal context" begin
+        iddef = :(@defpacked SkipCtx ("ID:", :num(digits(4, skip="-")), "/end"))
+        @test parsebytes_complexity(iddef) == (branches=4:5, branch_total=5, ops=12:13)
+        eval(iddef)
+        @test parse(SkipCtx, "ID:1234/end").num == 1234
+        @test parse(SkipCtx, "ID:12-34/end").num == 1234
+        @test tryparse(SkipCtx, "ID:12-34") === nothing
+        check_roundtrips(SkipCtx, ("ID:1234/end", "ID:0000/end", "ID:9999/end"))
+        @test_neverthrow PP.parsebytes(SkipCtx, ::Vector{UInt8})
+    end
+end # skip kwarg
+
 @testset "Case folding" begin
     iddef = :(@defpacked CaseFolded2 ("Pfx:", :id(digits(max=999))))
     @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=36:36)

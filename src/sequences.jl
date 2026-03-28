@@ -5,6 +5,19 @@
 # (letters, alphnum, hex, charset), and embedded identifier types. These
 # return SegmentOutput and let process_segment_output! handle framework mutations.
 
+## Skip kwarg
+
+# Parse the `skip` keyword into a Tuple{UInt8...} expression for codegen.
+# Accepts a string of characters to skip (e.g. "-" or "- .").
+function parse_skip_kwarg(nctx::NodeCtx)
+    raw = get(nctx, :skip, nothing)
+    isnothing(raw) && return nothing
+    raw isa String || throw(ArgumentError("skip must be a string of characters to skip, got $raw"))
+    all(isascii, raw) || throw(ArgumentError("skip characters must be ASCII"))
+    isempty(raw) && return nothing
+    Tuple(map(UInt8, codeunits(raw)))
+end
+
 ## Digits
 
 function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
@@ -16,6 +29,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
         max = Core.eval(state.mod, max)::Int
     end
     pad = get(nctx, :pad, 0)::Int
+    skipbytes = parse_skip_kwarg(nctx)
     mindigits, maxdigits = parse_digit_range(args, max, base)
     if min > 0
         mindigits = Base.max(mindigits, ndigits(min; base))
@@ -37,12 +51,18 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad)
     printmax = Base.max(ndigits(max; base), pad, fixedpad)
     # gen_digit_parse reads parsed_min for SWAR safety, so call before process_segment_output! updates bounds
-    dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims)
+    dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims, skipbytes)
     parsed = gen_digit_parse(state, nctx, fieldvar, option, dspec)
     fnum = Symbol("$(fieldvar)_num")
     bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     (; parsevar, directvar) = parsed
-    posadv = ifelse(fixedwidth, maxdigits, bitsconsumed)
+    posadv = if !isnothing(skipbytes)
+        Symbol("$(fieldvar)_scanned")
+    elseif fixedwidth
+        maxdigits
+    else
+        bitsconsumed
+    end
     parse_exprs = ExprVarLine[parsed.exprs...,
         emit_pack(state, dT, parsevar, nbits_pos), :(pos += $posadv)]
     fextract = :($fnum = $(emit_extract(state, nbits_pos, dbits)))
@@ -120,11 +140,25 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     extract_setup = ExprVarLine[fextract]
     seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, propvalue, body)
+    has_skip = !isnothing(skipbytes)
+    # Practical upper bound: at most one of each skip char kind between
+    # value chars (and at boundaries). Pathological inputs with runs of
+    # skip chars may exceed this, but such inputs are degenerate.
+    parsed_max = if has_skip
+        (maxdigits + 1) * (length(skipbytes) + 1)
+    else
+        maxdigits
+    end
+    bytespans = if has_skip
+        Vector{ByteSet}[]
+    else
+        [fill(digit_set, n) for n in mindigits:maxdigits]
+    end
     SegmentOutput(
-        SegmentBounds(mindigits:maxdigits, printmin:printmax, dbits, sentinel),
+        SegmentBounds(mindigits:parsed_max, printmin:printmax, dbits, sentinel),
         SegmentCodegen(parse_exprs, seg_extract, extract_setup, seg_impart, print_exprs),
         SegmentMeta(label, seg_desc, seg_shortform, :Integer, argvar),
-        [fill(digit_set, n) for n in mindigits:maxdigits])
+        bytespans)
 end
 
 function parse_digit_range(args, max, base)
@@ -168,7 +202,8 @@ function compile_charseq(state::ParserState, nctx::NodeCtx, ::PatternExprs,
     minlen, maxlen = parse_charseq_length(first(args), kind)
     base_ranges = named ? NAMED_CHARSETS[kind] : parse_charset_ranges(args)
     ranges, cfold = resolve_charseq_flags(state, nctx, kind, base_ranges)
-    compile_charseq_impl(state, nctx, minlen, maxlen, ranges, cfold, kind)
+    skipbytes = parse_skip_kwarg(nctx)
+    compile_charseq_impl(state, nctx, minlen, maxlen, ranges, cfold, kind, skipbytes)
 end
 
 function parse_charseq_length(arg, kind::Symbol)
@@ -258,8 +293,10 @@ end
 function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
                               minlen::Int, maxlen::Int,
                               ranges::Vector{UnitRange{UInt8}},
-                              cfold::Bool, kind::Symbol)
+                              cfold::Bool, kind::Symbol,
+                              skipbytes::Union{Nothing, NTuple{<:Any, UInt8}} = nothing)
     ranges = Tuple(ranges)  # runtime functions dispatch on NTuple
+    has_skip = !isnothing(skipbytes)
     variable = minlen != maxlen
     option = get(nctx, :optional, nothing)
     nvals = sum(length, ranges)
@@ -292,8 +329,14 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     else
         "Expected $maxlen $kind characters"
     end)
-    parse_exprs = ExprVarLine[
-        :(($lenvar, $charvar) = parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
+    scannedvar = Symbol("$(fieldvar)_scanned")
+    parse_exprs = if has_skip
+        ExprVarLine[:(($lenvar, $charvar, $scannedvar) =
+            parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes))]
+    else
+        ExprVarLine[:(($lenvar, $charvar) =
+            parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
+    end
     if !isnothing(option) && variable && minlen == 0
         push!(parse_exprs, :($lenvar > 0 || $notfound))
     else
@@ -302,7 +345,8 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
                     $notfound
                 end))
     end
-    push!(parse_exprs, emit_pack(state, cT, charvar, nbits_pos - lenbits), :(pos += $lenvar))
+    posadv = if has_skip; scannedvar else lenvar end
+    push!(parse_exprs, emit_pack(state, cT, charvar, nbits_pos - lenbits), :(pos += $posadv))
     if variable
         lenpack = if lenbase == 0
             :($lenoffset = $lenvar % $lT)
@@ -377,12 +421,23 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     seg_desc = string(if variable; "$minlen-$maxlen" else "$maxlen" end,
                       " ", kind, if maxlen > 1; " characters" else " character" end)
     seg_extract, seg_impart = optional_wrap(option, argvar, extracts, tostringex, impart_body)
+    # Practical upper bound (see compile_digits for rationale)
+    parsed_max = if has_skip
+        (maxlen + 1) * (length(skipbytes) + 1)
+    else
+        maxlen
+    end
+    bytespans = if has_skip
+        Vector{ByteSet}[]
+    else
+        [fill(char_set, n) for n in minlen:maxlen]
+    end
     SegmentOutput(
-        SegmentBounds(minlen:maxlen, minlen:maxlen, totalbits, sentinel),
+        SegmentBounds(minlen:parsed_max, minlen:maxlen, totalbits, sentinel),
         SegmentCodegen(parse_exprs, seg_extract, copy(extracts), seg_impart,
                        ExprVarLine[printex]),
         SegmentMeta(label, seg_desc, seg_shortform, :AbstractString, argvar),
-        [fill(char_set, n) for n in minlen:maxlen])
+        bytespans)
 end
 
 ## Embedded packed types

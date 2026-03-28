@@ -8,11 +8,11 @@
 const CORE_SEGMENTS = (
     literal = SegmentDef(:literal,    compile_literal,  (:casefold,)),
     skip    = SegmentDef(:skip,       compile_skip,     (:casefold, :print)),
-    digits  = SegmentDef(:digits,     compile_digits,   (:base, :min, :max, :pad)),
-    letters = SegmentDef(:letters,    compile_charseq,  (:upper, :lower, :casefold)),
-    alphnum = SegmentDef(:alphnum,    compile_charseq,  (:upper, :lower, :casefold)),
-    hex     = SegmentDef(:hex,        compile_charseq,  (:upper, :lower, :casefold)),
-    charset = SegmentDef(:charset,    compile_charseq,  (:upper, :lower, :casefold)),
+    digits  = SegmentDef(:digits,     compile_digits,   (:base, :min, :max, :pad, :skip)),
+    letters = SegmentDef(:letters,    compile_charseq,  (:upper, :lower, :casefold, :skip)),
+    alphnum = SegmentDef(:alphnum,    compile_charseq,  (:upper, :lower, :casefold, :skip)),
+    hex     = SegmentDef(:hex,        compile_charseq,  (:upper, :lower, :casefold, :skip)),
+    charset = SegmentDef(:charset,    compile_charseq,  (:upper, :lower, :casefold, :skip)),
     embed   = SegmentDef(:embed,      compile_embed,    ()),
     choice  = SegmentDef(:choice,     compile_choice,   (:casefold, :is, :type)),
 )

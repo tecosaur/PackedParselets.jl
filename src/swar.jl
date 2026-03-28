@@ -446,7 +446,7 @@ end
 function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
                             vocab, dspec::NamedTuple)
     (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
-    (; base, mindigits, maxdigits) = dspec
+    (; base, mindigits, maxdigits, skipbytes) = dspec
     fixedwidth = mindigits == maxdigits
     bitsconsumed = Symbol("$(vocab.fieldvar)_bitsconsumed")
     scanlimit = emit_lengthbound(state, nctx, maxdigits)
@@ -457,7 +457,12 @@ function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
     else
         :(!iszero($bitsconsumed))
     end
-    fnum_set = :(($bitsconsumed, $fnum) = parseint($(dspec.dI), idbytes, pos, $base, $scanlimit))
+    fnum_set = if isnothing(skipbytes)
+        :(($bitsconsumed, $fnum) = parseint($(dspec.dI), idbytes, pos, $base, $scanlimit))
+    else
+        scanned = Symbol("$(vocab.fieldvar)_scanned")
+        :(($bitsconsumed, $fnum, $scanned) = parseint($(dspec.dI), idbytes, pos, $base, $scanlimit, $skipbytes))
+    end
     result = ExprVarLine[fnum_set, :($matchcond || $fail_expr)]
     rangecheck != :() && push!(result, rangecheck)
     if !directvar; push!(result, :($fieldvar = $numexpr)) end
@@ -664,10 +669,10 @@ function gen_digit_parse(state::ParserState, nctx::NodeCtx,
                          fieldvar::Symbol, option,
                          dspec::NamedTuple)
     vocab = compute_digit_vocab(state, nctx, fieldvar, option, dspec)
-    (; mindigits, maxdigits, base) = dspec
+    (; mindigits, maxdigits, base, skipbytes) = dspec
     fixedwidth = mindigits == maxdigits
     swar_limit = if fixedwidth; 2 * sizeof(UInt) else sizeof(UInt) end
-    use_swar = base <= 16 && maxdigits <= swar_limit
+    use_swar = base <= 16 && maxdigits <= swar_limit && isnothing(skipbytes)
     exprs = if !use_swar
         gen_digit_parseint(state, nctx, vocab, dspec)
     elseif fixedwidth

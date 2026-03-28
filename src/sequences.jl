@@ -31,42 +31,36 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     pad = get(nctx, :pad, 0)::Int
     skipbytes = parse_skip_kwarg(nctx)
     mindigits, maxdigits = parse_digit_range(args, max, base)
-    if min > 0
-        mindigits = Base.max(mindigits, ndigits(min; base))
-    end
+    min > 0 && (mindigits = Base.max(mindigits, ndigits(min; base)))
     fixedwidth = mindigits == maxdigits
-    if isnothing(max)
-        max = (base^maxdigits) - 1
-    end
+    isnothing(max) && (max = (base^maxdigits) - 1)
     option = get(nctx, :optional, nothing)
-    claims = unclaimed_sentinel(nctx)
+    claims = is_sentinel_unclaimed(nctx)
     range = max - min + 1 + claims
     directval = cardbits(range) == cardbits(max + 1) && (min > 0 || !claims)
     dbits = cardbits(range)
     dI = cardtype(cardbits(max + 1))
     dT = cardtype(dbits)
     fieldvar = get(nctx, :fieldvar, gensym("digits"))
-    nbits_pos = state.bits + dbits
-    fixedpad = ifelse(fixedwidth, maxdigits, 0)
-    printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad)
-    printmax = Base.max(ndigits(max; base), pad, fixedpad)
-    # gen_digit_parse reads parsed_min for SWAR safety, so call before process_segment_output! updates bounds
+    bitpos = state.bits + dbits
+    # gen_digit_parse reads parsed_min for SWAR safety, so call before
+    # process_segment_output! updates bounds
     dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims, skipbytes)
     parsed = gen_digit_parse(state, nctx, fieldvar, option, dspec)
     fnum = Symbol("$(fieldvar)_num")
-    bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     (; parsevar, directvar) = parsed
     posadv = if !isnothing(skipbytes)
         Symbol("$(fieldvar)_scanned")
     elseif fixedwidth
         maxdigits
     else
-        bitsconsumed
+        Symbol("$(fieldvar)_bitsconsumed")
     end
-    parse_exprs = ExprVarLine[parsed.exprs...,
-        emit_pack(state, dT, parsevar, nbits_pos), :(pos += $posadv)]
-    fextract = :($fnum = $(emit_extract(state, nbits_pos, dbits)))
-    fcast = if dI == dT; fnum else :($fnum % $dI) end
+    pexprs = ExprVarLine[parsed.exprs...,
+        emit_pack(state, dT, parsevar, bitpos), :(pos += $posadv)]
+    # Extract: raw bits → user-facing integer value
+    fextract = :($fnum = $(emit_extract(state, bitpos, dbits)))
+    fcast = if dI == dT fnum else :($fnum % $dI) end
     fvalue = if iszero(min) && claims
         :($fcast - $(one(dI)))
     elseif !directval && min - claims > 0
@@ -74,7 +68,49 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     else
         fcast
     end
-    printvar = ifelse(directvar, fnum, fieldvar)
+    propvalue = if max < typemax(dI) ÷ 2
+        :($fvalue % $(signed(dI)))
+    else
+        fvalue
+    end
+    # Print codegen
+    prexprs = digits_print_exprs(fieldvar, fvalue, directvar, fnum,
+                                 fixedwidth, maxdigits, pad, base)
+    # Constructor (impart) codegen
+    argvar = gensym("arg_digit")
+    body = digits_impart_exprs(state, argvar, fnum, parsevar, dI, dT, dspec,
+                               directval, claims, bitpos)
+    extract_setup = ExprVarLine[fextract]
+    seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, propvalue, body)
+    # Metadata and bytespans
+    label = Symbol(chopprefix(String(fieldvar), "attr_"))
+    seg_shortform, seg_desc = digits_meta(base, min, max, pad, mindigits, maxdigits, fixedwidth)
+    sentinel = if claims SentinelSpec((0, dbits)) end
+    has_skip = !isnothing(skipbytes)
+    parsed_max = if has_skip
+        (maxdigits + 1) * (length(skipbytes) + 1)
+    else
+        maxdigits
+    end
+    fixedpad = if fixedwidth maxdigits else 0 end
+    printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad)
+    printmax = Base.max(ndigits(max; base), pad, fixedpad)
+    digit_set = digits_byteset(base)
+    bytespans = if has_skip
+        Vector{ByteSet}[]
+    else
+        [fill(digit_set, n) for n in mindigits:maxdigits]
+    end
+    SegmentOutput(
+        SegmentBounds(mindigits:parsed_max, printmin:printmax, dbits, sentinel),
+        SegmentCodegen(pexprs, seg_extract, extract_setup, seg_impart, prexprs),
+        SegmentMeta(label, seg_desc, seg_shortform, :Integer, argvar),
+        bytespans)
+end
+
+function digits_print_exprs(fieldvar::Symbol, fvalue, directvar::Bool, fnum::Symbol,
+                            fixedwidth::Bool, maxdigits::Int, pad::Int, base::Int)
+    printvar = if directvar fnum else fieldvar end
     printpad = if fixedwidth && maxdigits > 1; maxdigits
     elseif pad > 0; pad
     else 0 end
@@ -85,83 +121,65 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     else
         :(print(io, string($printvar, base=$base)))
     end
-    print_exprs = ExprVarLine[]
-    directvar || push!(print_exprs, :($fieldvar = $fvalue))
-    push!(print_exprs, printex)
-    propvalue = if max < typemax(dI) ÷ 2
-        sI = signed(dI)
-        :($fvalue % $sI)
-    else
-        fvalue
-    end
-    argvar = gensym("arg_digit")
-    directval = cardbits(max - min + 1 + claims) ==
-                cardbits(max + 1) && (min > 0 || !claims)
+    prexprs = ExprVarLine[]
+    directvar || push!(prexprs, :($fieldvar = $fvalue))
+    push!(prexprs, printex)
+    prexprs
+end
+
+function digits_impart_exprs(state::ParserState, argvar::Symbol, fnum::Symbol,
+                             parsevar::Symbol, dI::DataType, dT::DataType,
+                             dspec::NamedTuple, directval::Bool, claims::Bool,
+                             bitpos::Int)
+    (; min, max) = dspec
     offset = min - claims
-    encode_expr = if directval
+    encode_expr = if directval || iszero(offset)
         if dI != dT; :($parsevar = $fnum % $dT) else :($parsevar = $fnum) end
     elseif offset > 0
         :($parsevar = (($fnum - $(dT(offset))) % $dT))
-    elseif offset < 0  # sentinel claim with min==0: +1 to reserve zero for "absent"
+    else # `offset < 0`  # sentinel claim with min==0: +1 to reserve zero for "absent"
         :($parsevar = ($fnum + $(one(dT))) % $dT)
-    else
-        if dI != dT; :($parsevar = $fnum % $dT) else :($parsevar = $fnum) end
     end
-    body = Any[]
+    body = Expr[]
     push!(body, :($argvar >= $min || throw(ArgumentError(
         string("Value ", $argvar, " is below minimum ", $min)))))
     push!(body, :($argvar <= $max || throw(ArgumentError(
         string("Value ", $argvar, " is above maximum ", $max)))))
     push!(body, :($fnum = $argvar % $dI))
-    directvar || push!(body, encode_expr)
-    push!(body, emit_pack(state, dT, parsevar, nbits_pos))
-    seg_shortform = let charset = if base <= 10; "0-$(Char('0' + base - 1))"
-                                   else "0-9A-$(Char('A' + base - 11))" end
-        count = if fixedwidth; "$maxdigits" else "$mindigits:$maxdigits" end
-        "$charset \u00d7 $count"
-    end
-    seg_desc = string(if fixedwidth; "$maxdigits" else "$mindigits-$maxdigits" end,
-                      if isone(maxdigits); " digit" else " digits" end,
-                      base != 10 ? " in base $base" : "",
-                      if min > 0 && max < base^maxdigits - 1
-                          " between $(string(min; base, pad)) and $(string(max; base, pad))"
-                      elseif min > 0
-                          ", at least $(string(min; base, pad))"
-                      elseif max < base^maxdigits - 1
-                          ", at most $(string(max; base, pad))"
-                      else "" end)
-    sentinel = if claims; SentinelSpec((0, dbits)) else nothing end
-    digit_set = if base <= 10
+    directval || push!(body, encode_expr)
+    push!(body, emit_pack(state, dT, parsevar, bitpos))
+    body
+end
+
+function digits_meta(base::Int, min::Int, max::Int, pad::Int,
+                     mindigits::Int, maxdigits::Int, fixedwidth::Bool)
+    charset = if base <= 10; "0-$(Char('0' + base - 1))"
+    else "0-9A-$(Char('A' + base - 11))" end
+    count = if fixedwidth; "$maxdigits" else "$mindigits:$maxdigits" end
+    shortform = "$charset \u00d7 $count"
+    desc = string(if fixedwidth; "$maxdigits" else "$mindigits-$maxdigits" end,
+                  if isone(maxdigits) " digit" else " digits" end,
+                  if base != 10 " in base $base" else "" end,
+                  if min > 0 && max < base^maxdigits - 1
+                      " between $(string(min; base, pad)) and $(string(max; base, pad))"
+                  elseif min > 0
+                      ", at least $(string(min; base, pad))"
+                  elseif max < base^maxdigits - 1
+                      ", at most $(string(max; base, pad))"
+                  else "" end)
+    shortform, desc
+end
+
+function digits_byteset(base::Int)
+    if base <= 10
         ByteSet(UInt8('0'):UInt8('0' + base - 1))
     else
         ByteSet(UInt8('0'):UInt8('9')) ∪ ByteSet(UInt8('A'):UInt8('A' + base - 11)) ∪
         ByteSet(UInt8('a'):UInt8('a' + base - 11))
     end
-    label = Symbol(chopprefix(String(fieldvar), "attr_"))
-    extract_setup = ExprVarLine[fextract]
-    seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, propvalue, body)
-    has_skip = !isnothing(skipbytes)
-    # Practical upper bound: at most one of each skip char kind between
-    # value chars (and at boundaries). Pathological inputs with runs of
-    # skip chars may exceed this, but such inputs are degenerate.
-    parsed_max = if has_skip
-        (maxdigits + 1) * (length(skipbytes) + 1)
-    else
-        maxdigits
-    end
-    bytespans = if has_skip
-        Vector{ByteSet}[]
-    else
-        [fill(digit_set, n) for n in mindigits:maxdigits]
-    end
-    SegmentOutput(
-        SegmentBounds(mindigits:parsed_max, printmin:printmax, dbits, sentinel),
-        SegmentCodegen(parse_exprs, seg_extract, extract_setup, seg_impart, print_exprs),
-        SegmentMeta(label, seg_desc, seg_shortform, :Integer, argvar),
-        bytespans)
 end
 
-function parse_digit_range(args, max, base)
+function parse_digit_range(args::Vector, max::Union{Nothing, Integer}, base::Integer)
     if !isempty(args) && Meta.isexpr(first(args), :call, 3) && first(first(args).args) == :(:)
         lo, hi = first(args).args[2], first(args).args[3]
         (lo isa Integer && hi isa Integer) ||
@@ -178,6 +196,39 @@ function parse_digit_range(args, max, base)
     end
 end
 
+function charseq_impart_exprs(state::ParserState, cspec::NamedTuple,
+                              argvar::Symbol, charvar::Symbol,
+                              lenvar::Symbol, lenoffset::Symbol)
+    (; cT, lT, cfold, oneindexed, ranges, kind, variable, minlen, maxlen,
+       lenbase, bitpos, lenbits) = cspec
+    kindstr = String(kind)
+    body = Expr[
+        :(($lenvar, $charvar) = parsechars($cT, String($argvar), $maxlen, $ranges, $cfold, $oneindexed)),
+        :($lenvar == ncodeunits(String($argvar)) || throw(ArgumentError(
+            string("Invalid characters in \"", $argvar, "\" for ", $kindstr))))]
+    if variable
+        push!(body,
+            :($lenvar < $minlen && throw(ArgumentError(
+                string("String \"", $argvar, "\" is too short (minimum ", $minlen, " characters)")))),
+            :($lenvar > $maxlen && throw(ArgumentError(
+                string("String \"", $argvar, "\" is too long (maximum ", $maxlen, " characters)")))))
+    else
+        push!(body,
+            :($lenvar != $maxlen && throw(ArgumentError(
+                string("String \"", $argvar, "\" must be exactly ", $maxlen, " characters")))))
+    end
+    push!(body, emit_pack(state, cT, charvar, bitpos - lenbits))
+    if variable
+        lenpack = if iszero(lenbase)
+            :($lenoffset = $lenvar % $lT)
+        else
+            :($lenoffset = ($lenvar - $lenbase) % $lT)
+        end
+        push!(body, lenpack, emit_pack(state, lT, lenoffset, bitpos))
+    end
+    body
+end
+
 ## Character sequences (letters, alphnum, hex, charset)
 
 # Named charset canonical ranges.
@@ -190,17 +241,18 @@ const NAMED_CHARSETS = (
 )
 
 function compile_charseq(state::ParserState, nctx::NodeCtx, ::PatternExprs,
-                         def::SegmentDef, args::Vector{Any})
+                         def::SegmentDef, args::Vector)
     kind = def.name
     named = haskey(NAMED_CHARSETS, kind)
-    minargs = named ? 1 : 2
-    length(args) >= minargs || throw(ArgumentError(
-        named ? "Expected exactly one positional argument for $kind" :
-                "charset requires a length and at least one character range"))
-    named && length(args) > 1 && throw(ArgumentError(
-        "Expected exactly one positional argument for $kind"))
+    if named
+        length(args) == 1 || throw(ArgumentError(
+            "Expected exactly one positional argument for $kind"))
+    else
+        length(args) >= 2 || throw(ArgumentError(
+            "charset requires a length and at least one character range"))
+    end
     minlen, maxlen = parse_charseq_length(first(args), kind)
-    base_ranges = named ? NAMED_CHARSETS[kind] : parse_charset_ranges(args)
+    base_ranges = if named NAMED_CHARSETS[kind] else parse_charset_ranges(args) end
     ranges, cfold = resolve_charseq_flags(state, nctx, kind, base_ranges)
     skipbytes = parse_skip_kwarg(nctx)
     compile_charseq_impl(state, nctx, minlen, maxlen, ranges, cfold, kind, skipbytes)
@@ -220,7 +272,7 @@ function parse_charseq_length(arg, kind::Symbol)
     end
 end
 
-function parse_charset_ranges(args)
+function parse_charset_ranges(args::Vector)
     ranges = UnitRange{UInt8}[]
     for arg in @view args[2:end]
         if arg isa Char
@@ -252,7 +304,7 @@ Resolve `upper`/`lower`/`casefold` flags and transform character ranges.
 Letter ranges (subsets of A-Z or a-z) are shifted to the target case and deduplicated.
 Non-letter ranges pass through unchanged.
 """
-function resolve_charseq_flags(state::ParserState, nctx, kind::Symbol, ranges)
+function resolve_charseq_flags(::ParserState, nctx::NodeCtx, kind::Symbol, ranges)
     upper = get(nctx, :upper, false)::Bool
     lower = get(nctx, :lower, false)::Bool
     casefold = get(nctx, :casefold, false)::Bool
@@ -281,7 +333,7 @@ function collapse_letter_ranges(ranges, target::Symbol)
     seen = Set{UnitRange{UInt8}}()
     out = UnitRange{UInt8}[]
     for r in ranges
-        mapped = if is_letter(r); shift_case(r, target) else r end
+        mapped = if is_letter(r) shift_case(r, target) else r end
         if mapped ∉ seen
             push!(seen, mapped)
             push!(out, mapped)
@@ -300,10 +352,9 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     variable = minlen != maxlen
     option = get(nctx, :optional, nothing)
     nvals = sum(length, ranges)
-    bpc = cardbits(nvals)
-    claims = unclaimed_sentinel(nctx)
+    claims = is_sentinel_unclaimed(nctx)
     oneindexed = claims && !variable
-    if oneindexed; bpc = cardbits(nvals + 1) end
+    bpc = cardbits(nvals + oneindexed)
     charbits = maxlen * bpc
     claim_via_length = claims && !oneindexed && variable
     optoffset = claim_via_length && minlen > 0
@@ -318,11 +369,13 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     lenoffset = Symbol("$(fieldvar)_lenoff")
     cT = cardtype(charbits)
     lT = if variable; cardtype(lenbits) else Nothing end
-    nbits_pos = state.bits + totalbits
+    bitpos = state.bits + totalbits
     lenbase = if directlen; 0 elseif optoffset; minlen - 1 else minlen end
-    sentinel = if oneindexed; SentinelSpec((-lenbits, charbits))
-    elseif claim_via_length; SentinelSpec((0, lenbits))
-    else nothing end
+    sentinel = if oneindexed
+        SentinelSpec((-lenbits, charbits))
+    elseif claim_via_length
+        SentinelSpec((0, lenbits))
+    end
     scanlimit = emit_lengthbound(state, nctx, maxlen)
     notfound = build_fail_expr!(state, nctx, if variable
         "Expected $minlen to $maxlen $kind characters"
@@ -337,7 +390,7 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         ExprVarLine[:(($lenvar, $charvar) =
             parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
     end
-    if !isnothing(option) && variable && minlen == 0
+    if !isnothing(option) && variable && iszero(minlen)
         push!(parse_exprs, :($lenvar > 0 || $notfound))
     else
         push!(parse_exprs,
@@ -346,22 +399,22 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
                 end))
     end
     posadv = if has_skip; scannedvar else lenvar end
-    push!(parse_exprs, emit_pack(state, cT, charvar, nbits_pos - lenbits), :(pos += $posadv))
+    push!(parse_exprs, emit_pack(state, cT, charvar, bitpos - lenbits), :(pos += $posadv))
     if variable
-        lenpack = if lenbase == 0
+        lenpack = if iszero(lenbase)
             :($lenoffset = $lenvar % $lT)
         else
             :($lenoffset = ($lenvar - $lenbase) % $lT)
         end
-        push!(parse_exprs, lenpack, emit_pack(state, lT, lenoffset, nbits_pos))
+        push!(parse_exprs, lenpack, emit_pack(state, lT, lenoffset, bitpos))
     end
     # printchars/chars2string share the same arg pattern
-    extracts = ExprVarLine[:($charvar = $(emit_extract(state, nbits_pos - lenbits, charbits)))]
+    extracts = ExprVarLine[:($charvar = $(emit_extract(state, bitpos - lenbits, charbits)))]
     if variable
-        push!(extracts, if lenbase == 0
-            :($lenvar = $(emit_extract(state, nbits_pos, lenbits)))
+        push!(extracts, if iszero(lenbase)
+            :($lenvar = $(emit_extract(state, bitpos, lenbits)))
         else
-            :($lenvar = $(emit_extract(state, nbits_pos, lenbits)) + $lenbase)
+            :($lenvar = $(emit_extract(state, bitpos, lenbits)) + $lenbase)
         end)
     end
     charargs = if variable
@@ -372,35 +425,9 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     printex = :(printchars(io, $(charargs.args...)))
     tostringex = :(chars2string($(charargs.args...)))
     argvar = gensym("arg_charseq")
-    kindstr = String(kind)
-    encode_chars = quote
-        ($lenvar, $charvar) = parsechars($cT, String($argvar), $maxlen, $ranges, $cfold, $oneindexed)
-        $lenvar == ncodeunits(String($argvar)) || throw(ArgumentError(
-            string("Invalid characters in \"", $argvar, "\" for ", $kindstr)))
-        $(if variable
-              quote
-                  $lenvar < $minlen && throw(ArgumentError(
-                      string("String \"", $argvar, "\" is too short (minimum ", $minlen, " characters)")))
-                  $lenvar > $maxlen && throw(ArgumentError(
-                      string("String \"", $argvar, "\" is too long (maximum ", $maxlen, " characters)")))
-              end
-          else
-              :($lenvar != $maxlen && throw(ArgumentError(
-                  string("String \"", $argvar, "\" must be exactly ", $maxlen, " characters"))))
-          end)
-        $(emit_pack(state, cT, charvar, nbits_pos - lenbits))
-        $(if variable
-              lenpack = if lenbase == 0
-                  :($lenoffset = $lenvar % $lT)
-              else
-                  :($lenoffset = ($lenvar - $lenbase) % $lT)
-              end
-              quote $lenpack; $(emit_pack(state, lT, lenoffset, nbits_pos)) end
-          else
-              nothing
-          end)
-    end
-    impart_body = filter(e -> !isnothing(e) && !(e isa LineNumberNode), encode_chars.args)
+    cspec = (; cT, lT, cfold, oneindexed, ranges, kind,
+               variable, minlen, maxlen, lenbase, bitpos, lenbits)
+    impart_body = charseq_impart_exprs(state, cspec, argvar, charvar, lenvar, lenoffset)
     seg_shortform = let charset = join((string(Char(first(r)), '-', Char(last(r))) for r in ranges), "")
         count = if variable; "$minlen:$maxlen" else "$maxlen" end
         "$charset × $count"
@@ -419,7 +446,7 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     end
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     seg_desc = string(if variable; "$minlen-$maxlen" else "$maxlen" end,
-                      " ", kind, if maxlen > 1; " characters" else " character" end)
+                      " ", kind, if maxlen > 1 " characters" else " character" end)
     seg_extract, seg_impart = optional_wrap(option, argvar, extracts, tostringex, impart_body)
     # Practical upper bound (see compile_digits for rationale)
     parsed_max = if has_skip
@@ -430,7 +457,9 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     bytespans = if has_skip
         Vector{ByteSet}[]
     else
-        [fill(char_set, n) for n in minlen:maxlen]
+        let char_set = char_set
+            [fill(char_set, n) for n in minlen:maxlen]
+        end
     end
     SegmentOutput(
         SegmentBounds(minlen:parsed_max, minlen:maxlen, totalbits, sentinel),
@@ -450,10 +479,10 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
     ebits = nbits(T)
     epad = 8 * sizeof(T) - ebits
     option = get(nctx, :optional, nothing)
-    claims = unclaimed_sentinel(nctx)
-    presbits = claims ? 1 : 0
+    claims = is_sentinel_unclaimed(nctx)
+    presbits = Int(claims)
     fieldvar = get(nctx, :fieldvar, gensym("embed"))
-    nbits_pos = state.bits + ebits + presbits
+    bitpos = state.bits + ebits + presbits
     # Packed types store values MSB-aligned, so shift right before packing, left after extracting
     to_lsb(val) = :(Core.Intrinsics.lshr_int($val, $epad))
     to_msb(val) = :(Core.Intrinsics.shl_int($val, $epad))
@@ -461,25 +490,25 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
     epos = Symbol("$(fieldvar)_epos")
     notfound = build_fail_expr!(state, nctx, "Invalid embedded $(T)")
     eshifted = Symbol("$(fieldvar)_shifted")
-    pack = emit_pack(state, T, eshifted, nbits_pos - presbits)
+    pack = emit_pack(state, T, eshifted, bitpos - presbits)
     parse_exprs = ExprVarLine[
           :(($eresult, $epos) = $(GlobalRef(PackedParselets, :parsebytes))($T, @view idbytes[pos:end])),
           :(if !($eresult isa $T); $notfound end),
           :($eshifted = $(to_lsb(eresult))),
           pack]
     if claims
-        push!(parse_exprs, emit_pack(state, Bool, true, nbits_pos))
+        push!(parse_exprs, emit_pack(state, Bool, true, bitpos))
     end
     push!(parse_exprs, :(pos += $epos - 1))
-    fextract = :($fieldvar = $(to_msb(emit_extract(state, nbits_pos - presbits, ebits, T))))
+    fextract = :($fieldvar = $(to_msb(emit_extract(state, bitpos - presbits, ebits, T))))
     argvar = gensym("arg_embed")
     argshifted = gensym("arg_embed_shifted")
-    body = Any[:($argshifted = $(to_lsb(argvar))),
-               emit_pack(state, T, argshifted, nbits_pos - presbits)]
+    body = Expr[:($argshifted = $(to_lsb(argvar))),
+               emit_pack(state, T, argshifted, bitpos - presbits)]
     if presbits > 0
-        push!(body, emit_pack(state, Bool, true, nbits_pos))
+        push!(body, emit_pack(state, Bool, true, bitpos))
     end
-    sentinel = if claims; SentinelSpec((0, presbits)) else nothing end
+    sentinel = if claims SentinelSpec((0, presbits)) end
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     extract_setup = ExprVarLine[fextract]
     seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, fieldvar, body)

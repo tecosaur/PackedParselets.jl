@@ -93,7 +93,14 @@ function pattern_dispatch!(exprs::PatternExprs,
 end
 
 ## Field capture
+"""
+    pattern_field!(exprs, state, nctx, segments, global_kwargs, node, args)
 
+Handle a `QuoteNode` field-capture node (`:major(digits(4))`). Opens a
+`:fieldvar` scope, walks children, then assembles a property expression —
+a direct segment label for single-value captures, or an IOBuffer
+reconstruction for multi-segment fields.
+"""
 function pattern_field!(exprs::PatternExprs,
                         state::ParserState, nctx::NodeCtx,
                         segments::NamedTuple, global_kwargs::Tuple,
@@ -149,12 +156,6 @@ function arm_clear_bits(state::ParserState, bits_before::Int)
                 8 * sizeof($(esc(state.name))) - $(state.bits)))))]
 end
 
-function arm_rewind_expr(state::ParserState, armvar::Symbol,
-                         savedpos::Symbol, bits_before::Int)
-    clear = arm_clear_bits(state, bits_before)
-    :(if !$armvar; pos = $savedpos; $(clear...) end)
-end
-
 function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx,
                           segments::NamedTuple, global_kwargs::Tuple, arm)
     if Meta.isexpr(arm, :tuple)
@@ -188,7 +189,7 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}})
                                             for (j, b) in enumerate(combo); init=zero(UInt64))
                             mv = fn(regval)
                             prev = get(groups, mv, 0)
-                            (prev != 0 && prev != k) && return nothing
+                            (!iszero(prev) && prev != k) && return nothing
                             groups[mv] = k
                         end
                     end
@@ -222,7 +223,7 @@ function pattern_choice!(exprs::PatternExprs,
                          state::ParserState, nctx::NodeCtx,
                          segments::NamedTuple, global_kwargs::Tuple,
                          arms::Vector{Any})
-    nonempty_arms = filter(a -> a != "", arms)
+    nonempty_arms = filter(a -> a !== "", arms)
     if length(nonempty_arms) == 1 && length(arms) == 2
         pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs,
                                  only(nonempty_arms))
@@ -231,6 +232,13 @@ function pattern_choice!(exprs::PatternExprs,
     end
 end
 
+"""
+    pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs, arm)
+
+Handle single-arm-plus-empty optional via sentinel claiming. Walks the arm in
+a child branch, steals a zero-encoding sentinel from a value segment (or
+allocates a presence bit), then emits guarded parse/print with pos rewind.
+"""
 function pattern_choice_optional!(exprs::PatternExprs,
                                   state::ParserState, nctx::NodeCtx,
                                   segments::NamedTuple, global_kwargs::Tuple,
@@ -267,12 +275,12 @@ function pattern_choice_optional!(exprs::PatternExprs,
     parent.print_max = Base.max(parent.print_max, child.print_max)
     savedpos = gensym("savedpos")
     branch_check = Expr(:call, :__branch_check, Bool, child.id)
-    guard = if isnothing(popt); branch_check else :($popt && $branch_check) end
+    guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
     push!(exprs.parse, :($savedpos = pos))
     push!(exprs.parse, :($optvar = $guard))
     push!(exprs.parse, :(if $optvar; $(oexprs.parse...) end))
     push!(exprs.parse, :(@label $end_label))
-    push!(exprs.parse, arm_rewind_expr(state, optvar, savedpos, bits_before))
+    push!(exprs.parse, :(if !$optvar; pos = $savedpos; $(arm_clear_bits(state, bits_before)...) end))
     append!(exprs.print, nctx[:oprint_detect])
     push!(exprs.print, :($optvar = $check))
     push!(exprs.print, :(if $optvar; $(oexprs.print...) end))
@@ -281,6 +289,14 @@ function pattern_choice_optional!(exprs::PatternExprs,
     end
 end
 
+"""
+    pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms)
+
+Handle multi-arm structured choice with an explicit packed discriminant.
+Walks each arm into its own accumulator, selects between table-driven
+dispatch (when `find_choice_dispatch` finds a distinguishing byte window)
+or cascading try-rewind, and emits separate print blocks per arm.
+"""
 function pattern_choice_multi!(exprs::PatternExprs,
                                state::ParserState, nctx::NodeCtx,
                                segments::NamedTuple, global_kwargs::Tuple,
@@ -312,9 +328,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
         bits_before = state.bits
         oexprs = PatternExprs(ExprVarLine[], ExprVarLine[],
                               exprs.segments, exprs.properties, Vector{ByteSet}[])
-        if arm != ""
-            walk_choice_arm!(oexprs, state, arm_nctx, segments, global_kwargs, arm)
-        end
+        arm !== "" && walk_choice_arm!(oexprs, state, arm_nctx, segments, global_kwargs, arm)
         bits_after = state.bits
         dval = gensym("discrim")
         push!(oexprs.parse, :($dval = $(discrim_type(k))))
@@ -332,14 +346,12 @@ function pattern_choice_multi!(exprs::PatternExprs,
     final_bits = state.bits
     arm_spans = [ad.oexprs.bytespans for ad in arm_data]
     dispatch = find_choice_dispatch(arm_spans)
-    popt_label = get(nctx, :opt_label, nothing)
-    has_empty = "" in arms
     if !isnothing(dispatch)
-        emit_dispatch_parse!(exprs, state, popt, popt_label, savedpos, arm_data,
-                             dispatch, has_empty)
+        emit_dispatch_parse!(exprs, state, nctx, popt, savedpos, arm_data,
+                             dispatch, "" in arms)
     else
-        emit_cascade_parse!(exprs, state, popt, popt_label, savedpos, arm_data,
-                            has_empty)
+        emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data,
+                            "" in arms)
     end
     state.bits = final_bits
     # Separate `if` blocks (not if/elseif) so rewrite_bufprint! can reach print calls.
@@ -352,8 +364,9 @@ function pattern_choice_multi!(exprs::PatternExprs,
     end
 end
 
-function emit_dispatch_parse!(exprs, state, popt, popt_label, savedpos, arm_data,
-                              dispatch, has_empty)
+function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
+                              popt::Union{Nothing, Symbol}, savedpos::Symbol,
+                              arm_data, dispatch::NamedTuple, has_empty::Bool)
     reg_var = gensym("dispatch_reg")
     arm_idx_var = gensym("arm_idx")
     (; offset, iT, expr) = dispatch
@@ -369,9 +382,9 @@ function emit_dispatch_parse!(exprs, state, popt, popt_label, savedpos, arm_data
                          end))
     for (k, ad) in enumerate(arm_data)
         branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
-        guard = if isnothing(popt); branch_check else :($popt && $branch_check) end
+        guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
         state.bits = ad.bits_after
-        rewind = arm_rewind_expr(state, ad.armvar, savedpos, ad.bits_before)
+        rewind = :(if !$(ad.armvar); pos = $savedpos; $(arm_clear_bits(state, ad.bits_before)...) end)
         push!(exprs.parse, :($(ad.armvar) = false))
         push!(exprs.parse, :(if $arm_idx_var == $(UInt8(k))
                                  $(ExprVarLine[
@@ -383,28 +396,22 @@ function emit_dispatch_parse!(exprs, state, popt, popt_label, savedpos, arm_data
     end
     if !has_empty || !isnothing(popt)
         any_ok = reduce((a, ad) -> :($a || $(ad.armvar)), arm_data; init=false)
-        fail = if isnothing(popt)
-            erridx = register_errmsg!(state, "No choice arm matched")
-            :(return ($erridx, pos))
-        else
-            opt_fail_expr(popt, popt_label)
-        end
+        fail = build_fail_expr!(state, nctx, "No choice arm matched")
         push!(exprs.parse, :(if !($any_ok); $fail end))
     end
 end
 
-function emit_cascade_parse!(exprs, state, popt, popt_label, savedpos, arm_data, has_empty)
+function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
+                             popt::Union{Nothing, Symbol}, savedpos::Symbol,
+                             arm_data, has_empty::Bool)
     innermost = if has_empty && isnothing(popt)
         ExprVarLine[]
-    elseif !isnothing(popt)
-        ExprVarLine[opt_fail_expr(popt, popt_label)]
     else
-        erridx = register_errmsg!(state, "No choice arm matched")
-        ExprVarLine[:(return ($erridx, pos))]
+        ExprVarLine[build_fail_expr!(state, nctx, "No choice arm matched")]
     end
-    cascade = foldr(enumerate(collect(arm_data)), init=innermost) do (k, ad), fallback
+    cascade = foldr(enumerate(collect(arm_data)), init=innermost) do (_, ad), fallback
         branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
-        guard = if isnothing(popt); branch_check else :($popt && $branch_check) end
+        guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
         state.bits = ad.bits_after
         clear = arm_clear_bits(state, ad.bits_before)
         ExprVarLine[
@@ -421,8 +428,7 @@ function pattern_optional!(exprs::PatternExprs,
                            segments::NamedTuple, global_kwargs::Tuple,
                            args::Vector{Any})
     arm = if all(a -> a isa String, args)
-        choiceargs = push!(Any[join(Vector{String}(args))], "")
-        Expr(:call, :choice, choiceargs...)
+        Expr(:call, :choice, join(Vector{String}(args)), "")
     else
         Expr(:tuple, args...)
     end

@@ -3,10 +3,9 @@
 
 # Core types for the PackedParselets compilation pipeline.
 #
-# SegmentOutput is the structured return type for segment handlers.
-# SegmentDef describes a registered segment kind. Both are part of
-# the extension API — third-party packages use them to define new
-# pattern nodes.
+# All data structures used during compilation: type aliases, segment
+# handler types (SegmentOutput, SegmentDef), pattern walking state
+# (PatternExprs, ParserState, ParseBranch), and value segment schema.
 
 ## Type aliases
 
@@ -49,7 +48,7 @@ Expression vectors produced by a segment handler.
 
 - `parse`: input bytes -> value variable (appended to the parse expression list)
 - `extract`: raw bits -> user-facing value (for getproperty, show, segments)
-- `print_detect`: extract setup expressions routed to print (via emit_print_detect!)
+- `print_detect`: extract setup expressions routed to print or optional detect list
 - `impart`: user argument -> raw value for bit-packing (for the constructor)
 - `print`: extracted value -> formatted output (appended to the print expression list)
 """
@@ -57,7 +56,7 @@ struct SegmentCodegen
     parse::Vector{ExprVarLine}        # input bytes -> value var
     extract::Vector{ExprVarLine}      # raw bits -> user-facing value (full extract for segments)
     print_detect::Vector{ExprVarLine} # extract setup routed to print-time detection
-    impart::Vector{Any}               # user arg -> raw value for packing
+    impart::Vector{Expr}               # user arg -> raw value for packing
     print::Vector{ExprVarLine}        # extracted value -> formatted output
 end
 
@@ -110,7 +109,8 @@ Description of a non-structural pattern node in the segment registry.
 - `name`: pattern node name (e.g. :digits, :choice), used as the registry key
 - `compile`: handler function with signature `(state, nctx, exprs, def, args) -> SegmentOutput`
 - `kwargs`: keyword argument names accepted by this segment (for validation)
-- `finalize`: optional post-assembly hook `(block, exprs, state, name) -> nothing`
+- `finalize`: optional post-assembly hook `(hookdata, exprs, state, name) -> nothing`,
+   appends additional expressions to `hookdata::Vector{Expr}`
 """
 struct SegmentDef
     name::Symbol
@@ -121,4 +121,84 @@ end
 
 SegmentDef(name, compile, kwargs) = SegmentDef(name, compile, kwargs, nothing)
 
+## Pipeline types
 
+# Hoisted optional sentinel: bit coordinates where absent = all-zero.
+const OptSentinel = @NamedTuple{position::Int, nbits::Int}
+
+"""
+    ValueSegment
+
+Schema for a single value-carrying pattern node in the packed representation.
+"""
+struct ValueSegment
+    nbits::Int                            # bits consumed in packed representation
+    kind::Symbol                          # :digits, :choice, :letters, :alphnum, :hex, :charset, :literal, :skip
+    label::Symbol                         # attr_fieldname (inside field) or gensym (anonymous)
+    desc::String                          # human-readable description
+    shortform::String                     # compact pattern notation for error messages
+    argtype::Union{Symbol, DataType, Nothing}  # type annotation for constructor, or nothing (non-parameterisable)
+    argvar::Symbol                        # gensym used as parameter placeholder in impart
+    extract::Vector{ExprVarLine}          # bits → typed value (last expr is the value)
+    impart::Vector{Expr}                   # argvar → packed bits (validate + encode + orshift)
+    condition::Union{Nothing, Symbol}     # optional scope gensym, nothing if required
+end
+
+"""
+    PatternExprs
+
+Accumulator for the expression vectors built during pattern walking.
+
+Choice/optional arms construct instances that share `segments` and `properties`
+with the parent while owning separate `parse`, `print`, and `bytespans` vectors.
+"""
+struct PatternExprs
+    parse::Vector{ExprVarLine}
+    print::Vector{ExprVarLine}
+    segments::Vector{ValueSegment}
+    properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}}
+    bytespans::Vector{Vector{ByteSet}}
+end
+PatternExprs() = PatternExprs([], [], [], [], [])
+
+"""
+    ParseBranch
+
+Per-branch byte counters for tracking parse/print bounds through optional nesting.
+
+The root branch covers the required pattern; each `optional(...)` forks a child.
+`parsed_min`/`parsed_max` track cumulative input bytes consumed;
+`print_min`/`print_max` track cumulative output bytes produced.
+Length-check sentinels reference these counters so that `insert_length_checks!`
+can fold static guarantees and emit minimal runtime checks.
+"""
+mutable struct ParseBranch
+    const id::Int
+    const parent::Union{Nothing, ParseBranch}
+    const scope::Symbol
+    const start_min::Int
+    const start_max::Int
+    parsed_min::Int
+    parsed_max::Int
+    print_min::Int
+    print_max::Int
+end
+
+"""
+    ParserState
+
+Global mutable state for pattern compilation (bit width, branches, errors).
+
+- `supertype`: abstract supertype for the generated primitive type
+- `globals`: domain-specific keyword arguments for finalize hooks to read
+"""
+mutable struct ParserState
+    const name::Symbol
+    const mod::Module
+    bits::Int
+    const supertype::Type
+    const globals::NamedTuple
+    const branches::Vector{ParseBranch}
+    const errconsts::Vector{String}
+    const segment_outputs::Vector{Pair{Symbol, SegmentOutput}}
+end

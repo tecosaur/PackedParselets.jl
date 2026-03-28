@@ -28,9 +28,7 @@ export parsebytes, tobytes, segments, nbits, parsebounds, printbounds,
 # Extension API for custom segment handlers
 public ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet,
     SegmentDef, SegmentOutput, SegmentBounds, SegmentCodegen, SegmentMeta,
-    register_errmsg!, emit_pack, emit_extract, emit_lengthcheck,
-    build_fail_expr!, unclaimed_sentinel,
-    value_segment_output, implement_casting!,
-    cardbits, cardtype, fastparse
+    build_fail_expr!, emit_pack, emit_extract, emit_lengthcheck,
+    is_sentinel_unclaimed, implement_casting!
 
 end # module PackedParselets

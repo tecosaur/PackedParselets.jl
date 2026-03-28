@@ -26,38 +26,36 @@ function compile_choice(state::ParserState, nctx::NodeCtx, ::PatternExprs,
 end
 
 function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
-    soptions = Vector{String}(options)
-    allowempty = any(isempty, soptions)
-    allowempty && filter!(!isempty, soptions)
+    sopts = Vector{String}(options)
+    allowempty = any(isempty, sopts)
+    allowempty && filter!(!isempty, sopts)
     casefold = get(nctx, :casefold, false)
     target = get(nctx, :is, nothing)::Union{Nothing, String}
     fieldvar = get(nctx, :fieldvar, gensym("prefix"))
     option = get(nctx, :optional, nothing)
-    claims = unclaimed_sentinel(nctx)
-    choicebits = cardbits(length(soptions) + 1)
-    choiceint = if isnothing(target)
-        cardtype(choicebits)
+    claims = is_sentinel_unclaimed(nctx)
+    cbits = cardbits(length(sopts) + 1)
+    cint = if isnothing(target)
+        cardtype(cbits)
     else
         Bool
     end
-    if !isnothing(target)
-        push!(soptions, target)
-    end
+    !isnothing(target) && push!(sopts, target)
     if casefold
-        all(isascii, soptions) || throw(ArgumentError("Expected all options to be ASCII strings for casefolding"))
+        all(isascii, sopts) || throw(ArgumentError("Expected all options to be ASCII strings for casefolding"))
     end
-    matchoptions = if casefold; map(lowercase, soptions) else soptions end
-    foundaction = if isnothing(target)
+    mopts = if casefold; map(lowercase, sopts) else sopts end
+    onmatch = if isnothing(target)
         valexpr -> :($fieldvar = $valexpr)
     else
         _ -> :($fieldvar = one($fieldvar))
     end
-    cctx = (; matchoptions, soptions, casefold, fieldvar, foundaction, choiceint)
-    matcher, matchoptions, soptions = build_choice_matcher(state, nctx, cctx)
-    # Build the length-guarded match wrapper
-    notfound = build_fail_expr!(state, nctx, "Expected one of $(join(soptions, ", "))")
-    lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, soptions))
-    checkedmatch = if allowempty
+    cctx = (; mopts, sopts, casefold, fieldvar, onmatch, cint)
+    matcher, mopts, sopts = build_choice_matcher(state, nctx, cctx)
+    # Length-guarded match wrapper
+    notfound = build_fail_expr!(state, nctx, "Expected one of $(join(sopts, ", "))")
+    lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, sopts))
+    guarded = if allowempty
         :(if $lencheck
               $(matcher...)
           end)
@@ -66,7 +64,7 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
               $notfound
           else
               $(matcher...)
-              if $fieldvar == zero($choiceint)
+              if $fieldvar == zero($cint)
                   $notfound
               end
           end)
@@ -74,111 +72,126 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
     valtype = get(nctx, :type, :Symbol)
     valtype in (:Symbol, :String) ||
         throw(ArgumentError("choice type must be Symbol or String, got $valtype"))
-    (; soptions, fieldvar, option, allowempty, choicebits, choiceint,
-       checkedmatch, matcher, target, claims, valtype)
+    (; sopts, fieldvar, option, allowempty, cbits, cint,
+       guarded, matcher, target, claims, valtype)
 end
 
+"""
+    compile_choice_value(state, nctx, ctx) -> SegmentOutput
+
+Produce a `SegmentOutput` for a value-storing choice: the selected index is
+packed into the bit stream and extracted as a `Symbol` or `String` property.
+Handles the `allowempty` case by guarding print and extract expressions on
+a presence check, and claims a zero-encoding sentinel when available.
+"""
 function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
-    (; soptions, fieldvar, option, allowempty, choicebits, choiceint, checkedmatch, claims, valtype) = ctx
-    # Compute bit position without mutating state.bits
-    nbits_pos = state.bits + choicebits
-    pmin = if allowempty; 0 else minimum(ncodeunits, soptions) end
-    parse_exprs = ExprVarLine[
-          :($fieldvar = zero($choiceint)),
-          checkedmatch,
-          emit_pack(state, choiceint, fieldvar, nbits_pos)]
-    fextract = :($fieldvar = $(emit_extract(state, nbits_pos, choicebits)))
+    (; sopts, fieldvar, option, allowempty, cbits, cint, guarded, claims, valtype) = ctx
+    bitpos = state.bits + cbits
+    pmin = if allowempty 0 else minimum(ncodeunits, sopts) end
+    pexprs = ExprVarLine[
+          :($fieldvar = zero($cint)),
+          guarded,
+          emit_pack(state, cint, fieldvar, bitpos)]
+    fextract = :($fieldvar = $(emit_extract(state, bitpos, cbits)))
     present = :(!iszero($fieldvar))
-    printexpr = :(print(io, @inbounds $(Tuple(soptions))[$fieldvar]))
+    printexpr = :(print(io, @inbounds $(Tuple(sopts))[$fieldvar]))
     # When allowempty without an enclosing optional, guard print on presence
-    print_exprs = ExprVarLine[if allowempty && isnothing(option)
+    prexprs = ExprVarLine[if allowempty && isnothing(option)
               :(if $present; $printexpr end)
           else
               printexpr
           end]
     argvar = gensym("arg_choice")
-    # Extract value and impart (constructor) logic depend on the user-facing type
     extract_value, impart_core, argtype = choice_value_codegen(
-        valtype, soptions, fieldvar, argvar, choiceint, nbits_pos, state)
+        state, valtype, sopts, fieldvar, argvar, cint, bitpos)
     # For allowempty without an enclosing optional, wrap extract in a presence guard
-    eopt = if allowempty && isnothing(option)
+    if allowempty && isnothing(option)
         extract_value = :(if $present; $extract_value end)
+    end
+    eopt = if allowempty && isnothing(option)
         gensym("emptyopt")
     else
         option
     end
-    sentinel = if claims; SentinelSpec((0, choicebits)) else nothing end
-    pmax = maximum(ncodeunits, soptions)
+    sentinel = if claims SentinelSpec((0, cbits)) end
+    pmax = maximum(ncodeunits, sopts)
     casefold = get(nctx, :casefold, false) === true
     arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
-                     for o in soptions]
+                     for o in sopts]
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     extract_setup = ExprVarLine[fextract]
-    desc = join(soptions, " | ")
+    desc = join(sopts, " | ")
     seg_extract, seg_impart = optional_wrap(eopt, argvar, extract_setup, extract_value, impart_core)
     SegmentOutput(
-        SegmentBounds(pmin:pmax, pmin:pmax, choicebits, sentinel),
-        SegmentCodegen(parse_exprs, seg_extract, extract_setup, seg_impart, print_exprs),
+        SegmentBounds(pmin:pmax, pmin:pmax, cbits, sentinel),
+        SegmentCodegen(pexprs, seg_extract, extract_setup, seg_impart, prexprs),
         SegmentMeta(label, desc, desc, argtype, argvar),
         arrangements)
 end
 
-function choice_value_codegen(valtype::Symbol, soptions, fieldvar, argvar,
-                               choiceint, nbits_pos, state)
+function choice_value_codegen(state::ParserState, valtype::Symbol, sopts,
+                               fieldvar, argvar, cint, bitpos)
     if valtype === :Symbol
-        symoptions = Tuple(Symbol.(soptions))
-        extract_value = :(@inbounds $(symoptions)[$fieldvar])
-        impart_core = Any[
-            :($fieldvar = let idx = findfirst(==(Symbol($argvar)), $symoptions)
+        syms = Tuple(Symbol.(sopts))
+        extract_value = :(@inbounds $(syms)[$fieldvar])
+        impart_core = Expr[
+            :($fieldvar = let idx = findfirst(==(Symbol($argvar)), $syms)
                   isnothing(idx) && throw(ArgumentError(
-                      string("Invalid option :", $argvar, "; expected one of: ", $(join(soptions, ", ")))))
-                  idx % $choiceint
+                      string("Invalid option :", $argvar, "; expected one of: ", $(join(sopts, ", ")))))
+                  idx % $cint
               end),
-            emit_pack(state, choiceint, fieldvar, nbits_pos)]
+            emit_pack(state, cint, fieldvar, bitpos)]
         (extract_value, impart_core, :Symbol)
     else # :String
-        stroptions = Tuple(soptions)
-        extract_value = :(@inbounds $(stroptions)[$fieldvar])
-        impart_core = Any[
-            :($fieldvar = let idx = findfirst(==(String($argvar)), $stroptions)
+        strs = Tuple(sopts)
+        extract_value = :(@inbounds $(strs)[$fieldvar])
+        impart_core = Expr[
+            :($fieldvar = let idx = findfirst(==(String($argvar)), $strs)
                   isnothing(idx) && throw(ArgumentError(
-                      string("Invalid option \"", $argvar, "\"; expected one of: ", $(join(soptions, ", ")))))
-                  idx % $choiceint
+                      string("Invalid option \"", $argvar, "\"; expected one of: ", $(join(sopts, ", ")))))
+                  idx % $cint
               end),
-            emit_pack(state, choiceint, fieldvar, nbits_pos)]
+            emit_pack(state, cint, fieldvar, bitpos)]
         (extract_value, impart_core, :AbstractString)
     end
 end
 
-function compile_choice_fixed(state::ParserState, nctx::NodeCtx, ctx)
-    (; soptions, fieldvar, option, allowempty, choiceint, checkedmatch, matcher, target) = ctx
-    parse_exprs = if any(isempty, soptions)
+"""
+    compile_choice_fixed(state, nctx, ctx) -> SegmentOutput
+
+Produce a `SegmentOutput` for a fixed-output choice: the parsed option is not
+stored; the segment always prints the single `target` string. Allocates no
+bits and emits zero-width print/extract codegen.
+"""
+function compile_choice_fixed(::ParserState, nctx::NodeCtx, ctx)
+    (; sopts, fieldvar, allowempty, cint, guarded, matcher, target) = ctx
+    pexprs = if any(isempty, sopts)
         ExprVarLine[matcher]
     else
-        ExprVarLine[:($fieldvar = zero($choiceint)), checkedmatch]
+        ExprVarLine[:($fieldvar = zero($cint)), guarded]
     end
-    pmin = if allowempty; 0 else minimum(ncodeunits, soptions) end
+    pmin = if allowempty 0 else minimum(ncodeunits, sopts) end
     tlen = ncodeunits(target)
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     casefold = get(nctx, :casefold, false) === true
     arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
-                     for o in soptions]
+                     for o in sopts]
     SegmentOutput(
-        SegmentBounds(pmin:maximum(ncodeunits, soptions), tlen:tlen, 0, nothing),
-        SegmentCodegen(parse_exprs, ExprVarLine[], ExprVarLine[], Any[],
+        SegmentBounds(pmin:maximum(ncodeunits, sopts), tlen:tlen, 0, nothing),
+        SegmentCodegen(pexprs, ExprVarLine[], ExprVarLine[], Expr[],
                        ExprVarLine[:(print(io, $target))]),
         SegmentMeta(label,
-                    "Choice of literal string \"$(target)\" vs $(join(soptions, ", "))",
-                    join(soptions, " | "), nothing, nothing),
+                    string("Choice of literal string \"", target, "\" vs ", join(sopts, ", ")),
+                    join(sopts, " | "), nothing, nothing),
         arrangements)
 end
 
 ## Matcher assembly
 
 """
-    build_choice_matcher(matchoptions, soptions, casefold, fieldvar, foundaction,
-                         choiceint, state, nctx)
-        -> (matcher, matchoptions, soptions)
+    build_choice_matcher(mopts, sopts, casefold, fieldvar, onmatch,
+                         cint, state, nctx)
+        -> (matcher, mopts, sopts)
 
 Build parse-time matcher expressions for a choice node.
 
@@ -187,7 +200,7 @@ for injective hashes and widened verify tables when they reduce chunk count),
 falls back to linear scan. May reorder options to match hash output order.
 """
 function build_choice_matcher(state::ParserState, nctx::NodeCtx, cctx)
-    ph = find_perfect_hash(cctx.matchoptions, cctx.casefold)
+    ph = find_perfect_hash(cctx.mopts, cctx.casefold)
     if !isnothing(ph)
         build_hash_matcher(state, nctx, ph, cctx)
     else
@@ -196,30 +209,30 @@ function build_choice_matcher(state::ParserState, nctx::NodeCtx, cctx)
 end
 
 function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
-    (; casefold, fieldvar, foundaction, choiceint) = cctx
+    (; casefold, fieldvar, onmatch, cint) = cctx
     # Reorder options to match hash output order
-    matchoptions = cctx.matchoptions[ph.perm]
-    soptions = cctx.soptions[ph.perm]
-    optlens = Tuple(ncodeunits.(matchoptions))
+    mopts = cctx.mopts[ph.perm]
+    sopts = cctx.sopts[ph.perm]
+    optlens = Tuple(ncodeunits.(mopts))
     phoff = ph.pos - 1
     phposexpr = if iszero(phoff); :pos else :(pos + $phoff) end
     load = gen_load(ph.iT, phposexpr)
     foldedload = if !iszero(ph.foldmask); :($load | $(ph.foldmask)) else load end
     hashval = ph.hashexpr(foldedload)
-    minoptlen = minimum(ncodeunits, matchoptions)
-    maxoptlen = maximum(ncodeunits, matchoptions)
+    minoptlen = minimum(ncodeunits, mopts)
+    maxoptlen = maximum(ncodeunits, mopts)
     variable_len = minoptlen != maxoptlen
     # Common suffix: when variable-length options share trailing bytes (aligned
     # from the end), those bytes can be checked as a constant using pos+optlen
     # addressing. When the suffix covers the entire length difference, no
     # per-option tail verification is needed.
     suffix_len = if variable_len
-        min(common_suffix_length(matchoptions, casefold), maxoptlen - minoptlen)
+        min(common_suffix_length(mopts, casefold), maxoptlen - minoptlen)
     else
         0
     end
     suffix_check = if suffix_len > 0
-        gen_suffix_check(matchoptions[1][end-suffix_len+1:end], casefold, suffix_len)
+        gen_suffix_check(mopts[1][end-suffix_len+1:end], casefold, suffix_len)
     else
         nothing
     end
@@ -229,13 +242,13 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
     else
         nothing
     end
-    vt = gen_verify_table(matchoptions, casefold; skip = hash_skip)
+    vt = gen_verify_table(mopts, casefold; skip = hash_skip)
     # Try backward-aligned single-register verify when prior parsed content provides safety
     b = nctx[:current_branch]
     bvc = backward_verify_chunk(minoptlen)
     use_backward = !isnothing(bvc) && !variable_len && b.parsed_min >= bvc.padding
     bve = if use_backward
-        gen_backward_verify(matchoptions, casefold, minoptlen, bvc, fieldvar; skip = hash_skip)
+        gen_backward_verify(mopts, casefold, minoptlen, bvc, fieldvar; skip = hash_skip)
     else
         nothing
     end
@@ -244,18 +257,18 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
     use_wide_vt = !use_backward && isnothing(hash_skip) && wide_minlen > minoptlen &&
         length(register_chunks(wide_minlen)) < length(vt.chunks)
     vt_wide = if use_wide_vt
-        gen_verify_table(matchoptions, casefold; nbytes = wide_minlen)
+        gen_verify_table(mopts, casefold; nbytes = wide_minlen)
     else
         nothing
     end
     # Tail verification: skip when common suffix covers the entire length difference
     tailcheck = if variable_len && suffix_len < maxoptlen - minoptlen
-        gen_tail_verify(matchoptions, minoptlen, casefold, fieldvar)
+        gen_tail_verify(mopts, casefold, minoptlen, fieldvar)
     else
         nothing
     end
     # Index resolution depends on hash kind
-    nopts = length(matchoptions)
+    nopts = length(mopts)
     resolve_i = if ph.kind === :direct
         boundscheck = if nopts == 1
             :(i == 1)
@@ -272,63 +285,56 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
                       end),
                     :(found = !iszero(i))]
     end
-    # Collect matcher expressions: resolve_i then a single guarded block
+    # Assemble the guarded block: resolve index, verify bytes, then act.
+    # Each stage can set `found = false`; subsequent stages are guarded on it.
+    # `guard_append!` nests new statements inside `if found` when prior
+    # stages might have cleared the flag.
     parts = ExprVarLine[resolve_i...]
-    verify_body = ExprVarLine[]
+    body = ExprVarLine[]
+    guard_append!(stmts) =
+        if isempty(body) append!(body, stmts)
+        else push!(body, :(if found; $(stmts...) end)) end
+    # Stage 1: variable-length option → look up optlen, check available bytes
     if variable_len
-        optlencheck = emit_lengthcheck(state, nctx, :optlen, minoptlen, maximum(ncodeunits, matchoptions))
-        append!(verify_body,
-                ExprVarLine[:(optlen = $(optlens)[i]),
-                            :(found = $optlencheck)])
+        optlencheck = emit_lengthcheck(state, nctx, :optlen, minoptlen, maximum(ncodeunits, mopts))
+        append!(body, ExprVarLine[:(optlen = $(optlens)[i]),
+                                  :(found = $optlencheck)])
     end
-    # AND suffix check into a verify checks expression when present
-    and_suffix(checks) = isnothing(suffix_check) ? checks : :($checks && $suffix_check)
-    if use_backward || !isempty(vt.chunks) || !isnothing(suffix_check)
-        verify_stmts = if use_backward
-            ExprVarLine[bve.destructure..., :(found = $(and_suffix(bve.checks)))]
-        elseif use_wide_vt
-            ve = gen_verify_exprs(vt, fieldvar)
-            ve_wide = gen_verify_exprs(vt_wide, fieldvar)
-            wide_block = Expr(:block, ve_wide.destructure..., :(found = $(and_suffix(ve_wide.checks))))
-            verify_block = Expr(:block, ve.destructure..., :(found = $(and_suffix(ve.checks))))
-            ExprVarLine[Expr(:if, emit_static_lengthcheck(state, nctx, wide_minlen),
-                             wide_block, verify_block)]
-        elseif !isempty(vt.chunks)
-            ve = gen_verify_exprs(vt, fieldvar)
-            ExprVarLine[ve.destructure..., :(found = $(and_suffix(ve.checks)))]
-        else
-            # Suffix check only (no main verify chunks, e.g. hash-skip covered everything)
-            ExprVarLine[:(found = $suffix_check)]
-        end
-        # Wrap in found guard only when there are prior stages that may have cleared it
-        if !isempty(verify_body)
-            push!(verify_body, :(if found; $(verify_stmts...) end))
-        else
-            append!(verify_body, verify_stmts)
-        end
+    # Stage 2: byte verification (backward, widened, normal, or suffix-only)
+    and_suffix(checks) = if isnothing(suffix_check) checks else :($checks && $suffix_check) end
+    if use_backward
+        guard_append!(ExprVarLine[bve.destructure..., :(found = $(and_suffix(bve.checks)))])
+    elseif use_wide_vt
+        ve = gen_verify_exprs(vt, fieldvar)
+        ve_wide = gen_verify_exprs(vt_wide, fieldvar)
+        wide_block = Expr(:block, ve_wide.destructure..., :(found = $(and_suffix(ve_wide.checks))))
+        narrow_block = Expr(:block, ve.destructure..., :(found = $(and_suffix(ve.checks))))
+        guard_append!(ExprVarLine[Expr(:if, emit_static_lengthcheck(state, nctx, wide_minlen),
+                                       wide_block, narrow_block)])
+    elseif !isempty(vt.chunks)
+        ve = gen_verify_exprs(vt, fieldvar)
+        guard_append!(ExprVarLine[ve.destructure..., :(found = $(and_suffix(ve.checks)))])
+    elseif !isnothing(suffix_check)
+        guard_append!(ExprVarLine[:(found = $suffix_check)])
     end
-    if !isnothing(tailcheck)
-        push!(verify_body, tailcheck)
-    end
-    coerced_i = if ph.kind === :direct && ph.iT === choiceint; :i else :(i % $choiceint) end
+    # Stage 3: per-option tail verification for variable-length options
+    !isnothing(tailcheck) && push!(body, tailcheck)
+    # Stage 4: advance pos and record the matched option
+    coerced_i = if ph.kind === :direct && ph.iT === cint; :i else :(i % $cint) end
     action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end)),
-                         foundaction(coerced_i)]
-    if isempty(verify_body)
-        append!(verify_body, action)
-    else
-        push!(verify_body, :(if found; $(action...) end))
-    end
-    push!(parts, :(if found; $(verify_body...) end))
-    (parts, matchoptions, soptions)
+                         onmatch(coerced_i)]
+    guard_append!(action)
+    push!(parts, :(if found; $(body...) end))
+    (parts, mopts, sopts)
 end
 
 function build_linear_matcher(state::ParserState, nctx::NodeCtx, cctx)
-    (; matchoptions, soptions, casefold, fieldvar, foundaction, choiceint) = cctx
+    (; mopts, sopts, casefold, onmatch, cint) = cctx
     # Sort longest-first for greedy matching when options share prefixes
-    perm = sortperm(matchoptions, by=ncodeunits, rev=true)
-    matchoptions = matchoptions[perm]
-    soptions = soptions[perm]
-    opts = if casefold; matchoptions else soptions end
+    perm = sortperm(mopts, by=ncodeunits, rev=true)
+    mopts = mopts[perm]
+    sopts = sopts[perm]
+    opts = if casefold; mopts else sopts end
     optlens = Tuple(ncodeunits.(opts))
     optcus = Tuple(Tuple(codeunits(s)) for s in opts)
     loadbyte = if casefold
@@ -336,7 +342,7 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, cctx)
     else
         :(@inbounds idbytes[pos + j - 1])
     end
-    action = foundaction(:(i % $choiceint))
+    action = onmatch(:(i % $cint))
     loop_body = quote
         found = true
         for j in 1:prefixlen
@@ -356,7 +362,7 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, cctx)
     maxlen = maximum(optlens)
     all_fit = emit_static_lengthcheck(state, nctx, maxlen)
     matcher = ExprVarLine[Expr(:if, all_fit, unguarded_loop, guarded_loop)]
-    (matcher, matchoptions, soptions)
+    (matcher, mopts, sopts)
 end
 
 ## Perfect hashing
@@ -373,30 +379,30 @@ if no hash worked.
 """
 function search_hash_families(try_fn::F, nopts::Int, iT::DataType) where {F <: Function}
     best = (nothing, typemax(Int))
-    accept!(result) =
-        if !isnothing(result) && last(result) < last(best)
-            best = result
-        end
     # Identity family (injective — hash hit uniquely identifies the option)
-    accept!(try_fn(v -> v, v -> v, true, typemax(iT) % UInt64))
-    last(best) == 0 && return best
+    res = try_fn(v -> v, v -> v, true, typemax(iT) % UInt64)
+    !isnothing(res) && last(res) < last(best) && (best = res)
+    iszero(last(best)) && return best
     # Mod, shift-mod, and multiply-shift-mod families
     one_t = one(iT)
     for m in nopts:2*nopts
-        last(best) == 0 && break
+        iszero(last(best)) && break
         mt = iT(m)
-        accept!(try_fn(v -> v % m + 1, v -> :($v % $mt + $one_t), false, UInt64(m)))
+        res = try_fn(v -> v % m + 1, v -> :($v % $mt + $one_t), false, UInt64(m))
+        !isnothing(res) && last(res) < last(best) && (best = res)
         for k in 1:min(8 * sizeof(iT) - 1, 16)
-            last(best) == 0 && break
-            accept!(try_fn(v -> (v >> k) % m + 1, v -> :(($v >> $k) % $mt + $one_t), false, UInt64(m)))
+            iszero(last(best)) && break
+            res = try_fn(v -> (v >> k) % m + 1, v -> :(($v >> $k) % $mt + $one_t), false, UInt64(m))
+            !isnothing(res) && last(res) < last(best) && (best = res)
         end
         for c in (0x9e3779b97f4a7c15, 0x517cc1b727220a95, 0x6c62272e07bb0142)
-            last(best) == 0 && break
+            iszero(last(best)) && break
             ct = c % iT
             for k in max(1, 8 * sizeof(iT) - 8):8 * sizeof(iT) - 1
-                last(best) == 0 && break
-                accept!(try_fn(v -> (iT(v) * ct) >> k % m + 1,
-                               v -> :(($v * $ct) >> $k % $mt + $one_t), false, UInt64(m)))
+                iszero(last(best)) && break
+                res = try_fn(v -> (iT(v) * ct) >> k % m + 1,
+                             v -> :(($v * $ct) >> $k % $mt + $one_t), false, UInt64(m))
+                !isnothing(res) && last(res) < last(best) && (best = res)
             end
         end
     end
@@ -449,15 +455,15 @@ function find_perfect_hash(options::Vector{String}, casefold::Bool)
     isempty(candidates) && return nothing
     best = (nothing, typemax(Int))
     for (; pos, iT, values, foldmask) in candidates
-        last(best) == 0 && break
+        iszero(last(best)) && break
         result = search_hash_families(nopts, iT) do fn, expr_fn, injective, _maxval
             hvals = map(fn, values)
             any(h -> h < 1, hvals) && return nothing
             length(unique(hvals)) == nopts || return nothing
-            result = classify_hash(hvals, nopts, options, pos, iT, foldmask % iT, expr_fn)
-            isnothing(result) && return nothing
-            cost = result.cost + (result.ph.kind === :direct && !injective)
-            (merge(result.ph, (; injective)), cost)
+            classified = classify_hash(hvals, nopts, pos, iT, foldmask % iT, expr_fn)
+            isnothing(classified) && return nothing
+            cost = classified.cost + (classified.ph.kind === :direct && !injective)
+            (merge(classified.ph, (; injective)), cost)
         end
         if !isnothing(first(result)) && last(result) < last(best)
             best = result
@@ -466,7 +472,7 @@ function find_perfect_hash(options::Vector{String}, casefold::Bool)
     first(best)
 end
 
-function classify_hash(hvals::Vector{UInt64}, nopts::Int, options::Vector{String},
+function classify_hash(hvals::Vector{UInt64}, nopts::Int,
                        pos::Int, iT::DataType, foldmask, hashexpr_fn;
                        max_tablelen::Int = 4 * nopts)
     sorted_indices = sortperm(hvals)
@@ -507,7 +513,7 @@ number of register-sized loads needed to verify the remaining bytes.
 function find_best_hash_skip(optlen::Int, hash_offset::Int, hash_width::Int)
     nloads(n) = n ÷ sizeof(Int) + count_ones(n % sizeof(Int))
     baseline = nloads(optlen)
-    baseline == 0 && return (hash_offset, hash_width)
+    iszero(baseline) && return (hash_offset, hash_width)
     best_cost, best_start, best_width = baseline, 0, 0
     for start in hash_offset:hash_offset + hash_width - 1
         for w in 1:hash_offset + hash_width - start
@@ -525,17 +531,19 @@ function find_best_hash_skip(optlen::Int, hash_offset::Int, hash_width::Int)
 end
 
 ## Common suffix
-
 # Longest suffix shared by all options, aligned from the end.
 function common_suffix_length(options::Vector{String}, casefold::Bool)
     length(options) < 2 && return 0
     minlen = minimum(ncodeunits, options)
-    fold(b) = casefold ? (b | 0x20) : b
     ref = options[1]
     reflen = ncodeunits(ref)
     for k in 1:minlen
-        byte = fold(codeunit(ref, reflen - k + 1))
-        all(opt -> fold(codeunit(opt, ncodeunits(opt) - k + 1)) == byte, options) || return k - 1
+        b = codeunit(ref, reflen - k + 1)
+        byte = if casefold; b | 0x20 else b end
+        all(options) do opt
+            ob = codeunit(opt, ncodeunits(opt) - k + 1)
+            (if casefold; ob | 0x20 else ob end) == byte
+        end || return k - 1
     end
     minlen
 end
@@ -547,7 +555,7 @@ function gen_suffix_check(suffix::String, casefold::Bool, suffix_len::Int)
         (; value, mask) = pack_chunk(suffix, c; casefold)
         tailoff = suffix_len - c.offset
         check = gen_masked_compare(c.iT, :(pos + optlen - $tailoff), value, mask)
-        rest == :(true) ? check : :($check && $rest)
+        if rest == :(true) check else :($check && $rest) end
     end
 end
 
@@ -654,13 +662,13 @@ function gen_backward_verify(options::Vector{String}, casefold::Bool,
 end
 
 """
-    gen_tail_verify(options, minoptlen, casefold, prefix) -> Expr
+    gen_tail_verify(options, casefold, minoptlen, prefix) -> Expr
 
 Generate verification for the tail bytes (beyond `minoptlen`) of
 variable-length options. Uses register-sized comparisons when all
 non-empty tails have the same length, otherwise a codeunit loop.
 """
-function gen_tail_verify(options::Vector{String}, minoptlen::Int, casefold::Bool, prefix::Symbol)
+function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int, prefix::Symbol)
     tails = [opt[minoptlen+1:end] for opt in options]
     taillens = ncodeunits.(tails)
     has_empty = any(iszero, taillens)

@@ -12,15 +12,29 @@
 ## Top-level entry point
 
 """
-    maketype(segments, mod, name, pattern; kwargs...) -> (Expr, ParserState)
+    maketype(segments, mod, name, pattern; kwargs...) -> (NamedTuple, ParserState)
 
 Full compilation pipeline: create state, walk the pattern, and assemble all
 method definitions for a bit-packed primitive type.
 
-Returns a `(block, state)` tuple. `block` is a `:toplevel` expression ready
-for `eval`. `state` carries compilation metadata (error messages, segment
-outputs, globals) that downstream packages can inspect to generate additional
-methods before evaluating the block.
+Returns `(typeparts, state)`. `typeparts` is a `NamedTuple` of generated `Expr`s
+(one per method/definition). Use `Expr(:toplevel, values(typeparts)...)` to
+produce a block ready for `eval`, or manipulate individual components
+(e.g. replace `typeparts.print`) before assembling.
+
+# Components
+
+- `typedef`: primitive type declaration + nbits/parsebounds/printbounds methods
+- `parsebytes`: `parsebytes` method
+- `tobytes`: `tobytes` method
+- `print`: `Base.print` method
+- `string`: `Base.string` method
+- `properties`: `propertynames` + `getproperty` methods
+- `segments`: `segments(::Type)` + `segments(::instance)` methods
+- `constructor`: positional constructor
+- `show`: `Base.show` method
+- `isless`: `Base.isless` method
+- `hookdata`: `Expr(:block, ...)` of additional expressions from finalize hooks
 """
 function maketype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
                   supertype::Type = Any,
@@ -41,40 +55,22 @@ end
 ## Assembly
 
 """
-    assemble_type(exprs, state, name, segments) -> (Expr, ParserState)
+    assemble_type(exprs, state, name, segments) -> (NamedTuple, ParserState)
 
-Assemble all method definitions for the generated type.
+Assemble all method definitions for the generated type as a `NamedTuple`
+of expression components.
 
-Produces the primitive type declaration and methods for `parsebytes`,
-`tobytes`, `propertynames`, `getproperty`, `segments`, the positional
-constructor, `show`, and `isless`. Runs finalize hooks from the segment
-registry.
+Runs finalize hooks from the segment registry, collecting their outputs
+in the `hookdata` field.
 """
 function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
                        segments::NamedTuple = (;))
-    block = Expr(:toplevel)
     numbits = 8 * cld(state.bits, 8)
     implement_casting!(state, exprs.print)
     root = state.branches[1]
     M = PackedParselets
-    push!(block.args,
-          :(Base.@__doc__(primitive type $(esc(name)) <: $(state.supertype) $numbits end)),
-          :($(GlobalRef(M, :nbits))(::Type{$(esc(name))}) = $(state.bits)),
-          :($(GlobalRef(M, :parsebounds))(::Type{$(esc(name))}) = $((root.parsed_min, root.parsed_max))),
-          :($(GlobalRef(M, :printbounds))(::Type{$(esc(name))}) = $((root.print_min, root.print_max))),
-          assemble_parsebytes(exprs.parse, exprs.segments, state, name),
-          assemble_tobytes(exprs.print, state, name),
-          assemble_print(exprs.print, state, name),
-          assemble_string(state, name),
-          :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(map(first, exprs.properties)))),
-          assemble_properties(exprs.properties, exprs.segments, state, name),
-          assemble_segments_type(exprs.segments, state, name),
-          assemble_segments_value(exprs.segments, exprs.print, state, name),
-          assemble_constructor(exprs.segments, exprs.properties, state, name),
-          assemble_show(exprs.segments, exprs.properties, state, name),
-          :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
-                Core.Intrinsics.ult_int(a, b)))
-    # Run finalize hooks from the segment registry
+    # Run finalize hooks, collecting extra expressions
+    hookdata = Expr[]
     seen_kinds = Set{Symbol}()
     for (kind, _) in state.segment_outputs
         kind ∈ seen_kinds && continue
@@ -82,15 +78,38 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
         if haskey(segments, kind)
             def = getfield(segments, kind)
             if !isnothing(def.finalize)
-                def.finalize(block, exprs, state, name)
+                def.finalize(hookdata, exprs, state, name)
             end
         end
     end
+    typeparts = (;
+        typedef = Expr(:block,
+            :(Base.@__doc__(primitive type $(esc(name)) <: $(state.supertype) $numbits end)),
+            :($(GlobalRef(M, :nbits))(::Type{$(esc(name))}) = $(state.bits)),
+            :($(GlobalRef(M, :parsebounds))(::Type{$(esc(name))}) = $((root.parsed_min, root.parsed_max))),
+            :($(GlobalRef(M, :printbounds))(::Type{$(esc(name))}) = $((root.print_min, root.print_max)))),
+        parsebytes = assemble_parsebytes(exprs.parse, exprs.segments, state, name),
+        tobytes = assemble_tobytes(exprs.print, state, name),
+        print = assemble_print(exprs.print, state, name),
+        string = assemble_string(state, name),
+        properties = Expr(:block,
+            :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(map(first, exprs.properties)))),
+            assemble_properties(exprs.properties, exprs.segments, state, name)),
+        segments = Expr(:block,
+            assemble_segments_type(exprs.segments, state, name),
+            assemble_segments_value(exprs.segments, exprs.print, state, name)),
+        constructor = assemble_constructor(exprs.segments, exprs.properties, state, name),
+        show = assemble_show(exprs.segments, exprs.properties, state, name),
+        isless = :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
+                       Core.Intrinsics.ult_int(a, b)),
+        hookdata = Expr(:block, hookdata...),
+    )
     # Qualify bare references to PackedParselets runtime functions so that
     # generated code works when eval'd in any module.
-    qualify_runtime_refs!(block, PackedParselets)
-    push!(block.args, esc(name))
-    (block, state)
+    for v in values(typeparts)
+        v isa Expr && qualify_runtime_refs!(v, PackedParselets)
+    end
+    (typeparts, state)
 end
 
 ## parsebytes
@@ -101,8 +120,8 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
     M = PackedParselets
     # Primary pass: optimal length-check insertion with sentinel resolution
     resolved = implement_casting!(state, pexprs)
-    insert_length_checks!(resolved, state.branches, state)
-    fold_static_branches!(resolved)
+    insert_length_checks!(state, resolved, state.branches)
+    while fold_branches!(resolved) end
     # Resolve __checksum_gate sentinel
     gate_idx = findfirst(resolved) do e
         Meta.isexpr(e, :call) && first(e.args) === :__checksum_gate
@@ -115,7 +134,7 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
     formstr = segments_formstring(segments, state.branches)
     errmsg = register_errmsg!(state, string(
         "Expected at least ", parsed_min, " bytes",
-        isempty(formstr) ? "" : string(", must match the form '", formstr, "'")))
+        if isempty(formstr) "" else string(", must match the form '", formstr, "'") end))
     split_idx = findfirst(resolved) do e
         Meta.isexpr(e, :call) && first(e.args) === :__branch_check && e.args[2] == 1
     end
@@ -164,7 +183,7 @@ end
 
 ## print / string
 
-function assemble_print(pexprs::Vector{ExprVarLine}, state::ParserState, name::Symbol)
+function assemble_print(pexprs::Vector{ExprVarLine}, ::ParserState, name::Symbol)
     ioexprs = map(strip_segsets! ∘ copy, pexprs)
     filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, ioexprs)
     # Resolve __tobytes_print(io, ...) markers to print(io, ...) for the IO path
@@ -194,8 +213,8 @@ function assemble_string(state::ParserState, name::Symbol)
 end
 
 # Replace __tobytes_print(io, ...) markers with print(io, ...) for the IO code path.
-function resolve_print_markers!(exprs)
-    for (i, expr) in enumerate(exprs)
+function resolve_print_markers!(exprs::Vector)
+    for expr in exprs
         expr isa Expr || continue
         if Meta.isexpr(expr, :call) && length(expr.args) >= 2 && expr.args[1] == :__tobytes_print
             expr.args[1] = :print
@@ -260,12 +279,10 @@ function assemble_constructor(segs::Vector{ValueSegment},
               end for (aname, si) in args]
     argbindings = [:($(segs[si].argvar) = $aname) for (aname, si) in args]
     scope_checks = constructor_scope_checks(args, segs, state)
-    encode_exprs = reduce(vcat, (segs[si].impart for (_, si) in args); init=Any[])
+    encode_exprs = reduce(vcat, (segs[si].impart for (_, si) in args); init=Expr[])
     targetsize = cld(state.bits, 8)
     for expr in encode_exprs
-        if expr isa Expr
-            implement_casting!(expr, name, targetsize)
-        end
+        implement_casting!(expr, name, targetsize)
     end
     :(function $(esc(name))($(params...))
           parsed = $(zero_parsed_expr(state))
@@ -292,14 +309,21 @@ function constructor_scope_checks(args::Vector{Tuple{Symbol, Int}},
         isnothing(scope) && continue
         push!(get!(Vector{Int}, scope_args, scope), idx)
     end
-    [:(if isnothing($(args[first(pidxs)][1])) && !isnothing($(args[first(cidxs)][1]))
-           throw(ArgumentError(
-               string("Cannot specify ", $(QuoteNode(args[first(cidxs)][1])),
-                      " when ", $(QuoteNode(args[first(pidxs)][1])), " is nothing")))
-       end)
-     for (scope, cidxs) in scope_args
-     for pidxs in (get(scope_args, get(scope_parents, scope, nothing), nothing),)
-     if !isnothing(pidxs)]
+    checks = Expr[]
+    for (scope, cidxs) in scope_args
+        parent_scope = get(scope_parents, scope, nothing)
+        isnothing(parent_scope) && continue
+        pidxs = get(scope_args, parent_scope, nothing)
+        isnothing(pidxs) && continue
+        parg = args[first(pidxs)][1]
+        carg = args[first(cidxs)][1]
+        push!(checks, :(if isnothing($parg) && !isnothing($carg)
+            throw(ArgumentError(
+                string("Cannot specify ", $(QuoteNode(carg)),
+                       " when ", $(QuoteNode(parg)), " is nothing")))
+        end))
+    end
+    checks
 end
 
 ## show
@@ -341,7 +365,7 @@ end
 
 ## segments
 
-function assemble_segments_type(segs::Vector{ValueSegment}, state::ParserState, name::Symbol)
+function assemble_segments_type(segs::Vector{ValueSegment}, ::ParserState, name::Symbol)
     isempty(segs) && return :()
     M = PackedParselets
     :(function $(GlobalRef(M, :segments))(::Type{$(esc(name))})
@@ -351,7 +375,7 @@ function assemble_segments_type(segs::Vector{ValueSegment}, state::ParserState, 
 end
 
 function assemble_segments_value(segs::Vector{ValueSegment}, pexprs::Vector{ExprVarLine},
-                                  state::ParserState, name::Symbol)
+                                  ::ParserState, name::Symbol)
     isempty(segs) && return :()
     M = PackedParselets
     svars = Tuple{Int, Symbol}[]
@@ -376,7 +400,7 @@ function rewrite_segment_captures!(segvars::Vector{Tuple{Int, Symbol}},
     if Meta.isexpr(expr, :(=)) && first(expr.args) === :__segment_printed
         _, i = expr.args
         if i > length(segvars)
-            anon = segs[i].nbits == 0
+            anon = iszero(segs[i].nbits)
             precount = sum((s.nbits > 0 for s in segs[1:i-1]), init = 0)
             push!(segvars, (if anon; 0 else precount + 1 end, Symbol("seg$i")))
         end
@@ -478,7 +502,7 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
     end
 end
 
-function rewrite_print_call(args)
+function rewrite_print_call(args::Vector)
     if length(args) == 1
         arg = first(args)
         if Meta.isexpr(arg, :call) && first(arg.args) == :string
@@ -554,4 +578,3 @@ function qualify_runtime_refs!(expr::Expr, mod::Module)
     end
     expr
 end
-

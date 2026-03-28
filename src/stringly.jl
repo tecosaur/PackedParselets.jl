@@ -18,7 +18,7 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
         throw(ArgumentError("Expected ASCII string for literal with casefolding"))
     litref = if casefold; lowercase(lit) else lit end
     litlen = ncodeunits(litref)
-    mismatch = gen_literal_mismatch(litref, casefold, state, nctx)
+    mismatch = gen_literal_mismatch(state, nctx, litref, casefold)
     lencheck = emit_lengthcheck(state, nctx, litlen)
     parse = ExprVarLine[
         :(if !$lencheck
@@ -30,12 +30,12 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
     spans = [[byte_set(codeunit(lit, i), casefold) for i in 1:litlen]]
     SegmentOutput(
         SegmentBounds(litlen:litlen, litlen:litlen, 0, nothing),
-        SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[:(print(io, $lit))]),
+        SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Expr[], ExprVarLine[:(print(io, $lit))]),
         SegmentMeta(:literal, sprint(show, lit), lit, nothing, nothing),
         spans)
 end
 
-function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
+function compile_skip(::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
     all(a -> a isa String, args) || throw(ArgumentError("Expected all arguments to be strings for skip"))
     pval = get(nctx, :print, nothing)
     sargs = Vector{String}(args)
@@ -52,13 +52,13 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segme
         plen = ncodeunits(pval)
         SegmentOutput(
             SegmentBounds(0:parsed_max, plen:plen, 0, nothing),
-            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[:(print(io, $pval))]),
+            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Expr[], ExprVarLine[:(print(io, $pval))]),
             SegmentMeta(:skip, "Skipped literal string \"$(join(sargs, ", "))\"", pval, nothing, nothing),
             arrangements)
     else
         SegmentOutput(
             SegmentBounds(0:parsed_max, 0:0, 0, nothing),
-            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Any[], ExprVarLine[]),
+            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Expr[], ExprVarLine[]),
             SegmentMeta(:skip, "", "", nothing, nothing),
             arrangements)
     end
@@ -67,7 +67,7 @@ end
 ## Codegen: literal mismatch
 
 """
-    gen_literal_mismatch(str, casefold, state, nctx) -> Expr
+    gen_literal_mismatch(state, nctx, str, casefold) -> Expr
 
 Emit an expression that is `true` when `idbytes` at `pos` does not match `str`.
 
@@ -75,8 +75,8 @@ When widening to a single register load reduces the chunk count, emits both
 wide and narrow paths gated by `emit_static_lengthcheck`, so that
 `fold_static_branches!` can pick the winner.
 """
-function gen_literal_mismatch(str::String, casefold::Bool,
-                              state::ParserState, nctx::NodeCtx)
+function gen_literal_mismatch(state::ParserState, nctx::NodeCtx,
+                              str::String, casefold::Bool)
     litlen = ncodeunits(str)
     wide_n = min(nextpow(2, litlen), sizeof(UInt) * cld(litlen, sizeof(UInt)))
     use_wide = wide_n > litlen && length(register_chunks(wide_n)) < length(register_chunks(litlen))
@@ -154,10 +154,7 @@ function gen_string_match(str::String, casefold::Bool, nbytes::Int = ncodeunits(
     end
 end
 
-function negate_match(checks::Vector{Expr})
+negate_match(checks::Vector{Expr}) =
     :(!($(foldl((a, b) -> :($a && $b), checks))))
-end
-
-function conjoin_match(str::String, casefold::Bool)
+conjoin_match(str::String, casefold::Bool) =
     foldl((a, b) -> :($a && $b), gen_string_match(str, casefold))
-end

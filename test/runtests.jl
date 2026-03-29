@@ -2810,6 +2810,31 @@ end # hex
         check_roundtrips(CharsetWithLiteral, ("X-0000-0", "X-A1B2-7", "X-FFFF-99"))
         @test_neverthrow PP.parsebytes(CharsetWithLiteral, ::Vector{UInt8})
     end
+    @testset "NumericCharset (Crockford base-32)" begin
+        # Crockford base-32: 0-9 a-h j-k m-n p-t v-z (32 values, skipping i l o u)
+        croc32 = :(charset(6, '0':'9', 'a':'h', 'j':'k', 'm':'n', 'p':'t', 'v':'z',
+                           numeric=true, casefold=true))
+        iddef = :(@defpacked CrocNum ("0", :id($croc32), :check(digits(2, pad=2))))
+        @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=22:22)
+        eval(iddef)
+        # 32^6 - 1 = 1073741823 is the maximum value
+        id = parse(CrocNum, "05cy4wa09")
+        @test id.id isa Integer
+        @test id.id > 0
+        # Round-trips
+        check_roundtrips(CrocNum, ("000000000", "0zzzzzz99", "05cy4wa09"))
+        # Case insensitive
+        @test parse(CrocNum, "05CY4WA09") == id
+        # Constructor accepts integer
+        id2 = CrocNum(id.id, 9)
+        @test id2 == id
+        # Invalid chars (i, l, o, u excluded)
+        @test tryparse(CrocNum, "0iiiiii00") === nothing
+        @test tryparse(CrocNum, "0llllll00") === nothing
+        @test tryparse(CrocNum, "0oooooo00") === nothing
+        @test tryparse(CrocNum, "0uuuuuu00") === nothing
+        @test_neverthrow PP.parsebytes(CrocNum, ::Vector{UInt8})
+    end
 end # charset
 
 @testset "embed" begin

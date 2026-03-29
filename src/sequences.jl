@@ -265,25 +265,43 @@ end
 
 function charseq_impart_exprs(state::ParserState, cspec::NamedTuple,
                               argvar::Symbol, charvar::Symbol,
-                              lenvar::Symbol, lenoffset::Symbol)
+                              lenvar::Symbol, lenoffset::Symbol;
+                              numeric::Bool=false)
     (; cT, lT, cfold, oneindexed, ranges, kind, variable, minlen, maxlen,
        lenbase, bitpos, lenbits) = cspec
     kindstr = String(kind)
-    body = Expr[
-        :(($lenvar, $charvar) = parsechars($cT, String($argvar), $maxlen, $ranges, $cfold, $oneindexed)),
-        :($lenvar == ncodeunits(String($argvar)) || throw(ArgumentError(
-            string("Invalid characters in \"", $argvar, "\" for ", $kindstr))))]
-    if variable
-        push!(body,
-            :($lenvar < $minlen && throw(ArgumentError(
-                string("String \"", $argvar, "\" is too short (minimum ", $minlen, " characters)")))),
-            :($lenvar > $maxlen && throw(ArgumentError(
-                string("String \"", $argvar, "\" is too long (maximum ", $maxlen, " characters)")))))
+    nvals = sum(length, ranges)
+    # Input validation and char/len extraction
+    body = if numeric
+        maxval = nvals^maxlen - 1
+        exprs = Expr[
+            :($argvar >= 0 || throw(ArgumentError(
+                string($kindstr, " value must be non-negative, got ", $argvar)))),
+            :($argvar <= $maxval || throw(ArgumentError(
+                string($kindstr, " value must be at most ", $maxval, ", got ", $argvar)))),
+            :($charvar = $argvar % $cT)]
+        variable && push!(exprs,
+            :($lenvar = if iszero($argvar) 1 else Int(ceil(log($nvals, $argvar + 1))) end))
+        exprs
     else
-        push!(body,
-            :($lenvar != $maxlen && throw(ArgumentError(
-                string("String \"", $argvar, "\" must be exactly ", $maxlen, " characters")))))
+        exprs = Expr[
+            :(($lenvar, $charvar) = parsechars($cT, String($argvar), $maxlen, $ranges, $cfold, $oneindexed)),
+            :($lenvar == ncodeunits(String($argvar)) || throw(ArgumentError(
+                string("Invalid characters in \"", $argvar, "\" for ", $kindstr))))]
+        if variable
+            push!(exprs,
+                :($lenvar < $minlen && throw(ArgumentError(
+                    string("String \"", $argvar, "\" is too short (minimum ", $minlen, " characters)")))),
+                :($lenvar > $maxlen && throw(ArgumentError(
+                    string("String \"", $argvar, "\" is too long (maximum ", $maxlen, " characters)")))))
+        else
+            push!(exprs,
+                :($lenvar != $maxlen && throw(ArgumentError(
+                    string("String \"", $argvar, "\" must be exactly ", $maxlen, " characters")))))
+        end
+        exprs
     end
+    # Packing (shared between numeric and string modes)
     push!(body, emit_pack(state, cT, charvar, bitpos - lenbits))
     if variable
         lenpack = if iszero(lenbase)
@@ -507,11 +525,12 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
             ExprVarLine[:(printchars(io, $gexpr, $gsize, $ranges, $oneindexed))]
         end
     end
-    tostringex = :(chars2string($(charargs.args...)))
+    numeric = get(nctx, :numeric, false)::Bool
+    tostringex = if numeric; :($charvar % $cT) else :(chars2string($(charargs.args...))) end
     argvar = gensym("arg_charseq")
     cspec = (; cT, lT, cfold, oneindexed, ranges, kind,
                variable, minlen, maxlen, lenbase, bitpos, lenbits)
-    impart_body = charseq_impart_exprs(state, cspec, argvar, charvar, lenvar, lenoffset)
+    impart_body = charseq_impart_exprs(state, cspec, argvar, charvar, lenvar, lenoffset; numeric)
     seg_shortform = let charset = join((string(Char(first(r)), '-', Char(last(r))) for r in ranges), "")
         count = if variable; "$minlen:$maxlen" else "$maxlen" end
         "$charset × $count"
@@ -549,7 +568,8 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     SegmentOutput(
         SegmentBounds(minlen:parsed_max, minlen+nseps:maxlen+nseps, totalbits, sentinel),
         SegmentCodegen(parse_exprs, seg_extract, copy(extracts), seg_impart, printexprs),
-        SegmentMeta(label, seg_desc, seg_shortform, :AbstractString, argvar),
+        SegmentMeta(label, seg_desc, seg_shortform,
+                    if numeric; :Integer else :AbstractString end, argvar),
         bytespans)
 end
 

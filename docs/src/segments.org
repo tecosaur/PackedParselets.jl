@@ -105,10 +105,17 @@ Custom character set from explicit ranges.
 charset(n, 'A':'Z', '0':'9')            # fixed width
 charset(lo:hi, 'a':'f', '-')            # variable width, ranges + single chars
 charset(n, 'A':'Z', casefold=true)      # case-insensitive
+charset(6, '0':'9', 'a':'z', numeric=true)  # numeric: extract returns integer
 #+end_src
 
 The first argument is the length (integer or range). Subsequent
 arguments are character ranges (='a':'z'=) or single characters.
+
+With ~numeric=true~, the extracted property value is the packed integer
+(treating each character as a digit in base /N/ where /N/ is the
+alphabet size) rather than a string. This enables ~checkdigit~
+validation on charset fields and is useful for base-32 or similar
+encodings where the character sequence represents a number.
 
 ** ~choice~
 

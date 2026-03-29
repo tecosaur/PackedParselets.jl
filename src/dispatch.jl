@@ -12,7 +12,7 @@ const CORE_SEGMENTS = (
     letters = SegmentDef(:letters,    compile_charseq,  (:upper, :lower, :casefold, :skip, :groups)),
     alphnum = SegmentDef(:alphnum,    compile_charseq,  (:upper, :lower, :casefold, :skip, :groups)),
     hex     = SegmentDef(:hex,        compile_charseq,  (:upper, :lower, :casefold, :skip, :groups)),
-    charset = SegmentDef(:charset,    compile_charseq,  (:upper, :lower, :casefold, :skip, :groups)),
+    charset = SegmentDef(:charset,    compile_charseq,  (:upper, :lower, :casefold, :skip, :groups, :numeric)),
     embed   = SegmentDef(:embed,      compile_embed,    ()),
     choice  = SegmentDef(:choice,     compile_choice,   (:casefold, :is, :type)),
 )

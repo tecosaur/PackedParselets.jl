@@ -51,14 +51,14 @@ digits(n, base=16) # n hex digits
 digits(n, min=A, max=B, pad=P)
 #+end_src
 
-| Keyword  | Default | Description                                        |
-|----------+---------+----------------------------------------------------|
-| ~base~   |      10 | Numeric base (2--62)                               |
-| ~min~    |       0 | Minimum value                                      |
-| ~max~    |     --- | Maximum value                                      |
-| ~pad~    |       0 | Zero-pad printed output to width                   |
-| ~skip~   |     --- | Characters to skip during parse (e.g. ~"-"~)       |
-| ~groups~ |     --- | Print in groups: ~N~ (uniform) or ~(A, B, C)~      |
+| Keyword | Default | Description                                |
+|---------+---------+--------------------------------------------|
+| ~base~    | 10      | Numeric base (2--62)                       |
+| ~min~     | 0       | Minimum value                              |
+| ~max~     | ---     | Maximum value                              |
+| ~pad~     | 0       | Zero-pad printed output to width           |
+| ~skip~    | ---     | Characters to skip during parse (e.g. ~"-"~) |
+| ~groups~  | ---     | Print in groups: ~N~ (uniform) or ~(A, B, C)~  |
 
 When ~skip~ is set, the specified characters are silently consumed during
 parsing.  The ~groups~ keyword (requires ~skip~) prints the value with
@@ -121,10 +121,10 @@ choice("alpha", "beta", "gamma")         # value-carrying: stores index
 choice("http://", "https://", is="http") # fixed: stores bool (matched canonical?)
 #+end_src
 
-| Keyword     | Description                                    |
-|-------------+------------------------------------------------|
-| ~casefold~  | Case-insensitive matching (default from parent) |
-| ~is~        | Canonical form: store only whether it matched |
+| Keyword  | Description                                     |
+|----------+-------------------------------------------------|
+| ~casefold~ | Case-insensitive matching (default from parent) |
+| ~is~       | Canonical form: store only whether it matched   |
 
 When captured as a field, the property returns a ~Symbol~ (value form)
 or is unavailable (fixed form). Uses [[file:opt/perfecthash.org][perfect
@@ -157,6 +157,15 @@ When the arms have a byte position where their possible values are
 disjoint (e.g. the first byte is ~"A"~ in one arm and ~"B"~ in another),
 the compiler emits a dispatch table for O(1) arm selection instead of
 sequential try-and-rewind.
+
+Arms that share the same field name produce a single property that
+dispatches on the discriminant:
+
+#+begin_src julia
+choice(seq("VCV", :id(digits(9, pad=9))),
+       seq("RCV", :id(digits(8, pad=8))))
+# .id returns the active arm's value
+#+end_src
 
 ** ~embed~
 

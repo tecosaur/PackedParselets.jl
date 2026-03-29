@@ -175,11 +175,17 @@ Uses [[file:opt/stringmatch.org][word-sized comparisons]].
 
 Strip optional prefixes on parse. Does not store any value.
 
+Each argument is a sequential step — tried in order, each optionally
+stripping one prefix.  A bare string is a step with one alternative;
+~choice(...)~ provides multiple alternatives at the same position.
+
 #+begin_src julia
-skip("http://", "https://")         # strip if present, print nothing
-skip("http://", print="https://")   # strip if present, always print "https://"
-skip(print="-")                     # strip "-" if present, print "-" always
+skip("-")                                   # strip "-" if present
+skip(choice("http://", "https://"))         # strip one of these
+skip(choice("http://", "https://"), "www.") # strip scheme, then "www."
+skip(choice(" ", "/"), print="-")           # strip " " or "/", print "-"
+skip(print="-")                             # strip "-" if present, print "-"
 #+end_src
 
-Prefixes are tried longest-first. The ~print~ keyword specifies what
-to emit on output (nothing if omitted).
+Within each step, alternatives are tried longest-first.  The ~print~
+keyword specifies what to emit on output (nothing if omitted).

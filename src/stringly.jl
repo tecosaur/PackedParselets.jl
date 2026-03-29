@@ -35,33 +35,64 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
         spans)
 end
 
-function compile_skip(::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
-    all(a -> a isa String, args) || throw(ArgumentError("Expected all arguments to be strings for skip"))
-    pval = get(nctx, :print, nothing)
-    sargs = Vector{String}(args)
-    !isnothing(pval) && pval ∉ sargs && push!(sargs, pval)
-    casefold = get(nctx, :casefold, false) === true
-    casefold && !all(isascii, sargs) &&
-        throw(ArgumentError("Expected all arguments to be ASCII strings for skip with casefolding"))
-    parse = ExprVarLine[gen_static_lchop(if casefold; map(lowercase, sargs) else sargs end, casefold=casefold)]
-    parsed_max = maximum(ncodeunits, sargs)
-    arrangements = push!(
-        [[byte_set(codeunit(s, i), casefold) for i in 1:ncodeunits(s)] for s in sargs],
-        ByteSet[])
-    if !isnothing(pval)
-        plen = ncodeunits(pval)
-        SegmentOutput(
-            SegmentBounds(0:parsed_max, plen:plen, 0, nothing),
-            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Expr[], ExprVarLine[:(print(io, $pval))]),
-            SegmentMeta(:skip, "Skipped literal string \"$(join(sargs, ", "))\"", pval, nothing, nothing),
-            arrangements)
-    else
-        SegmentOutput(
-            SegmentBounds(0:parsed_max, 0:0, 0, nothing),
-            SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Expr[], ExprVarLine[]),
-            SegmentMeta(:skip, "", "", nothing, nothing),
-            arrangements)
+function skip_step_strings(arg)
+    arg isa String && return String[arg]
+    if Meta.isexpr(arg, :call) && !isempty(arg.args) && first(arg.args) === :choice
+        alts = arg.args[2:end]
+        all(a -> a isa String, alts) ||
+            throw(ArgumentError("choice() inside skip must contain only strings"))
+        return Vector{String}(alts)
     end
+    throw(ArgumentError(
+        "skip arguments must be strings or choice(strings...), got $(repr(arg))"))
+end
+
+function gen_skip_step(state::ParserState, nctx::NodeCtx,
+                      alts::Vector{String}, casefold::Bool)
+    refs = if casefold map(lowercase, alts) else alts end
+    if length(refs) == 1
+        return gen_static_lchop(refs, casefold=casefold)
+    end
+    # Multiple alternatives: use the choice matcher for optimal dispatch
+    fieldvar = gensym("skip_match")
+    cint = cardtype(cardbits(length(refs) + 1))
+    cctx = (; mopts=refs, sopts=alts, casefold, fieldvar,
+              onmatch = _ -> :(), cint)
+    matcher, _, _ = build_choice_matcher(state, nctx, cctx)
+    lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, refs))
+    :(if $lencheck; $fieldvar = zero($cint); $(matcher...) end)
+end
+
+function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
+    pval = get(nctx, :print, nothing)
+    casefold = get(nctx, :casefold, false) === true
+    steps = [skip_step_strings(a) for a in args]
+    !isnothing(pval) && !any(s -> pval ∈ s, steps) && push!(steps, String[pval])
+    all_strings = reduce(vcat, steps)
+    casefold && !all(isascii, all_strings) &&
+        throw(ArgumentError("Expected all skip strings to be ASCII with casefolding"))
+    parse = ExprVarLine[]
+    for alts in steps
+        push!(parse, gen_skip_step(state, nctx, alts, casefold))
+    end
+    parsed_max = sum(maximum(ncodeunits, step) for step in steps)
+    # Cartesian product of per-step alternatives (+ empty for each step)
+    arrangements = Vector{ByteSet}[]
+    for alts in steps
+        step_spans = [[byte_set(codeunit(s, i), casefold) for i in 1:ncodeunits(s)]
+                       for s in alts]
+        push!(step_spans, ByteSet[])
+        extend_bytespans!(arrangements, step_spans)
+    end
+    plen = if isnothing(pval) 0 else ncodeunits(pval) end
+    pexprs = if isnothing(pval) ExprVarLine[] else ExprVarLine[:(print(io, $pval))] end
+    desc = if isnothing(pval) "" else string("Skipped literal string \"", join(all_strings, ", "), '"') end
+    shortform = something(pval, "")
+    SegmentOutput(
+        SegmentBounds(0:parsed_max, plen:plen, 0, nothing),
+        SegmentCodegen(parse, ExprVarLine[], ExprVarLine[], Expr[], pexprs),
+        SegmentMeta(:skip, desc, shortform, nothing, nothing),
+        arrangements)
 end
 
 ## Codegen: literal mismatch

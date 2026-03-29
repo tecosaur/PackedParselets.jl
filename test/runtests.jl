@@ -341,7 +341,7 @@ end
 end
 
 @testset "skip" begin
-    @defpacked Skipped (skip("http://", "https://"), :val(digits(5)))
+    @defpacked Skipped (skip(choice("http://", "https://")), :val(digits(5)))
     @test parse(Skipped, "12345").val == 12345
     @test parse(Skipped, "http://12345").val == 12345
     @test parse(Skipped, "https://12345").val == 12345
@@ -2102,6 +2102,22 @@ end
             @test_neverthrow PP.parsebytes(DigitTailV, ::Vector{UInt8})
         end
 
+        @testset "PrefixChoice (longest match with prefix options)" begin
+            # "v" is a prefix of "v2" — must pick longest match
+            iddef = :(@defpacked PfxChoice (:tag(choice("v", "v2", "rc")),
+                       :id(digits(max=99))))
+            @test parsebytes_complexity(iddef) == (branches=6:6, branch_total=6, ops=40:42)
+            eval(iddef)
+            @test parse(PfxChoice, "v242").tag === :v2
+            @test parse(PfxChoice, "v42").tag === :v
+            @test parse(PfxChoice, "rc42").tag === :rc
+            @test parse(PfxChoice, "v242").id == 42
+            @test parse(PfxChoice, "v42").id == 42
+            check_roundtrips(PfxChoice, (
+                "v0", "v99", "v20", "v299", "rc0", "rc99"))
+            @test_neverthrow PP.parsebytes(PfxChoice, ::Vector{UInt8})
+        end
+
     end # choice
 
     @testset "skip" begin
@@ -2128,8 +2144,8 @@ end
 
         @testset "MultiSkip" begin
             iddef = :(@defpacked MultiSkip (:a(digits(2)),
-                       skip(" ", "/", print="-"), :b(digits(2))))
-            @test parsebytes_complexity(iddef) == (branches=5:8, branch_total=8, ops=33:34)
+                       skip(choice(" ", "/"), print="-"), :b(digits(2))))
+            @test parsebytes_complexity(iddef) == (branches=7:8, branch_total=8, ops=36:38)
             eval(iddef)
             a = parse(MultiSkip, "12-34")
             b = parse(MultiSkip, "12 34")
@@ -2138,6 +2154,59 @@ end
             @test a == b == c == d
             check_roundtrips(MultiSkip, ("1234",))
             @test_neverthrow PP.parsebytes(MultiSkip, ::Vector{UInt8})
+        end
+
+        @testset "SequentialSkip (two bare strings)" begin
+            # Two sequential steps, each independently optional
+            iddef = :(@defpacked SeqSkip (skip("http://", "www."), :host(letters(4))))
+            @test parsebytes_complexity(iddef) == (branches=6:8, branch_total=8, ops=13:19)
+            eval(iddef)
+            @test parse(SeqSkip, "http://www.abcd").host == "ABCD"
+            @test parse(SeqSkip, "http://abcd").host == "ABCD"
+            @test parse(SeqSkip, "www.abcd").host == "ABCD"
+            @test parse(SeqSkip, "abcd").host == "ABCD"
+            # All forms produce the same value
+            @test parse(SeqSkip, "http://www.abcd") == parse(SeqSkip, "abcd")
+            @test parse(SeqSkip, "http://abcd") == parse(SeqSkip, "www.abcd")
+            check_roundtrips(SeqSkip, ("ABCD", "ZZZZ"))
+            @test_neverthrow PP.parsebytes(SeqSkip, ::Vector{UInt8})
+        end
+
+        @testset "MixedSkip (choice then bare string)" begin
+            iddef = :(@defpacked MixedSkip (skip(choice("http://", "https://"), "www."),
+                       :host(letters(4))))
+            @test parsebytes_complexity(iddef) == (branches=5:11, branch_total=11, ops=13:28)
+            eval(iddef)
+            # All combinations: scheme × www × neither
+            @test parse(MixedSkip, "https://www.abcd").host == "ABCD"
+            @test parse(MixedSkip, "http://www.abcd").host == "ABCD"
+            @test parse(MixedSkip, "https://abcd").host == "ABCD"
+            @test parse(MixedSkip, "http://abcd").host == "ABCD"
+            @test parse(MixedSkip, "www.abcd").host == "ABCD"
+            @test parse(MixedSkip, "abcd").host == "ABCD"
+            # All equal
+            @test allequal(parse(MixedSkip, s) for s in (
+                "https://www.abcd", "http://www.abcd", "https://abcd",
+                "http://abcd", "www.abcd", "abcd"))
+            check_roundtrips(MixedSkip, ("ABCD", "ZZZZ"))
+            @test_neverthrow PP.parsebytes(MixedSkip, ::Vector{UInt8})
+        end
+
+        @testset "SkipChoicePrint (choice + print keyword)" begin
+            iddef = :(@defpacked SkipCP (:a(digits(2)),
+                       skip(choice(".", "-", " "), print="."),
+                       :b(digits(2))))
+            @test parsebytes_complexity(iddef) == (branches=5:6, branch_total=6, ops=34:35)
+            eval(iddef)
+            @test parse(SkipCP, "12.34").a == 12
+            @test parse(SkipCP, "12-34").a == 12
+            @test parse(SkipCP, "12 34").a == 12
+            @test parse(SkipCP, "1234").a == 12
+            @test parse(SkipCP, "12.34") == parse(SkipCP, "12-34")
+            @test parse(SkipCP, "12.34") == parse(SkipCP, "1234")
+            @test string(parse(SkipCP, "12-34")) == "12.34"
+            check_roundtrips(SkipCP, ("12.34", "00.00", "99.99"))
+            @test_neverthrow PP.parsebytes(SkipCP, ::Vector{UInt8})
         end
     end # skip
 

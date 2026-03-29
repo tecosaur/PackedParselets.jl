@@ -36,13 +36,7 @@ function pattern_dispatch!(exprs::PatternExprs,
     elseif haskey(segments, node)
         def = getfield(segments, node)
         output = def.compile(state, nctx, exprs, def, args)
-        if node === :skip && isempty(output.meta.desc)
-            # Skip without print: apply parse codegen and byte bounds only
-            append!(exprs.parse, output.codegen.parse)
-            inc_parsed!(nctx, first(output.bounds.parsed), last(output.bounds.parsed))
-        else
-            process_segment_output!(exprs, state, nctx, node, output)
-        end
+        process_segment_output!(exprs, state, nctx, node, output)
     else
         throw(ArgumentError("Unknown pattern node $node"))
     end

@@ -51,6 +51,16 @@ end
 
 function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
     length(args) ∈ (0, 1) || throw(ArgumentError("Expected at most one positional argument for digits, got $(length(args))"))
+    # digits(UIntN) → digits(max=typemax(UIntN))
+    if length(args) == 1 && args[1] isa Symbol
+        T = Core.eval(state.mod, args[1])
+        if T isa Type && T <: Unsigned
+            get(nctx, :max, nothing) === nothing ||
+                throw(ArgumentError("Cannot specify both a UInt type and max for digits"))
+            nctx = NodeCtx(nctx, :max, Int(typemax(T)))
+            args = Any[]
+        end
+    end
     base = get(nctx, :base, 10)::Int
     min = get(nctx, :min, 0)::Int
     max = get(nctx, :max, nothing)

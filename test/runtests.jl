@@ -319,6 +319,19 @@ ttypeof(x) = typeof(x)
     @test PP.printbounds(LitDigit) == (6, 6)
 end
 
+@testset "digits(UInt type)" begin
+    @defpacked U8Id ("U", :val(digits(UInt8)))
+    @test parse(U8Id, "U0").val == 0
+    @test parse(U8Id, "U255").val == 255
+    @test tryparse(U8Id, "U256") === nothing
+    check_roundtrips(U8Id, ("U0", "U128", "U255"))
+    @defpacked U16Id ("V", :val(digits(UInt16)))
+    @test parse(U16Id, "V0").val == 0
+    @test parse(U16Id, "V65535").val == 65535
+    @test tryparse(U16Id, "V65536") === nothing
+    check_roundtrips(U16Id, ("V0", "V32768", "V65535"))
+end
+
 @testset "choice" begin
     @defpacked Colour (choice("red", "green", "blue"))
     @test parse(Colour, "red") isa Colour

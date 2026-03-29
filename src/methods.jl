@@ -36,7 +36,7 @@ produce a block ready for `eval`, or manipulate individual components
 - `isless`: `Base.isless` method
 - `hookdata`: `Expr(:block, ...)` of additional expressions from finalize hooks
 """
-function maketype(segments::NamedTuple, mod::Module, name::Symbol, pattern;
+function maketype(@nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), mod::Module, name::Symbol, @nospecialize(pattern);
                   supertype::Type = Any,
                   casefold::Bool = true,
                   globals::NamedTuple = (;),
@@ -64,7 +64,7 @@ Runs finalize hooks from the segment registry, collecting their outputs
 in the `hookdata` field.
 """
 function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
-                       segments::NamedTuple = (;))
+                       @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}) = (;))
     numbits = 8 * cld(state.bits, 8)
     implement_casting!(state, exprs.print)
     root = state.branches[1]

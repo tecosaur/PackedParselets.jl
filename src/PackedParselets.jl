@@ -31,4 +31,11 @@ public ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet,
     build_fail_expr!, emit_pack, emit_extract, emit_lengthcheck,
     is_sentinel_unclaimed, implement_casting!
 
+precompile(Core.kwcall,
+           (NamedTuple{(:supertype, :casefold, :globals, :global_kwargs),
+                       Tuple{Type, Bool, NamedTuple, Tuple}},
+            typeof(maketype), NamedTuple, Module, Symbol, Any))
+precompile(pattern_dispatch!,
+           (PatternExprs, ParserState, NodeCtx, NamedTuple, Tuple, Expr))
+
 end # module PackedParselets

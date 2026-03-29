@@ -21,7 +21,7 @@ const CORE_SEGMENTS = (
 
 function pattern_dispatch!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
-                           segments::NamedTuple, global_kwargs::Tuple,
+                           @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                            node::Any, args::Vector{Any})
     if node isa QuoteNode
         pattern_field!(exprs, state, nctx, segments, global_kwargs, node, args)
@@ -44,7 +44,7 @@ end
 
 function pattern_dispatch!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
-                           segments::NamedTuple, global_kwargs::Tuple,
+                           @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                            thing::Any)
     all_kws = (Iterators.flatten(s.kwargs for s in segments)..., global_kwargs...)
     if Meta.isexpr(thing, :tuple)
@@ -97,7 +97,7 @@ reconstruction for multi-segment fields.
 """
 function pattern_field!(exprs::PatternExprs,
                         state::ParserState, nctx::NodeCtx,
-                        segments::NamedTuple, global_kwargs::Tuple,
+                        @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                         node::QuoteNode,
                         args::Vector{Any})
     isnothing(get(nctx, :fieldvar, nothing)) || throw(ArgumentError("Fields may not be nested"))
@@ -151,7 +151,7 @@ function arm_clear_bits(state::ParserState, bits_before::Int)
 end
 
 function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx,
-                          segments::NamedTuple, global_kwargs::Tuple, arm)
+                          @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}), arm)
     if Meta.isexpr(arm, :tuple)
         for a in arm.args
             pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, a)
@@ -215,7 +215,7 @@ Two paths:
 """
 function pattern_choice!(exprs::PatternExprs,
                          state::ParserState, nctx::NodeCtx,
-                         segments::NamedTuple, global_kwargs::Tuple,
+                         @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                          arms::Vector{Any})
     nonempty_arms = filter(a -> a !== "", arms)
     if length(nonempty_arms) == 1 && length(arms) == 2
@@ -235,7 +235,7 @@ allocates a presence bit), then emits guarded parse/print with pos rewind.
 """
 function pattern_choice_optional!(exprs::PatternExprs,
                                   state::ParserState, nctx::NodeCtx,
-                                  segments::NamedTuple, global_kwargs::Tuple,
+                                  @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                                   arm)
     popt = get(nctx, :optional, nothing)
     optvar = gensym("optional")
@@ -293,7 +293,7 @@ or cascading try-rewind, and emits separate print blocks per arm.
 """
 function pattern_choice_multi!(exprs::PatternExprs,
                                state::ParserState, nctx::NodeCtx,
-                               segments::NamedTuple, global_kwargs::Tuple,
+                               @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                                arms::Vector{Any})
     narms = length(arms)
     narms >= 2 || throw(ArgumentError("Structured choice requires at least 2 arms"))
@@ -419,7 +419,7 @@ end
 
 function pattern_optional!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
-                           segments::NamedTuple, global_kwargs::Tuple,
+                           @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                            args::Vector{Any})
     arm = if all(a -> a isa String, args)
         Expr(:call, :choice, join(Vector{String}(args)), "")

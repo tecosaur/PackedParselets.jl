@@ -1,0 +1,40 @@
+#+title: Buffer Printing
+
+Producing a type's string form is a frequent operation (display, serialisation).
+Writing to an ~IOBuffer~ and extracting a ~String~ works, but carries overhead
+from IO dispatch and copying. =PackedParselets= replaces this with direct writes
+to a ~Memory{UInt8}~ buffer.
+
+* Rewriting pass
+
+The print expressions from the pattern walk use standard ~print(io, ...)~
+calls. A post-processing pass rewrites these for the ~tobytes~ method:
+
+| Original                              | Rewritten                     |
+|---------------------------------------+-------------------------------|
+| ~print(io, "literal")~                  | Word-sized stores into ~buf~    |
+| ~print(io, integer)~                    | ~bufprint(buf, pos, integer)~   |
+| ~print(io, string(var, base=b, pad=p))~ | ~bufprint(buf, pos, var, b, p)~ |
+| ~printchars(io, packed, n, ranges)~     | ~bufprintchars(buf, pos, ...)~  |
+| ~__tobytes_print(io, embedded)~         | ~tobytes~ + ~unsafe_copyto!~      |
+
+Control flow (~if~/~else~ for optionals) is preserved; only the leaf ~print~
+calls are replaced. The IO-based ~print~ method continues to use the original
+expressions unchanged.
+
+* Output methods
+
+Literal strings use the same [[file:dataloading.org][register decomposition]] as matching: they're split
+into 8/4/2/1-byte chunks, each written with a single ~unsafe_store!~ or byte
+assignment. Integer fields are written by ~bufprint~ via a ~divrem~ loop working
+right-to-left, with remaining positions zero-padded. The same algorithm as
+~string(num; base, pad)~ but without allocating a string. Character sequence
+fields are unpacked from their packed integer representation by ~bufprintchars~
+and written as bytes directly.
+
+* The ~tobytes~ / ~string~ pipeline
+
+~tobytes(id)~ allocates a buffer at the maximum output length and runs the
+rewritten expressions, returning =(buf, len)=. ~string(id)~ calls ~tobytes~ and
+then either uses ~unsafe_takestring~ (zero-copy) for fixed-length output, or
+copies to a correctly-sized ~StringMemory~ for variable-length output.

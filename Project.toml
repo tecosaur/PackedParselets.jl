@@ -1,6 +1,6 @@
 name = "PackedParselets"
 uuid = "209b254f-b05f-46a6-8f5d-65983536c2bc"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["TEC <git@tecosaur.net>"]
 
 [compat]

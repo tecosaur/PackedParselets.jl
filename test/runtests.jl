@@ -3429,6 +3429,54 @@ end
         @test propertynames(parse(FieldChoice, "A42")) == (:id,)
         check_roundtrips(FieldChoice, ("A00", "A99", "B000", "B999"))
     end
+    @testset "duplicate field name across choice arms" begin
+        iddef = :(@defpacked DupField (choice(seq("VCV", :id(digits(3, pad=3))),
+                                              seq("RCV", :id(digits(3, pad=3))))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:69)
+        eval(iddef)
+        @test parse(DupField, "VCV123").id == 123
+        @test parse(DupField, "RCV456").id == 456
+        @test parse(DupField, "VCV000").id == 0
+        @test parse(DupField, "RCV999").id == 999
+        @test propertynames(parse(DupField, "VCV001")) == (:id,)
+        # show delegates to getproperty
+        @test occursin("123", sprint(show, parse(DupField, "VCV123")))
+        check_roundtrips(DupField, (
+            "VCV000", "VCV001", "VCV999", "RCV000", "RCV001", "RCV999"))
+        @test_neverthrow PP.parsebytes(DupField, ::Vector{UInt8})
+    end
+    @testset "nested duplicate field across choice levels" begin
+        # :id appears in four arms across two nesting levels, plus a
+        # non-:id field (:tag) in one arm to test mixed properties
+        iddef = :(@defpacked NestedDupField (
+            choice(
+                seq("A", choice(
+                    seq("x", :id(digits(2, pad=2))),
+                    seq("y", :id(digits(3, pad=3))))),
+                seq("B", :id(digits(4, pad=4))),
+                seq("C", :tag(choice("p", "q")), :id(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:35, branch_total=35, ops=2:143)
+        eval(iddef)
+        # Each arm parses and extracts :id correctly
+        @test parse(NestedDupField, "Ax01").id == 1
+        @test parse(NestedDupField, "Ay001").id == 1
+        @test parse(NestedDupField, "B0042").id == 42
+        @test parse(NestedDupField, "Cp99").id == 99
+        @test parse(NestedDupField, "Cq00").id == 0
+        # :tag is only present in the C arm
+        @test parse(NestedDupField, "Cp99").tag === :p
+        @test parse(NestedDupField, "Cq00").tag === :q
+        @test parse(NestedDupField, "Ax01").tag === nothing
+        @test parse(NestedDupField, "B0042").tag === nothing
+        # Properties are deduplicated
+        @test :id ∈ propertynames(parse(NestedDupField, "Ax01"))
+        @test :tag ∈ propertynames(parse(NestedDupField, "Ax01"))
+        # Boundary values and round-trips across all arms
+        check_roundtrips(NestedDupField, (
+            "Ax00", "Ax99", "Ay000", "Ay999",
+            "B0000", "B9999", "Cp00", "Cp99", "Cq00", "Cq99"))
+        @test_neverthrow PP.parsebytes(NestedDupField, ::Vector{UInt8})
+    end
     @testset "string choice inside arm" begin
         iddef = :(@defpacked InnerChoice (choice((:tag(choice("alpha", "beta")), :n(digits(1))), ("X", :m(digits(2, pad=2))))))
         @test parsebytes_complexity(iddef) == (branches=5:18, branch_total=18, ops=2:63)

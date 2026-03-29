@@ -93,7 +93,7 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
         print = assemble_print(exprs.print, state, name),
         string = assemble_string(state, name),
         properties = Expr(:block,
-            :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(map(first, exprs.properties)))),
+            :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(unique(map(first, exprs.properties))))),
             assemble_properties(exprs.properties, exprs.segments, state, name)),
         segments = Expr(:block,
             assemble_segments_type(exprs.segments, state, name),
@@ -232,10 +232,16 @@ function assemble_properties(properties::Vector{Pair{Symbol, Union{Symbol, Vecto
     isempty(properties) && return :()
     resolved = resolve_property_segments(properties, segs)
     fallback = :(throw(FieldError($(esc(name)), prop)))
+    seen_props = Set{Symbol}()
     clauses = foldr(enumerate(properties), init = fallback) do (i, (prop, val)), rest
-        prop_exprs = if val isa Symbol
-            idx = only(resolved[i].second)
-            copy(segs[idx].extract)
+        # Skip duplicate property entries (choice-arm duplicates are handled via resolved)
+        prop ∈ seen_props && return rest
+        push!(seen_props, prop)
+        idxs = resolved[findfirst(p -> first(p) == prop, resolved)].second
+        prop_exprs = if val isa Symbol && is_choice_field(idxs, segs)
+            choice_extract_exprs(idxs, segs)
+        elseif val isa Symbol
+            copy(segs[only(idxs)].extract)
         else
             copy(val)
         end
@@ -256,9 +262,11 @@ function assemble_constructor(segs::Vector{ValueSegment},
     resolved = resolve_property_segments(properties, segs)
     isempty(resolved) && return :()
     # Build (argname, seg_index) pairs: single-node uses property name,
-    # multi-node gets numbered sub-names
+    # multi-node gets numbered sub-names. Choice-arm duplicates are
+    # skipped (constructor can't infer which arm to encode).
     args = Tuple{Symbol, Int}[]
     for (pname, idxs) in resolved
+        is_choice_field(idxs, segs) && continue
         if length(idxs) == 1
             push!(args, (pname, only(idxs)))
         else
@@ -336,7 +344,7 @@ function assemble_show(segs::Vector{ValueSegment},
     show_parts = ExprVarLine[]
     for (pname, idxs) in resolved
         isempty(show_parts) || push!(show_parts, :(print(io, ", ")))
-        if length(idxs) == 1
+        if is_choice_field(idxs, segs) || length(idxs) == 1
             push!(show_parts, :(show(io, getproperty(id, $(QuoteNode(pname))))))
         else
             for (j, si) in enumerate(idxs)
@@ -419,14 +427,23 @@ end
 ## Property-segment resolution
 
 # Map properties to `(name, segment_indices)` pairs, resolving Symbol refs
-# to the corresponding segment index.
+# to the corresponding segment index. Merges duplicate property names
+# (e.g. same-named fields across choice arms) into a single entry.
 function resolve_property_segments(properties, segs::Vector{ValueSegment})
     result = Pair{Symbol, Vector{Int}}[]
+    seen = Dict{Symbol, Int}()
+    claimed = Set{Int}()
     for (pname, val) in properties
         if val isa Symbol
-            idx = findfirst(s -> s.label == val, segs)
+            idx = findfirst(i -> segs[i].label == val && i ∉ claimed, eachindex(segs))
             isnothing(idx) && continue
-            push!(result, pname => [idx])
+            push!(claimed, idx)
+            if haskey(seen, pname)
+                push!(result[seen[pname]].second, idx)
+            else
+                seen[pname] = length(result) + 1
+                push!(result, pname => [idx])
+            end
         else
             idxs = [i for (i, s) in enumerate(segs)
                      if !isnothing(s.argtype) && s.label == pname]

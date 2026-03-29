@@ -51,12 +51,19 @@ digits(n, base=16) # n hex digits
 digits(n, min=A, max=B, pad=P)
 #+end_src
 
-| Keyword | Default | Description                        |
-|---------+---------+------------------------------------|
-| ~base~  |      10 | Numeric base (2--62)               |
-| ~min~   |       0 | Minimum value                      |
-| ~max~   |     --- | Maximum value                      |
-| ~pad~   |       0 | Zero-pad printed output to width   |
+| Keyword  | Default | Description                                        |
+|----------+---------+----------------------------------------------------|
+| ~base~   |      10 | Numeric base (2--62)                               |
+| ~min~    |       0 | Minimum value                                      |
+| ~max~    |     --- | Maximum value                                      |
+| ~pad~    |       0 | Zero-pad printed output to width                   |
+| ~skip~   |     --- | Characters to skip during parse (e.g. ~"-"~)       |
+| ~groups~ |     --- | Print in groups: ~N~ (uniform) or ~(A, B, C)~      |
+
+When ~skip~ is set, the specified characters are silently consumed during
+parsing.  The ~groups~ keyword (requires ~skip~) prints the value with
+the first skip character as a separator.  ~groups=4~ splits into groups
+of 4; ~groups=(3, 3, 4)~ gives explicit sizes.
 
 Fixed-width fields with base \le 16 use [[file:opt/swar.org][SWAR
 parsing]]; variable-width fields up to 8 digits also use SWAR with
@@ -76,6 +83,10 @@ letters(n, casefold=true)  # case-insensitive parse, uppercase store
 #+end_src
 
 Each character is packed into \lceil{}log_2(alphabet size)\rceil{} bits.
+
+All character sequence segments (~letters~, ~alphnum~, ~hex~, ~charset~)
+support the ~skip~ and ~groups~ keywords with the same semantics as
+~digits~ — see above.
 
 ** ~alphnum~
 

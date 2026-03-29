@@ -3028,6 +3028,58 @@ end # embed
     end
 end # skip kwarg
 
+@testset "groups kwarg" begin
+    @testset "uniform groups (ORCID-style)" begin
+        # 16 digits in groups of 4 separated by hyphens
+        iddef = :(@defpacked OrcidGrouped (:id(digits(16, skip="-", groups=4))))
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        eval(iddef)
+        @test parse(OrcidGrouped, "0000-0002-1825-0097").id == 21825_0097
+        @test parse(OrcidGrouped, "0000000218250097").id == 21825_0097
+        # Prints with canonical grouping
+        @test string(parse(OrcidGrouped, "0000000218250097")) == "0000-0002-1825-0097"
+        @test string(parse(OrcidGrouped, "0000-0002-1825-0097")) == "0000-0002-1825-0097"
+        @test string(OrcidGrouped(0)) == "0000-0000-0000-0000"
+        check_roundtrips(OrcidGrouped, (
+            "0000-0000-0000-0000", "0000-0002-1825-0097", "9999-9999-9999-9999"))
+        @test_neverthrow PP.parsebytes(OrcidGrouped, ::Vector{UInt8})
+    end
+    @testset "uneven groups (phone-style)" begin
+        # 10 digits in groups of 3-3-4
+        iddef = :(@defpacked PhoneNum (:num(digits(10, skip="-", groups=(3, 3, 4)))))
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        eval(iddef)
+        @test parse(PhoneNum, "555-123-4567").num == 5551234567
+        @test parse(PhoneNum, "5551234567").num == 5551234567
+        @test string(parse(PhoneNum, "5551234567")) == "555-123-4567"
+        @test string(PhoneNum(0)) == "000-000-0000"
+        check_roundtrips(PhoneNum, (
+            "000-000-0000", "555-123-4567", "999-999-9999"))
+        @test_neverthrow PP.parsebytes(PhoneNum, ::Vector{UInt8})
+    end
+    @testset "hex groups" begin
+        iddef = :(@defpacked HexGrouped ("X", :id(hex(8, skip="-", groups=4))))
+        @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=9:9)
+        eval(iddef)
+        @test parse(HexGrouped, "XDEAD-BEEF").id == "DEADBEEF"
+        @test parse(HexGrouped, "XDEADBEEF").id == "DEADBEEF"
+        @test string(parse(HexGrouped, "XDEADBEEF")) == "XDEAD-BEEF"
+        check_roundtrips(HexGrouped, (
+            "X0000-0000", "XDEAD-BEEF", "XFFFF-FFFF"))
+        @test_neverthrow PP.parsebytes(HexGrouped, ::Vector{UInt8})
+    end
+    @testset "letters groups" begin
+        iddef = :(@defpacked LetterGrouped (:code(letters(6, skip="-", groups=3))))
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        eval(iddef)
+        @test parse(LetterGrouped, "ABC-DEF").code == "ABCDEF"
+        @test parse(LetterGrouped, "ABCDEF").code == "ABCDEF"
+        @test string(parse(LetterGrouped, "ABCDEF")) == "ABC-DEF"
+        check_roundtrips(LetterGrouped, ("AAA-AAA", "ABC-DEF", "ZZZ-ZZZ"))
+        @test_neverthrow PP.parsebytes(LetterGrouped, ::Vector{UInt8})
+    end
+end
+
 @testset "Case folding" begin
     iddef = :(@defpacked CaseFolded2 ("Pfx:", :id(digits(max=999))))
     @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=36:36)

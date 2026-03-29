@@ -5,10 +5,8 @@
 # (letters, alphnum, hex, charset), and embedded identifier types. These
 # return SegmentOutput and let process_segment_output! handle framework mutations.
 
-## Skip kwarg
+## Skip and groups kwargs
 
-# Parse the `skip` keyword into a Tuple{UInt8...} expression for codegen.
-# Accepts a string of characters to skip (e.g. "-" or "- .").
 function parse_skip_kwarg(nctx::NodeCtx)
     raw = get(nctx, :skip, nothing)
     isnothing(raw) && return nothing
@@ -16,6 +14,37 @@ function parse_skip_kwarg(nctx::NodeCtx)
     all(isascii, raw) || throw(ArgumentError("skip characters must be ASCII"))
     isempty(raw) && return nothing
     Tuple(map(UInt8, codeunits(raw)))
+end
+
+function parse_groups_kwarg(nctx::NodeCtx, nchars::Int, skipbytes)
+    raw = get(nctx, :groups, nothing)
+    isnothing(raw) && return nothing
+    isnothing(skipbytes) &&
+        throw(ArgumentError("groups requires skip (separator comes from the first skip character)"))
+    groups = if raw isa Integer
+        raw > 0 || throw(ArgumentError("groups must be positive"))
+        ntuple(i -> Base.min(raw, nchars - raw * (i - 1)), cld(nchars, raw))
+    elseif raw isa Tuple || (raw isa Expr && Meta.isexpr(raw, :tuple))
+        vals = if raw isa Tuple raw else Tuple(raw.args) end
+        all(v -> v isa Integer && v > 0, vals) ||
+            throw(ArgumentError("groups must contain positive integers"))
+        sum(vals) == nchars ||
+            throw(ArgumentError("groups must sum to $nchars, got $(sum(vals))"))
+        Tuple{Vararg{Int}}(vals)
+    else
+        throw(ArgumentError("groups must be an integer or tuple, got $(repr(raw))"))
+    end
+    length(groups) < 2 && return nothing
+    groups
+end
+
+function emit_grouped(emit_group::Function, groups::Tuple, sep::UInt8)
+    exprs = ExprVarLine[]
+    for i in 1:length(groups)
+        i > 1 && push!(exprs, :(write(io, $sep)))
+        append!(exprs, emit_group(i, groups[i]))
+    end
+    exprs
 end
 
 ## Digits
@@ -74,8 +103,16 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
         fvalue
     end
     # Print codegen
-    prexprs = digits_print_exprs(fieldvar, fvalue, directvar, fnum,
-                                 fixedwidth, maxdigits, pad, base)
+    groups = parse_groups_kwarg(nctx, maxdigits, skipbytes)
+    !isnothing(groups) && !fixedwidth &&
+        throw(ArgumentError("groups requires fixed-width digits"))
+    prexprs = if isnothing(groups)
+        digits_print_exprs(fieldvar, fvalue, directvar, fnum,
+                           fixedwidth, maxdigits, pad, base)
+    else
+        grouped_digits_print(fieldvar, fvalue, directvar, fnum,
+                             groups, first(skipbytes), base)
+    end
     # Constructor (impart) codegen
     argvar = gensym("arg_digit")
     body = digits_impart_exprs(state, argvar, fnum, parsevar, dI, dT, dspec,
@@ -93,8 +130,9 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
         maxdigits
     end
     fixedpad = if fixedwidth maxdigits else 0 end
-    printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad)
-    printmax = Base.max(ndigits(max; base), pad, fixedpad)
+    nseps = if isnothing(groups) 0 else length(groups) - 1 end
+    printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad) + nseps
+    printmax = Base.max(ndigits(max; base), pad, fixedpad) + nseps
     digit_set = digits_byteset(base)
     bytespans = if has_skip
         Vector{ByteSet}[]
@@ -124,6 +162,25 @@ function digits_print_exprs(fieldvar::Symbol, fvalue, directvar::Bool, fnum::Sym
     prexprs = ExprVarLine[]
     directvar || push!(prexprs, :($fieldvar = $fvalue))
     push!(prexprs, printex)
+    prexprs
+end
+
+function grouped_digits_print(fieldvar::Symbol, fvalue, directvar::Bool, fnum::Symbol,
+                              groups::Tuple, sep::UInt8, base::Int)
+    printvar = if directvar fnum else fieldvar end
+    ngroups = length(groups)
+    gvars = ntuple(i -> gensym("g$i"), ngroups)
+    prexprs = ExprVarLine[]
+    directvar || push!(prexprs, :($fieldvar = $fvalue))
+    # Decompose via divrem from least-significant group upward
+    remainder = printvar
+    for i in ngroups:-1:2
+        push!(prexprs, :(($remainder, $(gvars[i])) = divrem($remainder, $(base^groups[i]))))
+    end
+    push!(prexprs, :($(gvars[1]) = $remainder))
+    append!(prexprs, emit_grouped(groups, sep) do gi, gsize
+        ExprVarLine[:(print(io, string($(gvars[gi]), base=$base, pad=$gsize)))]
+    end)
     prexprs
 end
 
@@ -422,7 +479,24 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     else
         :($charvar, $maxlen, $ranges, $oneindexed)
     end
-    printex = :(printchars(io, $(charargs.args...)))
+    groups = parse_groups_kwarg(nctx, maxlen, skipbytes)
+    !isnothing(groups) && variable &&
+        throw(ArgumentError("groups requires fixed-width character sequence"))
+    printexprs = if isnothing(groups)
+        ExprVarLine[:(printchars(io, $(charargs.args...)))]
+    else
+        # Precompute the bit shift for each group (chars remaining after it)
+        shifts = let total = sum(groups)
+            ntuple(length(groups)) do i
+                total -= groups[i]
+                total * bpc
+            end
+        end
+        emit_grouped(groups, first(skipbytes)) do gi, gsize
+            gexpr = if iszero(shifts[gi]) charvar else :($charvar >> $(shifts[gi])) end
+            ExprVarLine[:(printchars(io, $gexpr, $gsize, $ranges, $oneindexed))]
+        end
+    end
     tostringex = :(chars2string($(charargs.args...)))
     argvar = gensym("arg_charseq")
     cspec = (; cT, lT, cfold, oneindexed, ranges, kind,
@@ -461,10 +535,10 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
             [fill(char_set, n) for n in minlen:maxlen]
         end
     end
+    nseps = if isnothing(groups) 0 else length(groups) - 1 end
     SegmentOutput(
-        SegmentBounds(minlen:parsed_max, minlen:maxlen, totalbits, sentinel),
-        SegmentCodegen(parse_exprs, seg_extract, copy(extracts), seg_impart,
-                       ExprVarLine[printex]),
+        SegmentBounds(minlen:parsed_max, minlen+nseps:maxlen+nseps, totalbits, sentinel),
+        SegmentCodegen(parse_exprs, seg_extract, copy(extracts), seg_impart, printexprs),
         SegmentMeta(label, seg_desc, seg_shortform, :AbstractString, argvar),
         bytespans)
 end

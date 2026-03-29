@@ -453,6 +453,31 @@ function resolve_property_segments(properties, segs::Vector{ValueSegment})
     result
 end
 
+# Build extract expressions for a choice-arm field: each arm's extract
+# is guarded by its sentinel check (returns value or nothing). Try each
+# arm in order; the first non-nothing result wins.
+function choice_extract_exprs(idxs::Vector{Int}, segs::Vector{ValueSegment})
+    result = gensym("choice_val")
+    exprs = ExprVarLine[:($result = nothing)]
+    for si in idxs
+        extract = map(copy, segs[si].extract)
+        # Preamble expressions (setup)
+        append!(exprs, extract[1:end-1])
+        # The final expr is `if <guard>; value end` — returns value or nothing
+        push!(exprs, :(if isnothing($result); $result = $(last(extract)) end))
+    end
+    push!(exprs, result)
+    exprs
+end
+
+# Check if segment indices represent choice-arm variants of the same field
+# (all in different, non-nothing conditions = mutually exclusive branches).
+function is_choice_field(idxs::Vector{Int}, segs::Vector{ValueSegment})
+    length(idxs) < 2 && return false
+    conditions = [segs[i].condition for i in idxs]
+    all(!isnothing, conditions) && allunique(conditions)
+end
+
 ## Segment-set stripping
 
 # Remove `__segment_printed = N` markers from expression trees.

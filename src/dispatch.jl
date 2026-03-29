@@ -168,6 +168,8 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}})
     narms >= 2 || return nothing
     any(isempty, arm_spans) && return nothing
     min_len = minimum(minimum(length, spans) for spans in arm_spans)
+    ph_result = try_perfect_hash_dispatch(arm_spans, narms, min_len)
+    !isnothing(ph_result) && return ph_result
     for iT in REGISTER_TYPES
         bwidth = sizeof(iT)
         bwidth > min_len && break
@@ -189,6 +191,30 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}})
                     end
                 end
                 length(groups) < 2 && return nothing
+                arm_vals = zeros(UInt64, narms)
+                direct = true
+                for (mv, k) in groups
+                    if iszero(arm_vals[k])
+                        arm_vals[k] = mv
+                    elseif arm_vals[k] != mv
+                        direct = false
+                        break
+                    end
+                end
+                if direct
+                    sorted = sortperm(arm_vals)
+                    vals = arm_vals[sorted]
+                    if vals[end] - vals[1] + 1 == narms
+                        offset = iT(vals[1]) - one(iT)
+                        ip = invperm(sorted)
+                        return if ip == 1:narms
+                            (b -> :($(expr_fn(b)) - $offset), 0)
+                        else
+                            perm = Tuple(UInt8.(ip))
+                            (b -> :(@inbounds $perm[$(expr_fn(b)) - $offset]), 0)
+                        end
+                    end
+                end
                 table = zeros(UInt8, maxval + 1)
                 for (mv, k) in groups
                     table[mv + 1] = k % UInt8
@@ -200,6 +226,43 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}})
         end
     end
     nothing
+end
+
+# Extract canonical byte prefixes from arm bytespans and delegate to
+# find_perfect_hash for direct arithmetic dispatch over table lookups.
+function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int)
+    casefold = false
+    prefixes = map(arm_spans) do spans
+        isempty(spans) && return nothing
+        bytes = UInt8[]
+        for bpos in 1:min_len
+            bs = reduce(∪, (alt[bpos] for alt in spans if bpos <= length(alt)); init=ByteSet())
+            lo = first(iterate(bs))
+            if length(bs) == 1
+                push!(bytes, lo)
+            elseif length(bs) == 2
+                hi = first(iterate(bs, UInt16(lo) + UInt16(1)))
+                (hi ⊻ lo == 0x20 && (lo | 0x20) in UInt8('a'):UInt8('z')) || break
+                push!(bytes, lo | 0x20)
+                casefold = true
+            else break end
+        end
+        isempty(bytes) ? nothing : String(bytes)
+    end
+    any(isnothing, prefixes) && return nothing
+    allunique(prefixes) || return nothing
+    ph = find_perfect_hash(prefixes, casefold)
+    isnothing(ph) && return nothing
+    fm = ph.foldmask % ph.iT
+    hashfn = if iszero(fm) ph.hashexpr else b -> ph.hashexpr(:($b | $fm)) end
+    ip = invperm(ph.perm)
+    expr = if ip == 1:narms
+        hashfn
+    else
+        perm = Tuple(UInt8.(ip))
+        b -> :(@inbounds $perm[$(hashfn(b))])
+    end
+    (; offset = ph.pos, iT = ph.iT, expr)
 end
 
 """

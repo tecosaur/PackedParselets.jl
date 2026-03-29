@@ -217,7 +217,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
     phoff = ph.pos - 1
     phposexpr = if iszero(phoff); :pos else :(pos + $phoff) end
     load = gen_load(ph.iT, phposexpr)
-    foldedload = if !iszero(ph.foldmask); :($load | $(ph.foldmask)) else load end
+    foldedload = if iszero(ph.foldmask) load else :($load | $(ph.foldmask)) end
     hashval = ph.hashexpr(foldedload)
     minoptlen = minimum(ncodeunits, mopts)
     maxoptlen = maximum(ncodeunits, mopts)

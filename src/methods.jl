@@ -230,20 +230,25 @@ function assemble_properties(properties::Vector{Pair{Symbol, Union{Symbol, Vecto
                               segs::Vector{ValueSegment},
                               state::ParserState, name::Symbol)
     isempty(properties) && return :()
-    resolved = resolve_property_segments(properties, segs)
-    fallback = :(throw(FieldError($(esc(name)), prop)))
-    seen_props = Set{Symbol}()
-    clauses = foldr(enumerate(properties), init = fallback) do (i, (prop, val)), rest
-        # Skip duplicate property entries (choice-arm duplicates are handled via resolved)
-        prop ∈ seen_props && return rest
-        push!(seen_props, prop)
-        idxs = resolved[findfirst(p -> first(p) == prop, resolved)].second
-        prop_exprs = if val isa Symbol && is_choice_field(idxs, segs)
-            choice_extract_exprs(idxs, segs)
-        elseif val isa Symbol
-            copy(segs[only(idxs)].extract)
+    grouped = Pair{Symbol, Vector{Union{Symbol, Vector{ExprVarLine}}}}[]
+    seen = Dict{Symbol, Int}()
+    for (pname, val) in properties
+        if haskey(seen, pname)
+            push!(grouped[seen[pname]].second, val)
         else
-            copy(val)
+            seen[pname] = length(grouped) + 1
+            push!(grouped, pname => [val])
+        end
+    end
+    fallback = :(throw(FieldError($(esc(name)), prop)))
+    clauses = foldr(enumerate(grouped), init = fallback) do (i, (prop, vals)), rest
+        prop_exprs = if length(vals) == 1
+            resolve_extract(only(vals), segs)
+        else
+            # Build nested if-elseif chain from guarded extract entries.
+            entries = [resolve_extract(val, segs) for val in vals]
+            filter!(!isempty, entries)
+            ExprVarLine[chain_guarded(entries)]
         end
         qprop = QuoteNode(prop)
         body = Expr(:block, implement_casting!(state, prop_exprs)...)
@@ -261,12 +266,8 @@ function assemble_constructor(segs::Vector{ValueSegment},
                               state::ParserState, name::Symbol)
     resolved = resolve_property_segments(properties, segs)
     isempty(resolved) && return :()
-    # Build (argname, seg_index) pairs: single-node uses property name,
-    # multi-node gets numbered sub-names. Choice-arm duplicates are
-    # skipped (constructor can't infer which arm to encode).
     args = Tuple{Symbol, Int}[]
     for (pname, idxs) in resolved
-        is_choice_field(idxs, segs) && continue
         if length(idxs) == 1
             push!(args, (pname, only(idxs)))
         else
@@ -339,22 +340,12 @@ end
 function assemble_show(segs::Vector{ValueSegment},
                        properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
                        state::ParserState, name::Symbol)
-    resolved = resolve_property_segments(properties, segs)
-    isempty(resolved) && return :()
+    pnames = unique(map(first, properties))
+    isempty(pnames) && return :()
     show_parts = ExprVarLine[]
-    for (pname, idxs) in resolved
+    for pname in pnames
         isempty(show_parts) || push!(show_parts, :(print(io, ", ")))
-        if is_choice_field(idxs, segs) || length(idxs) == 1
-            push!(show_parts, :(show(io, getproperty(id, $(QuoteNode(pname))))))
-        else
-            for (j, si) in enumerate(idxs)
-                j > 1 && push!(show_parts, :(print(io, ", ")))
-                extract_copy = map(copy, segs[si].extract)
-                implement_casting!(state, extract_copy)
-                push!(show_parts, Expr(:block, extract_copy[1:end-1]...,
-                                       :(show(io, $(extract_copy[end])))))
-            end
-        end
+        push!(show_parts, :(show(io, getproperty(id, $(QuoteNode(pname))))))
     end
     :(function $(GlobalRef(Base, :show))(io::IO, id::$(esc(name)))
           if get(io, :limit, false) === true
@@ -426,56 +417,27 @@ end
 
 ## Property-segment resolution
 
-# Map properties to `(name, segment_indices)` pairs, resolving Symbol refs
-# to the corresponding segment index. Merges duplicate property names
-# (e.g. same-named fields across choice arms) into a single entry.
+# Map Symbol-ref properties to `(name, segment_indices)` pairs.
+# Only processes the first Symbol ref per name; Vector{ExprVarLine}
+# entries (choice-guarded or multi-segment) are handled separately.
 function resolve_property_segments(properties, segs::Vector{ValueSegment})
     result = Pair{Symbol, Vector{Int}}[]
-    seen = Dict{Symbol, Int}()
-    claimed = Set{Int}()
+    seen = Set{Symbol}()
     for (pname, val) in properties
+        pname ∈ seen && continue
         if val isa Symbol
-            idx = findfirst(i -> segs[i].label == val && i ∉ claimed, eachindex(segs))
+            push!(seen, pname)
+            idx = findfirst(s -> s.label == val, segs)
             isnothing(idx) && continue
-            push!(claimed, idx)
-            if haskey(seen, pname)
-                push!(result[seen[pname]].second, idx)
-            else
-                seen[pname] = length(result) + 1
-                push!(result, pname => [idx])
-            end
-        else
+            push!(result, pname => [idx])
+        elseif val isa Vector
+            push!(seen, pname)
             idxs = [i for (i, s) in enumerate(segs)
                      if !isnothing(s.argtype) && s.label == pname]
-            push!(result, pname => idxs)
+            isempty(idxs) || push!(result, pname => idxs)
         end
     end
     result
-end
-
-# Build extract expressions for a choice-arm field: each arm's extract
-# is guarded by its sentinel check (returns value or nothing). Try each
-# arm in order; the first non-nothing result wins.
-function choice_extract_exprs(idxs::Vector{Int}, segs::Vector{ValueSegment})
-    result = gensym("choice_val")
-    exprs = ExprVarLine[:($result = nothing)]
-    for si in idxs
-        extract = map(copy, segs[si].extract)
-        # Preamble expressions (setup)
-        append!(exprs, extract[1:end-1])
-        # The final expr is `if <guard>; value end` — returns value or nothing
-        push!(exprs, :(if isnothing($result); $result = $(last(extract)) end))
-    end
-    push!(exprs, result)
-    exprs
-end
-
-# Check if segment indices represent choice-arm variants of the same field
-# (all in different, non-nothing conditions = mutually exclusive branches).
-function is_choice_field(idxs::Vector{Int}, segs::Vector{ValueSegment})
-    length(idxs) < 2 && return false
-    conditions = [segs[i].condition for i in idxs]
-    all(!isnothing, conditions) && allunique(conditions)
 end
 
 ## Segment-set stripping

@@ -392,22 +392,22 @@ end
 # Shared vocabulary for all digit-parse strategies: symbols, encoding
 # expressions, range checks, and error messages. Used by the three
 # strategy functions below.
-function gen_rangecheck(state::ParserState, var::Symbol, dspec::NamedTuple)
+function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, dspec::NamedTuple)
     (; base, maxdigits, min, max, pad) = dspec
     needsmax = max < base^maxdigits - 1
     needsmin = min > 0
     if !needsmax && !needsmin
         :()
     elseif needsmax && !needsmin
-        maxerr = register_errmsg!(state, "Expected at most a value of $(string(max; base, pad))")
-        :($var <= $max || return ($maxerr, pos))
+        fail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(max; base, pad))")
+        :($var <= $max || $fail)
     elseif needsmin && !needsmax
-        minerr = register_errmsg!(state, "Expected at least a value of $(string(min; base, pad))")
-        :($var >= $min || return ($minerr, pos))
+        fail = build_fail_expr!(state, nctx, "Expected at least a value of $(string(min; base, pad))")
+        :($var >= $min || $fail)
     else
-        maxerr = register_errmsg!(state, "Expected at most a value of $(string(max; base, pad))")
-        minerr = register_errmsg!(state, "Expected at least a value of $(string(min; base, pad))")
-        :($var >= $min || return ($minerr, pos); $var <= $max || return ($maxerr, pos))
+        maxfail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(max; base, pad))")
+        minfail = build_fail_expr!(state, nctx, "Expected at least a value of $(string(min; base, pad))")
+        Expr(:block, :($var >= $min || $minfail), :($var <= $max || $maxfail))
     end
 end
 
@@ -430,7 +430,7 @@ function compute_digit_vocab(state::ParserState, nctx::NodeCtx,
     end
     directvar = numexpr === fnum
     parsevar = if directvar; fnum else fieldvar end
-    rangecheck = gen_rangecheck(state, fnum, dspec)
+    rangecheck = gen_rangecheck(state, nctx, fnum, dspec)
     fail_expr = build_fail_expr!(state, nctx, if fixedwidth && maxdigits > 1
         "exactly $maxdigits digits in base $base"
     elseif mindigits > 1
@@ -601,7 +601,7 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
     # swar_var (full width) rather than fnum (after truncation), since
     # values like 256 would wrap to 0 in a UInt8 and pass a <= 255 check.
     pre_rangecheck = if sT != dI
-        gen_rangecheck(state, swar_var, dspec)
+        gen_rangecheck(state, nctx, swar_var, dspec)
     else
         rangecheck
     end

@@ -109,10 +109,19 @@ function pattern_field!(exprs::PatternExprs,
     end
     new_value_segs = filter(s -> !isnothing(s.argtype), @view exprs.segments[initial_segs+1:end])
     isempty(new_value_segs) && throw(ArgumentError("Field $(node.value) does not capture any value"))
-    if length(new_value_segs) == 1
+    all_segs = @view exprs.segments[initial_segs+1:end]
+    all_exclusive = length(new_value_segs) > 1 &&
+        length(new_value_segs) == length(all_segs) &&
+        all(s -> !isnothing(s.condition), new_value_segs) &&
+        allunique(s.condition for s in new_value_segs)
+    if all_exclusive
+        copyex(e) = if e isa Expr copy(e) else e end
+        for seg in new_value_segs
+            push!(exprs.properties, node.value => ExprVarLine[copyex(e) for e in seg.extract])
+        end
+    elseif length(new_value_segs) == 1
         push!(exprs.properties, node.value => new_value_segs[1].label)
     else
-        # Multi-node field: property assembles via IOBuffer from print expressions
         propprints = map(strip_segsets! ∘ copy, exprs.print[initialprints+1:end])
         filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, propprints)
         push!(exprs.properties, node.value => ExprVarLine[(
@@ -125,6 +134,61 @@ function pattern_field!(exprs::PatternExprs,
 end
 
 ## Choice/optional branching
+
+function resolve_extract(val::Union{Symbol, Vector{ExprVarLine}},
+                         segs::Vector{ValueSegment},
+                         range::AbstractVector{Int}=eachindex(segs))
+    copyex(e) = if e isa Expr copy(e) else e end
+    if val isa Symbol
+        idx = findfirst(i -> segs[i].label == val, range)
+        if isnothing(idx) ExprVarLine[] else ExprVarLine[copyex(e) for e in segs[range[idx]].extract] end
+    else
+        ExprVarLine[copyex(e) for e in val]
+    end
+end
+
+# Build an optimal nested if-elseif chain from guarded extract entries.
+# Entries sharing the same outermost guard are grouped into a single
+# branch, with inner content recursively chained.
+function chain_guarded(entries)
+    groups = Tuple{Any, Vector}[]
+    for v in entries
+        gexpr = last(v)
+        if !Meta.isexpr(gexpr, :if)
+            push!(groups, (nothing, [v]))
+        else
+            body = Meta.isexpr(gexpr.args[2], :block) ?
+                filter(a -> !(a isa LineNumberNode), gexpr.args[2].args) : Any[gexpr.args[2]]
+            inner = ExprVarLine[v[1:end-1]..., body...]
+            guard = gexpr.args[1]
+            if !isempty(groups) && string(first(last(groups))) == string(guard)
+                push!(last(groups)[2], inner)
+            else
+                push!(groups, (guard, [inner]))
+            end
+        end
+    end
+    ngroups = length(groups)
+    chain = nothing
+    for (j, (guard, inners)) in enumerate(Iterators.reverse(groups))
+        body = if length(inners) == 1 Expr(:block, only(inners)...) else chain_guarded(inners) end
+        # Last group in a multi-group chain: the discriminant is valid
+        # within this scope, so use `else` instead of a redundant guard check
+        chain = if isnothing(guard) body
+        elseif isnothing(chain) && j == 1 && ngroups > 1 body
+        elseif isnothing(chain) Expr(:if, guard, body)
+        else Expr(:if, guard, body, chain) end
+    end
+    chain
+end
+
+function guard_property_extract(val::Union{Symbol, Vector{ExprVarLine}},
+                                guard::Expr, segs::Vector{ValueSegment},
+                                seg_range::UnitRange{Int})
+    extract = resolve_extract(val, segs, seg_range)
+    isempty(extract) && return ExprVarLine[:(if $guard end)]
+    ExprVarLine[extract[1:end-1]..., :(if $guard; $(last(extract)) end)]
+end
 
 function patch_optional_extracts!(segments::Vector{ValueSegment},
                                   seg_range::UnitRange{Int}, check::Expr)
@@ -279,13 +343,24 @@ Two paths:
 function pattern_choice!(exprs::PatternExprs,
                          state::ParserState, nctx::NodeCtx,
                          @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
-                         arms::Vector{Any})
-    nonempty_arms = filter(a -> a !== "", arms)
-    if length(nonempty_arms) == 1 && length(arms) == 2
-        pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs,
-                                 only(nonempty_arms))
+                         args::Vector{Any})
+    # Detect tagged choice: choice(:fieldname, tag1 => arm1, tag2 => arm2, ...)
+    tagged = length(args) >= 2 && args[1] isa QuoteNode &&
+        all(a -> Meta.isexpr(a, :call, 3) && a.args[1] === :(=>), @view args[2:end])
+    if tagged
+        fieldname = args[1].value::Symbol
+        tags = Any[a.args[2] for a in @view args[2:end]]
+        arms = Any[a.args[3] for a in @view args[2:end]]
+        pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms;
+                              tag_field=fieldname, tag_values=tags)
     else
-        pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms)
+        nonempty_arms = filter(a -> a !== "", args)
+        if length(nonempty_arms) == 1 && length(args) == 2
+            pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs,
+                                     only(nonempty_arms))
+        else
+            pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, args)
+        end
     end
 end
 
@@ -357,7 +432,9 @@ or cascading try-rewind, and emits separate print blocks per arm.
 function pattern_choice_multi!(exprs::PatternExprs,
                                state::ParserState, nctx::NodeCtx,
                                @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
-                               arms::Vector{Any})
+                               arms::Vector{Any};
+                               tag_field::Union{Nothing, Symbol}=nothing,
+                               tag_values::Union{Nothing, Vector{Any}}=nothing)
     narms = length(arms)
     narms >= 2 || throw(ArgumentError("Structured choice requires at least 2 arms"))
     popt = get(nctx, :optional, nothing)
@@ -368,6 +445,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
     discrim_type = cardtype(discrim_bits)
     discrim_pos = state.bits + discrim_bits
     state.bits += discrim_bits
+    arm_base = state.bits
     arm_data = map(enumerate(arms)) do (k, arm)
         armvar = gensym("arm$k")
         end_label = gensym("arm$(k)_end")
@@ -382,9 +460,11 @@ function pattern_choice_multi!(exprs::PatternExprs,
         push!(state.branches, child)
         arm_nctx = NodeCtx(arm_nctx, :current_branch, child)
         seg_start = length(exprs.segments)
+        state.bits = arm_base
         bits_before = state.bits
+        arm_props = Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}[]
         oexprs = PatternExprs(ExprVarLine[], ExprVarLine[],
-                              exprs.segments, exprs.properties, Vector{ByteSet}[])
+                              exprs.segments, arm_props, Vector{ByteSet}[])
         arm !== "" && walk_choice_arm!(oexprs, state, arm_nctx, segments, global_kwargs, arm)
         bits_after = state.bits
         dval = gensym("discrim")
@@ -392,13 +472,18 @@ function pattern_choice_multi!(exprs::PatternExprs,
         push!(oexprs.parse, emit_pack(state, discrim_type, dval, discrim_pos))
         parent.parsed_max += child.parsed_max - child.start_min
         parent.print_max = Base.max(parent.print_max, child.print_max)
-        (; armvar, end_label, child, oexprs, arm_nctx,
+        (; armvar, end_label, child, oexprs, arm_nctx, arm_props,
            seg_range = seg_start+1:length(exprs.segments),
            bits_before, bits_after)
     end
+    state.bits = maximum(ad.bits_after for ad in arm_data)
     for (k, ad) in enumerate(arm_data)
         check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
         patch_optional_extracts!(exprs.segments, ad.seg_range, check)
+        for (name, val) in ad.arm_props
+            guarded = guard_property_extract(val, check, exprs.segments, ad.seg_range)
+            push!(exprs.properties, name => guarded)
+        end
     end
     final_bits = state.bits
     arm_spans = [ad.oexprs.bytespans for ad in arm_data]
@@ -418,6 +503,19 @@ function pattern_choice_multi!(exprs::PatternExprs,
         push!(exprs.print, :(if $discrim_extract == $(discrim_type(k))
                                  $(ad.oexprs.print...)
                              end))
+    end
+    # Propagate bytespans upward so parent sequences can dispatch on our content.
+    # A choice contributes the union of all arm alternatives.
+    all_alts = reduce(vcat, arm_spans; init=Vector{ByteSet}[])
+    extend_bytespans!(exprs.bytespans, all_alts)
+    # Tagged choice: the tag is just a property contributed by every arm
+    if !isnothing(tag_field)
+        tag_tuple = Expr(:tuple, tag_values...)
+        for k in eachindex(arm_data)
+            check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
+            push!(exprs.properties, tag_field =>
+                ExprVarLine[:(if $check; $tag_tuple[$(discrim_type(k))] end)])
+        end
     end
 end
 

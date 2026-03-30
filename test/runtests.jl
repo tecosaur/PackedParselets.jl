@@ -3454,6 +3454,23 @@ end
         @test propertynames(parse(FieldChoice, "A42")) == (:id,)
         check_roundtrips(FieldChoice, ("A00", "A99", "B000", "B999"))
     end
+    @testset "tagged choice" begin
+        iddef = :(@defpacked TaggedChoice (choice(:kind,
+            :alpha => seq("A", :val(digits(2, pad=2))),
+            :beta  => seq("B", :val(digits(3, pad=3))))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:63)
+        eval(iddef)
+        a = parse(TaggedChoice, "A42")
+        b = parse(TaggedChoice, "B007")
+        @test a.kind === :alpha
+        @test b.kind === :beta
+        @test a.val == 42
+        @test b.val == 7
+        @test :kind ∈ propertynames(a)
+        @test :val ∈ propertynames(a)
+        check_roundtrips(TaggedChoice, ("A00", "A99", "B000", "B999"))
+        @test_neverthrow PP.parsebytes(TaggedChoice, ::Vector{UInt8})
+    end
     @testset "duplicate field name across choice arms" begin
         iddef = :(@defpacked DupField (choice(seq("VCV", :id(digits(3, pad=3))),
                                               seq("RCV", :id(digits(3, pad=3))))))
@@ -3565,6 +3582,80 @@ end
         @test by.y == 99
         @test by.x === nothing
         check_roundtrips(ChoiceInOpt, ("42", "0-A00", "99-B99"))
+    end
+    @testset "overlapping bit allocation" begin
+        iddef = :(@defpacked OverlapBits (choice(
+            seq("S", :x(digits(2, pad=2))),
+            seq("L", :y(digits(4, pad=4))))))
+        @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:62)
+        eval(iddef)
+        # discriminant: ceil(log2(3)) = 2, arm1: 7 bits, arm2: 14 bits → 2 + 14 = 16
+        @test PP.nbits(OverlapBits) <= 16
+        @test parse(OverlapBits, "S42").x == 42
+        @test parse(OverlapBits, "L1234").y == 1234
+        @test parse(OverlapBits, "S42").y === nothing
+        @test parse(OverlapBits, "L1234").x === nothing
+        check_roundtrips(OverlapBits, ("S00", "S99", "L0000", "L9999"))
+    end
+    @testset "nested tagged choice — inactive arm returns nothing" begin
+        iddef = :(@defpacked NestedTag (choice(:format,
+            :new => :num(digits(4, pad=4)),
+            :old => seq(choice(:kind, :a => "AA", :b => "BB"),
+                        :num(digits(2, pad=2))))))
+        @test parsebytes_complexity(iddef) == (branches=5:25, branch_total=25, ops=2:77)
+        eval(:(@defpacked NestedTag (choice(:format,
+            :new => :num(digits(4, pad=4)),
+            :old => seq(choice(:kind, :a => "AA", :b => "BB"),
+                        :num(digits(2, pad=2)))))))
+        n = parse(NestedTag, "1234")
+        o = parse(NestedTag, "AA42")
+        # New format: no kind tag
+        @test n.format === :new
+        @test n.kind === nothing
+        @test n.num == 1234
+        # Old format: kind tag set
+        @test o.format === :old
+        @test o.kind === :a
+        @test o.num == 42
+        # Other arm
+        @test parse(NestedTag, "BB99").kind === :b
+        check_roundtrips(NestedTag, ("0000", "9999", "AA00", "AA99", "BB00", "BB99"))
+        @test_neverthrow PP.parsebytes(NestedTag, ::Vector{UInt8})
+    end
+    @testset "digit value range in choice cascade" begin
+        iddef = :(@defpacked RangeCascade ("Y",
+            :year(choice(digits(2, min=91, max=99, pad=2), digits(2, min=0, max=7, pad=2))),
+            :month(digits(2, min=1, max=12, pad=2))))
+        @test parsebytes_complexity(iddef) == (branches=7:13, branch_total=13, ops=13:67)
+        eval(:(@defpacked RangeCascade ("Y",
+            :year(choice(digits(2, min=91, max=99, pad=2), digits(2, min=0, max=7, pad=2))),
+            :month(digits(2, min=1, max=12, pad=2)))))
+        @test parse(RangeCascade, "Y9901").year == 99
+        @test parse(RangeCascade, "Y9112").year == 91
+        @test parse(RangeCascade, "Y0001").year == 0
+        @test parse(RangeCascade, "Y0712").year == 7
+        @test tryparse(RangeCascade, "Y0801") === nothing  # year 8 out of range
+        @test tryparse(RangeCascade, "Y8901") === nothing  # year 89 out of range
+        check_roundtrips(RangeCascade, ("Y9101", "Y9912", "Y0001", "Y0712"))
+        @test_neverthrow PP.parsebytes(RangeCascade, ::Vector{UInt8})
+    end
+    @testset "nested choice dispatch propagation" begin
+        iddef = :(@defpacked NestedDispatch (choice(
+            seq(:year(digits(2, pad=2)), ".", :num(digits(4, pad=4))),
+            seq(choice(seq("math.", :class(choice("GT", "CO"))), "gr-qc"),
+                "/", :num(digits(7, pad=7))))))
+        @test parsebytes_complexity(iddef) == (branches=5:34, branch_total=34, ops=2:123)
+        eval(:(@defpacked NestedDispatch (choice(
+            seq(:year(digits(2, pad=2)), ".", :num(digits(4, pad=4))),
+            seq(choice(seq("math.", :class(choice("GT", "CO"))), "gr-qc"),
+                "/", :num(digits(7, pad=7)))))))
+        @test parse(NestedDispatch, "14.1607").year == 14
+        @test parse(NestedDispatch, "math.GT/0309136").class === :GT
+        @test parse(NestedDispatch, "gr-qc/0309136").num == 309136
+        # Both formats round-trip
+        check_roundtrips(NestedDispatch, (
+            "14.1607", "23.9999", "math.GT/0309136", "math.CO/0001001", "gr-qc/0001001"))
+        @test_neverthrow PP.parsebytes(NestedDispatch, ::Vector{UInt8})
     end
 end
 

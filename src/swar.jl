@@ -393,22 +393,34 @@ end
 # expressions, range checks, and error messages. Used by the three
 # strategy functions below.
 function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, dspec::NamedTuple)
-    (; base, maxdigits, min, max, pad) = dspec
-    needsmax = max < base^maxdigits - 1
-    needsmin = min > 0
-    if !needsmax && !needsmin
-        :()
-    elseif needsmax && !needsmin
-        fail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(max; base, pad))")
-        :($var <= $max || $fail)
-    elseif needsmin && !needsmax
+    (; base, maxdigits, min, max, pad, exclude) = dspec
+    checks = Expr[]
+    if min > 0
         fail = build_fail_expr!(state, nctx, "Expected at least a value of $(string(min; base, pad))")
-        :($var >= $min || $fail)
-    else
-        maxfail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(max; base, pad))")
-        minfail = build_fail_expr!(state, nctx, "Expected at least a value of $(string(min; base, pad))")
-        Expr(:block, :($var >= $min || $minfail), :($var <= $max || $maxfail))
+        push!(checks, :($var >= $min || $fail))
     end
+    if max < base^maxdigits - 1
+        fail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(max; base, pad))")
+        push!(checks, :($var <= $max || $fail))
+    end
+    if !isnothing(exclude)
+        for r in exclude
+            lo, hi = first(r), last(r)
+            desc = if lo == hi
+                "Value $(string(lo; base, pad)) is excluded"
+            else
+                "Value must not be in $(string(lo; base, pad))-$(string(hi; base, pad))"
+            end
+            fail = build_fail_expr!(state, nctx, desc)
+            check = if lo == hi
+                :($var != $lo || $fail)
+            else
+                :(($var < $lo || $var > $hi) || $fail)
+            end
+            push!(checks, check)
+        end
+    end
+    isempty(checks) ? :() : Expr(:block, checks...)
 end
 
 function compute_digit_vocab(state::ParserState, nctx::NodeCtx,

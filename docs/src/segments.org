@@ -51,19 +51,26 @@ digits(n, base=16) # n hex digits
 digits(n, min=A, max=B, pad=P)
 #+end_src
 
-| Keyword | Default | Description                                |
-|---------+---------+--------------------------------------------|
-| ~base~    | 10      | Numeric base (2--62)                       |
-| ~min~     | 0       | Minimum value                              |
-| ~max~     | ---     | Maximum value                              |
-| ~pad~     | 0       | Zero-pad printed output to width           |
-| ~skip~    | ---     | Characters to skip during parse (e.g. ~"-"~) |
-| ~groups~  | ---     | Print in groups: ~N~ (uniform) or ~(A, B, C)~  |
+| Keyword   | Default | Description                                           |
+|-----------+---------+-------------------------------------------------------|
+| ~base~    |      10 | Numeric base (2--62)                                  |
+| ~min~     |       0 | Minimum value                                         |
+| ~max~     |     --- | Maximum value                                         |
+| ~pad~     |       0 | Zero-pad printed output to width                      |
+| ~skip~    |     --- | Characters to skip during parse (e.g. ~"-"~)          |
+| ~groups~  |     --- | Print in groups: ~N~ (uniform) or ~(A, B, C)~         |
+| ~exclude~ |     --- | Excluded values: ~N~, ~lo:hi~, or ~(N, lo:hi, ...)~  |
 
 When ~skip~ is set, the specified characters are silently consumed during
 parsing.  The ~groups~ keyword (requires ~skip~) prints the value with
 the first skip character as a separator.  ~groups=4~ splits into groups
 of 4; ~groups=(3, 3, 4)~ gives explicit sizes.
+
+The ~exclude~ keyword rejects values or ranges at parse time.
+A single value (~exclude=13~), a range (~exclude=8:90~), or a
+tuple of mixed values and ranges (~exclude=(0, 8:90)~) are accepted.
+Useful for non-contiguous valid ranges like ArXiv old-format years
+(00--07 and 91--99): ~digits(2, pad=2, exclude=8:90)~.
 
 Fixed-width fields with base \le 16 use [[file:opt/swar.org][SWAR
 parsing]]; variable-width fields up to 8 digits also use SWAR with
@@ -97,6 +104,11 @@ Alphanumeric characters (0--9, A--Z, a--z). Same interface as ~letters~.
 Hexadecimal characters (0--9, A--F). Same interface as ~letters~.
 Default store is uppercase.
 
+When case-specific output is not needed, ~digits(n, base=16)~ may be
+preferable --- it uses [[file:opt/swar.org][SWAR parsing]] for
+significantly faster parsing, and stores the numeric value directly
+rather than character-packed data.
+
 ** ~charset~
 
 Custom character set from explicit ranges.
@@ -128,10 +140,10 @@ choice("alpha", "beta", "gamma")         # value-carrying: stores index
 choice("http://", "https://", is="http") # fixed: stores bool (matched canonical?)
 #+end_src
 
-| Keyword  | Description                                     |
-|----------+-------------------------------------------------|
-| ~casefold~ | Case-insensitive matching (default from parent) |
-| ~is~       | Canonical form: store only whether it matched   |
+| Keyword     | Description                                    |
+|-------------+------------------------------------------------|
+| ~casefold~  | Case-insensitive matching (default from parent) |
+| ~is~        | Canonical form: store only whether it matched |
 
 When captured as a field, the property returns a ~Symbol~ (value form)
 or is unavailable (fixed form). Uses [[file:opt/perfecthash.org][perfect

@@ -5,7 +5,7 @@
 # (letters, alphnum, hex, charset), and embedded identifier types. These
 # return SegmentOutput and let process_segment_output! handle framework mutations.
 
-## Skip and groups kwargs
+## Kwargs: skip, groups, exclude
 
 function parse_skip_kwarg(nctx::NodeCtx)
     raw = get(nctx, :skip, nothing)
@@ -14,6 +14,26 @@ function parse_skip_kwarg(nctx::NodeCtx)
     all(isascii, raw) || throw(ArgumentError("skip characters must be ASCII"))
     isempty(raw) && return nothing
     Tuple(map(UInt8, codeunits(raw)))
+end
+
+function parse_exclude_kwarg(nctx::NodeCtx)
+    raw = get(nctx, :exclude, nothing)
+    isnothing(raw) && return nothing
+    as_range(v::Integer) = Int(v):Int(v)
+    as_range(r::AbstractRange) = Int(first(r)):Int(last(r))
+    function as_range(e::Expr)
+        Meta.isexpr(e, :call, 3) && e.args[1] == :(:) ||
+            throw(ArgumentError("exclude: expected integer or range, got $(repr(e))"))
+        Int(e.args[2]):Int(e.args[3])
+    end
+    items = if raw isa Tuple
+        raw
+    elseif raw isa Expr && Meta.isexpr(raw, :tuple)
+        Tuple(raw.args)
+    else
+        (raw,)
+    end
+    UnitRange{Int}[as_range(v) for v in items]
 end
 
 function parse_groups_kwarg(nctx::NodeCtx, nchars::Int, skipbytes)
@@ -84,7 +104,8 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     bitpos = state.bits + dbits
     # gen_digit_parse reads parsed_min for SWAR safety, so call before
     # process_segment_output! updates bounds
-    dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims, skipbytes)
+    exclude = parse_exclude_kwarg(nctx)
+    dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims, skipbytes, exclude)
     parsed = gen_digit_parse(state, nctx, fieldvar, option, dspec)
     fnum = Symbol("$(fieldvar)_num")
     (; parsevar, directvar) = parsed

@@ -105,7 +105,10 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     # gen_digit_parse reads parsed_min for SWAR safety, so call before
     # process_segment_output! updates bounds
     exclude = parse_exclude_kwarg(nctx)
-    dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims, skipbytes, exclude)
+    groups = parse_groups_kwarg(nctx, maxdigits, skipbytes)
+    !isnothing(groups) && !fixedwidth &&
+        throw(ArgumentError("groups requires fixed-width digits"))
+    dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims, skipbytes, exclude, groups)
     parsed = gen_digit_parse(state, nctx, fieldvar, option, dspec)
     fnum = Symbol("$(fieldvar)_num")
     (; parsevar, directvar) = parsed
@@ -133,10 +136,6 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     else
         fvalue
     end
-    # Print codegen
-    groups = parse_groups_kwarg(nctx, maxdigits, skipbytes)
-    !isnothing(groups) && !fixedwidth &&
-        throw(ArgumentError("groups requires fixed-width digits"))
     prexprs = if isnothing(groups)
         digits_print_exprs(fieldvar, fvalue, directvar, fnum,
                            fixedwidth, maxdigits, pad, base)
@@ -304,7 +303,7 @@ function charseq_impart_exprs(state::ParserState, cspec::NamedTuple,
         exprs
     else
         exprs = Expr[
-            :(($lenvar, $charvar) = parsechars($cT, String($argvar), $maxlen, $ranges, $cfold, $oneindexed)),
+            :(($lenvar, $charvar) = parsechars($cT, codeunits(String($argvar)), 1, $maxlen, $ranges, $cfold, $oneindexed)),
             :($lenvar == ncodeunits(String($argvar)) || throw(ArgumentError(
                 string("Invalid characters in \"", $argvar, "\" for ", $kindstr))))]
         if variable
@@ -487,20 +486,37 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         "Expected $maxlen $kind characters"
     end)
     scannedvar = Symbol("$(fieldvar)_scanned")
-    # SWAR hex: inline register parsing when hex, fixed-width, no skip, bpc=4
-    use_swar_hex = kind === :hex && !variable && !has_skip && !oneindexed &&
-        maxlen <= sizeof(UInt)
+    groups = parse_groups_kwarg(nctx, maxlen, skipbytes)
+    !isnothing(groups) && variable &&
+        throw(ArgumentError("groups requires fixed-width character sequence"))
+    use_swar_hex = kind === :hex && !variable && !oneindexed &&
+        (!has_skip || !isnothing(groups))
     parse_exprs = if use_swar_hex
         hexcase = if cfold; :mixed
         elseif first(ranges[2]) == UInt8('A'); :upper
         else :lower end
-        svar = gensym("hexswar")
-        sT, load = gen_swar_hiload(state, nctx, svar, maxlen)
-        check = gen_swar_digitcheck(sT, svar, 16, maxlen, notfound, hexcase)
-        parse = gen_swarparse(sT, svar, 16, maxlen)
-        cast = if sT == cT Expr(:(=), charvar, svar) else Expr(:(=), charvar, :($svar % $cT)) end
-        ExprVarLine[:($(emit_lengthcheck(state, nctx, maxlen)) || $notfound),
-                    load, check..., parse..., cast, Expr(:(=), lenvar, maxlen)]
+        if has_skip
+            (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(groups, skipbytes)
+            swar_body = gen_swar_chunks(state, nctx, chunks, 16, charvar, cT,
+                                        notfound, :shift_or, hexcase)
+            push!(swar_body, Expr(:(=), lenvar, maxlen), Expr(:(=), scannedvar, total_bytes))
+            fallback = ExprVarLine[
+                :(($lenvar, $charvar, $scannedvar) = parsechars($cT, idbytes, pos,
+                    $scanlimit, $ranges, $cfold, false, $skipbytes)),
+                :(if $lenvar != $maxlen; $notfound end)]
+            lencheck = emit_lengthcheck(state, nctx, total_bytes)
+            ExprVarLine[:(if $lencheck && $sep_check; $(swar_body...)
+                          else $(fallback...) end)]
+        else
+            chunksize = sizeof(UInt)
+            chunks = Tuple((chunksize * i, Base.min(chunksize, maxlen - chunksize * i))
+                           for i in 0:cld(maxlen, chunksize)-1)
+            exprs = ExprVarLine[:($(emit_lengthcheck(state, nctx, maxlen)) || $notfound)]
+            append!(exprs, gen_swar_chunks(state, nctx, chunks, 16, charvar, cT,
+                                           notfound, :shift_or, hexcase))
+            push!(exprs, Expr(:(=), lenvar, maxlen))
+            exprs
+        end
     elseif has_skip
         ExprVarLine[:(($lenvar, $charvar, $scannedvar) =
             parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes)),
@@ -542,9 +558,6 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     else
         :($charvar, $maxlen, $ranges, $oneindexed)
     end
-    groups = parse_groups_kwarg(nctx, maxlen, skipbytes)
-    !isnothing(groups) && variable &&
-        throw(ArgumentError("groups requires fixed-width character sequence"))
     printexprs = if isnothing(groups)
         ExprVarLine[:(printchars(io, $(charargs.args...)))]
     else

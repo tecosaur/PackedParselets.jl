@@ -228,7 +228,8 @@ Generate check + parse expressions for a single SWAR chunk.
 Handles 1-digit decimal (sub+cmp), 1-digit hex (casefold+dual range),
 and multi-digit (via `gen_swar_digitcheck`/`gen_swarparse`).
 """
-function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail)
+function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail,
+                        hexcase::Symbol = :mixed)
     check = if nd == 1 && base <= 10
         ExprVarLine[:($var = ($var - $(UInt8('0'))) % $cT),
                     :(if $var >= $(cT(base)); $on_fail end)]
@@ -243,7 +244,7 @@ function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail)
                           end
                       end)]
     else
-        gen_swar_digitcheck(cT, var, base, nd, on_fail)
+        gen_swar_digitcheck(cT, var, base, nd, on_fail, hexcase)
     end
     parse = if nd == 1 ExprVarLine[] else gen_swarparse(cT, var, base, nd) end
     (check, parse)
@@ -505,84 +506,30 @@ function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
     result
 end
 
-# Shared skeleton for fixed-width digit strategies: length guard +
-# required/optional branching. `check_fn(on_fail)` must return
-# `Vector{ExprVarLine}` of digit-validation expressions.
-function gen_digit_fixed_guarded(::ParserState, nctx::NodeCtx, vocab,
-                                 nd::Int,
-                                 load_exprs::Vector{ExprVarLine},
-                                 check_fn,
-                                 parse_and_encode::Vector{ExprVarLine})
-    (; fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
-    b = nctx[:current_branch]
-    len_check = Expr(:call, :__length_check, b.id, b.parsed_max, nd, nd, nd)
-    result = ExprVarLine[
-        :($len_check || $fail_expr),
-        load_exprs...,
-        check_fn(fail_expr)...,
-        parse_and_encode...]
-    rangecheck != :() && push!(result, rangecheck)
-    if !directvar; push!(result, :($fieldvar = $numexpr)) end
-    result
-end
 
 """
     gen_digit_swar_fixed(vocab, dspec, state, nctx) -> Vector{ExprVarLine}
 
 Fixed-width SWAR for 1–16 digit fields.
-
-Single-chunk for ≤8 digits, two-chunk (upper UInt64 + lower sub-word) for
-9–16. Load strategy preference: backward > forward-overread > exact sub-loads.
 """
 function gen_digit_swar_fixed(state::ParserState, nctx::NodeCtx,
                               vocab, dspec::NamedTuple)
-    if dspec.maxdigits <= sizeof(UInt)
-        gen_swar_fixed_single(state, nctx, vocab, dspec)
+    (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
+    (; base, maxdigits, dI) = dspec
+    chunksize = sizeof(UInt)
+    chunks = if maxdigits <= chunksize
+        ((0, maxdigits),)
     else
-        gen_swar_fixed_twochunk(state, nctx, vocab, dspec)
+        ((0, chunksize), (chunksize, maxdigits - chunksize))
     end
-end
-
-# Single-chunk path (1–8 digits)
-function gen_swar_fixed_single(state::ParserState, nctx::NodeCtx,
-                                vocab, dspec::NamedTuple)
-    (; fnum, fieldvar) = vocab
-    (; base, maxdigits, dI) = dspec
-    swar_var = Symbol("$(fieldvar)_swar")
-    sT, load = gen_swar_hiload(state, nctx, swar_var, maxdigits)
-    check_fn = on_fail -> gen_swar_chunk(sT, swar_var, maxdigits, base, on_fail)[1]
-    parse_expr = if maxdigits == 1 ExprVarLine[] else gen_swarparse(sT, swar_var, base, maxdigits) end
-    swar_cast = if sT == dI; :($fnum = $swar_var) else :($fnum = $swar_var % $dI) end
-    gen_digit_fixed_guarded(state, nctx, vocab, maxdigits,
-                            ExprVarLine[load], check_fn,
-                            ExprVarLine[parse_expr..., swar_cast])
-end
-
-# Two-chunk path (9–16 digits): upper UInt64 + lower sub-word
-function gen_swar_fixed_twochunk(state::ParserState, nctx::NodeCtx,
-                                  vocab, dspec::NamedTuple)
-    (; fnum, fieldvar) = vocab
-    (; base, maxdigits, dI) = dspec
-    upper_nd = sizeof(UInt)
-    lower_nd = maxdigits - upper_nd
-    upper_sT, lower_sT = UInt64, register_type(lower_nd)
-    upper_var = Symbol("$(fieldvar)_upper")
-    lower_var = Symbol("$(fieldvar)_lower")
-    upper_load = gen_swar_load(upper_sT, upper_var, upper_nd, false)
-    lower_backward = sizeof(lower_sT) > lower_nd
-    lower_load = gen_swar_load(lower_sT, lower_var, lower_nd, lower_backward, upper_nd)
-    load_exprs = ExprVarLine[upper_load, lower_load]
-    check_fn = on_fail -> begin
-        uc, _ = gen_swar_chunk(upper_sT, upper_var, upper_nd, base, on_fail)
-        lc, _ = gen_swar_chunk(lower_sT, lower_var, lower_nd, base, on_fail)
-        ExprVarLine[uc..., lc...]
-    end
-    _, upper_parse = gen_swar_chunk(upper_sT, upper_var, upper_nd, base, nothing)
-    _, lower_parse = gen_swar_chunk(lower_sT, lower_var, lower_nd, base, nothing)
-    scale = UInt64(base) ^ lower_nd
-    combine = :($fnum = ($(upper_var) * $scale + $(lower_var) % UInt64) % $dI)
-    gen_digit_fixed_guarded(state, nctx, vocab, maxdigits, load_exprs, check_fn,
-                            ExprVarLine[upper_parse..., lower_parse..., combine])
+    b = nctx[:current_branch]
+    len_check = Expr(:call, :__length_check, b.id, b.parsed_max, maxdigits, maxdigits, maxdigits)
+    result = ExprVarLine[:($len_check || $fail_expr)]
+    append!(result, gen_swar_chunks(state, nctx, chunks, base, fnum, dI,
+                                    fail_expr, :mul_add))
+    rangecheck != :() && push!(result, rangecheck)
+    if !directvar; push!(result, :($fieldvar = $numexpr)) end
+    result
 end
 
 """
@@ -690,11 +637,14 @@ function gen_digit_parse(state::ParserState, nctx::NodeCtx,
                          fieldvar::Symbol, option,
                          dspec::NamedTuple)
     vocab = compute_digit_vocab(state, nctx, fieldvar, option, dspec)
-    (; mindigits, maxdigits, base, skipbytes) = dspec
+    (; mindigits, maxdigits, base, skipbytes, groups) = dspec
     fixedwidth = mindigits == maxdigits
     swar_limit = if fixedwidth 2 * sizeof(UInt) else sizeof(UInt) end
     use_swar = base <= 16 && maxdigits <= swar_limit && isnothing(skipbytes)
-    exprs = if !use_swar
+    use_grouped_swar = !isnothing(groups) && base <= 16
+    exprs = if use_grouped_swar
+        gen_digit_swar_grouped(state, nctx, vocab, dspec)
+    elseif !use_swar
         gen_digit_parseint(state, nctx, vocab, dspec)
     elseif fixedwidth
         gen_digit_swar_fixed(state, nctx, vocab, dspec)
@@ -702,6 +652,99 @@ function gen_digit_parse(state::ParserState, nctx::NodeCtx,
         gen_digit_swar_variable(state, nctx, vocab, dspec)
     end
     (; exprs, vocab.parsevar, vocab.directvar)
+end
+
+## Multi-chunk SWAR: load → validate → reduce → accumulate
+
+"""
+    gen_swar_chunks(state, nctx, chunks, base, resultvar, resultT, on_fail,
+                    accum, hexcase) -> Vector{ExprVarLine}
+
+SWAR parse `chunks` (tuple of `(offset, ndigits)` pairs) and accumulate
+into `resultvar::resultT`. `accum` is `:shift_or` (charseq bit-packing)
+or `:mul_add` (positional integer value).
+"""
+function gen_swar_chunks(state::ParserState, nctx::NodeCtx,
+                         chunks, base::Int, resultvar::Symbol, resultT::DataType,
+                         on_fail, accum::Symbol, hexcase::Symbol = :mixed)
+    bpc = cardbits(base)
+    exprs = ExprVarLine[]
+    digits_remaining = sum(last, chunks)
+    for (ci, (offset, nd)) in enumerate(chunks)
+        svar = gensym("chunk$ci")
+        sT = register_type(nd)
+        load = if ci == 1 && iszero(offset)
+            _, l = gen_swar_hiload(state, nctx, svar, nd)
+            l
+        else
+            gen_swar_load(sT, svar, nd, false, offset)
+        end
+        check, parse = gen_swar_chunk(sT, svar, nd, base, on_fail, hexcase)
+        append!(exprs, ExprVarLine[load, check..., parse...])
+        digits_remaining -= nd
+        val = if sT == resultT svar else :($svar % $resultT) end
+        expr = if accum === :shift_or
+            nbits = digits_remaining * bpc
+            if ci == 1 && iszero(nbits) val
+            elseif ci == 1; :($val << $nbits)
+            elseif iszero(nbits); :($resultvar | $val)
+            else :($resultvar | $val << $nbits) end
+        else
+            if ci == 1 val
+            else :($resultvar * $(resultT(base) ^ nd) + $val) end
+        end
+        push!(exprs, Expr(:(=), resultvar, expr))
+    end
+    exprs
+end
+
+## Grouped SWAR parse with separator validation
+
+# Compute sub-chunked offsets and separator check expression for grouped fields.
+# Groups larger than a register are split into register-sized pieces.
+function grouped_chunks_and_check(groups, skipbytes, chunksize::Int = sizeof(UInt))
+    sep = first(skipbytes)
+    ngroups = length(groups)
+    total_bytes = sum(groups) + ngroups - 1
+    offsets = let off = 0
+        ntuple(ngroups) do i
+            o = off; off += groups[i] + (i < ngroups); o
+        end
+    end
+    chunks = Tuple(
+        (offsets[i] + chunksize * j, Base.min(chunksize, groups[i] - chunksize * j))
+        for i in 1:ngroups for j in 0:cld(groups[i], chunksize)-1)
+    sep_check = foldl(1:ngroups-1; init=:(true)) do acc, i
+        :($acc && @inbounds idbytes[pos + $(offsets[i] + groups[i])] == $sep)
+    end
+    (; chunks, sep_check, total_bytes)
+end
+
+function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
+                                vocab, dspec::NamedTuple)
+    (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
+    (; base, maxdigits, dI, groups, skipbytes) = dspec
+    (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(groups, skipbytes)
+    swar_body = gen_swar_chunks(state, nctx, chunks, base, fnum, dI,
+                                fail_expr, :mul_add)
+    scanned = Symbol("$(fieldvar)_scanned")
+    bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
+    push!(swar_body, Expr(:(=), scanned, total_bytes))
+    scanlimit = emit_lengthbound(state, nctx, maxdigits)
+    fallback = ExprVarLine[
+        :(($bitsconsumed, $fnum, $scanned) =
+            parseint($(dI), idbytes, pos, $base, $scanlimit, $skipbytes)),
+        :($bitsconsumed == $maxdigits || $fail_expr)]
+    lencheck = emit_lengthcheck(state, nctx, total_bytes)
+    result = ExprVarLine[
+        :(if $lencheck && $sep_check
+              $(swar_body...)
+          else
+              $(fallback...)
+          end)]
+    rangecheck != :() && push!(result, rangecheck)
+    if !directvar; push!(result, :($fieldvar = $numexpr)) end
+    result
 end
 
 ## Reverse-SWAR: spread packed bpc-bit fields to one-per-byte for printing

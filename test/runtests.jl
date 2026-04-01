@@ -1614,7 +1614,7 @@ end
 
         @testset "SWAR two-chunk 10:10 (8+2)" begin
             iddef = :(@defpacked Swar2C10 ("ID-", :id(digits(10:10))))
-            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=34:34)
+            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=33:33)
             eval(iddef)
             @test parse(Swar2C10, "ID-0000000000").id == 0
             @test parse(Swar2C10, "ID-0000000042").id == 42
@@ -1630,7 +1630,7 @@ end
 
         @testset "SWAR two-chunk 12:12 (8+4)" begin
             iddef = :(@defpacked Swar2C12 ("X", :id(digits(12:12))))
-            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=37:37)
+            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=36:36)
             eval(iddef)
             @test parse(Swar2C12, "X000000000000").id == 0
             @test parse(Swar2C12, "X000000000042").id == 42
@@ -1646,7 +1646,7 @@ end
 
         @testset "SWAR two-chunk 13:13 (8+5)" begin
             iddef = :(@defpacked Swar2C13 :id(digits(13:13)))
-            @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=39:39)
+            @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=42:42)
             eval(iddef)
             @test parse(Swar2C13, "0000000000000").id == 0
             @test parse(Swar2C13, "0000000000042").id == 42
@@ -1662,7 +1662,7 @@ end
 
         @testset "SWAR two-chunk 16:16 (8+8)" begin
             iddef = :(@defpacked Swar2C16 ("G", :id(digits(16:16))))
-            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=40:40)
+            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=38:38)
             eval(iddef)
             @test parse(Swar2C16, "G0000000000000000").id == 0
             @test parse(Swar2C16, "G0000000000000042").id == 42
@@ -1678,7 +1678,7 @@ end
 
         @testset "SWAR two-chunk hex 10:10 (8+2)" begin
             iddef = :(@defpacked Swar2CHex10 ("H", :id(digits(10:10, base=16))))
-            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=58:58)
+            @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=57:57)
             eval(iddef)
             @test parse(Swar2CHex10, "H0000000000").id == 0
             @test parse(Swar2CHex10, "H00000000ff").id == 0xff
@@ -1696,7 +1696,7 @@ end
         @testset "SWAR two-chunk optional 10:10 (8+2)" begin
             iddef = :(@defpacked Swar2COpt ("V", :a(digits(2:2)),
                        optional(".", :b(digits(10:10)))))
-            @test parsebytes_complexity(iddef) == (branches=5:8, branch_total=8, ops=19:56)
+            @test parsebytes_complexity(iddef) == (branches=5:8, branch_total=8, ops=19:55)
             eval(iddef)
             @test parse(Swar2COpt, "V42.0000000000").a == 42
             @test parse(Swar2COpt, "V42.0000000000").b == 0
@@ -3096,7 +3096,7 @@ end # skip kwarg
     @testset "uniform groups (ORCID-style)" begin
         # 16 digits in groups of 4 separated by hyphens
         iddef = :(@defpacked OrcidGrouped (:id(digits(16, skip="-", groups=4))))
-        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        @test parsebytes_complexity(iddef) == (branches=4:9, branch_total=10, ops=9:65)
         eval(iddef)
         @test parse(OrcidGrouped, "0000-0002-1825-0097").id == 21825_0097
         @test parse(OrcidGrouped, "0000000218250097").id == 21825_0097
@@ -3111,7 +3111,7 @@ end # skip kwarg
     @testset "uneven groups (phone-style)" begin
         # 10 digits in groups of 3-3-4
         iddef = :(@defpacked PhoneNum (:num(digits(10, skip="-", groups=(3, 3, 4)))))
-        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        @test parsebytes_complexity(iddef) == (branches=4:7, branch_total=8, ops=9:58)
         eval(iddef)
         @test parse(PhoneNum, "555-123-4567").num == 5551234567
         @test parse(PhoneNum, "5551234567").num == 5551234567
@@ -3123,7 +3123,7 @@ end # skip kwarg
     end
     @testset "hex groups" begin
         iddef = :(@defpacked HexGrouped ("X", :id(hex(8, skip="-", groups=4))))
-        @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=9:9)
+        @test parsebytes_complexity(iddef) == (branches=5:6, branch_total=7, ops=11:59)
         eval(iddef)
         @test parse(HexGrouped, "XDEAD-BEEF").id == "DEADBEEF"
         @test parse(HexGrouped, "XDEADBEEF").id == "DEADBEEF"
@@ -3141,6 +3141,38 @@ end # skip kwarg
         @test string(parse(LetterGrouped, "ABCDEF")) == "ABC-DEF"
         check_roundtrips(LetterGrouped, ("AAA-AAA", "ABC-DEF", "ZZZ-ZZZ"))
         @test_neverthrow PP.parsebytes(LetterGrouped, ::Vector{UInt8})
+    end
+    @testset "multi-chunk hex" begin
+        iddef = :(@defpacked Hex16 :val(hex(16)))
+        @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=60:60)
+        eval(iddef)
+        id = parse(Hex16, "0123456789ABCDEF")
+        @test id.val == "0123456789ABCDEF"
+        @test parse(Hex16, "0123456789abcdef") == id
+        check_roundtrips(Hex16, ("0000000000000000", "0123456789ABCDEF", "FFFFFFFFFFFFFFFF"))
+        @test_neverthrow PP.parsebytes(Hex16, ::Vector{UInt8})
+        iddef = :(@defpacked Hex32 :val(hex(32)))
+        @test parsebytes_complexity(iddef) == (branches=5:5, branch_total=5, ops=120:120)
+        eval(iddef)
+        id = parse(Hex32, "550E8400E29B41D4A716446655440000")
+        @test id.val == "550E8400E29B41D4A716446655440000"
+        check_roundtrips(Hex32, ("00000000000000000000000000000000",
+                                "550E8400E29B41D4A716446655440000",
+                                "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"))
+        @test_neverthrow PP.parsebytes(Hex32, ::Vector{UInt8})
+    end
+    @testset "grouped hex with sub-chunking" begin
+        iddef = :(@defpacked UuidHex (:id(hex(32, skip="-", groups=(8,4,4,4,12)))))
+        @test parsebytes_complexity(iddef) == (branches=4:12, branch_total=13, ops=9:172)
+        eval(iddef)
+        @test parse(UuidHex, "550E8400-E29B-41D4-A716-446655440000").id == "550E8400E29B41D4A716446655440000"
+        @test parse(UuidHex, "550e8400-e29b-41d4-a716-446655440000").id == "550E8400E29B41D4A716446655440000"
+        @test parse(UuidHex, "550E8400E29B41D4A716446655440000").id == "550E8400E29B41D4A716446655440000"
+        @test string(parse(UuidHex, "550E8400E29B41D4A716446655440000")) == "550E8400-E29B-41D4-A716-446655440000"
+        check_roundtrips(UuidHex, ("00000000-0000-0000-0000-000000000000",
+                                   "550E8400-E29B-41D4-A716-446655440000",
+                                   "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"))
+        @test_neverthrow PP.parsebytes(UuidHex, ::Vector{UInt8})
     end
 end
 

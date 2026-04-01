@@ -68,12 +68,6 @@ function parsechars(::Type{P}, bytes::AbstractVector{UInt8}, pos::Int, maxlen::I
     end
 end
 
-function parsechars(::Type{P}, str::AbstractString, maxlen::Int,
-                    ranges::NTuple{N, UnitRange{UInt8}},
-                    casefold::Bool, oneindexed::Bool = false) where {P <: Unsigned, N}
-    parsechars(P, codeunits(str), 1, maxlen, ranges, casefold, oneindexed)
-end
-
 ## Digit parsing
 
 function byte2int(b::UInt8, base::Integer)
@@ -127,9 +121,6 @@ function parseint(::Type{I}, bytes::AbstractVector{UInt8}, pos::Int, base::Integ
     end
 end
 
-function parseint(::Type{I}, str::AbstractString, base::Integer, maxlen::Integer) where {I <: Unsigned}
-    parseint(I, codeunits(str), 1, base, maxlen)
-end
 
 ## Character unpacking
 

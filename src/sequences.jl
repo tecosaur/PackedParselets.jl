@@ -489,20 +489,48 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         "Expected $maxlen $kind characters"
     end)
     scannedvar = Symbol("$(fieldvar)_scanned")
-    parse_exprs = if has_skip
+    # SWAR hex: inline register parsing when hex, fixed-width, no skip, bpc=4
+    use_swar_hex = kind === :hex && !variable && !has_skip && !oneindexed &&
+        maxlen <= sizeof(UInt)
+    parse_exprs = if use_swar_hex
+        hexcase = if cfold; :mixed
+        elseif first(ranges[2]) == UInt8('A'); :upper
+        else :lower end
+        sT = register_type(maxlen)
+        svar = gensym("hexswar")
+        b = nctx[:current_branch]
+        backward = b.parsed_min >= sizeof(sT) - maxlen
+        use_fwd = !backward && maxlen < sizeof(sT)
+        load = if use_fwd
+            shift = 8 * (sizeof(sT) - maxlen)
+            Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
+                 :($svar = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos)))) << $shift),
+                 gen_swar_load(sT, svar, maxlen, false))
+        else
+            gen_swar_load(sT, svar, maxlen, backward)
+        end
+        check = gen_swar_digitcheck(sT, svar, 16, maxlen, notfound, hexcase)
+        parse = gen_swarparse(sT, svar, 16, maxlen)
+        cast = if sT == cT Expr(:(=), charvar, svar) else Expr(:(=), charvar, :($svar % $cT)) end
+        lencheck = emit_lengthcheck(state, nctx, maxlen)
+        ExprVarLine[:($lencheck || $notfound), load, check..., parse...,
+                    cast, Expr(:(=), lenvar, maxlen)]
+    elseif has_skip
         ExprVarLine[:(($lenvar, $charvar, $scannedvar) =
-            parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes))]
+            parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes)),
+            :(if $lenvar != $maxlen; $notfound end)]
     else
-        ExprVarLine[:(($lenvar, $charvar) =
+        exprs = ExprVarLine[:(($lenvar, $charvar) =
             parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
-    end
-    if !isnothing(option) && variable && iszero(minlen)
-        push!(parse_exprs, :($lenvar > 0 || $notfound))
-    else
-        push!(parse_exprs,
-              :(if $(if variable; :($lenvar < $minlen) else :($lenvar != $maxlen) end)
-                    $notfound
-                end))
+        if !isnothing(option) && variable && iszero(minlen)
+            push!(exprs, :($lenvar > 0 || $notfound))
+        else
+            push!(exprs,
+                  :(if $(if variable; :($lenvar < $minlen) else :($lenvar != $maxlen) end)
+                        $notfound
+                    end))
+        end
+        exprs
     end
     posadv = if has_skip; scannedvar else lenvar end
     push!(parse_exprs, emit_pack(state, cT, charvar, bitpos - lenbits), :(pos += $posadv))

@@ -75,7 +75,7 @@ is zero per-byte for valid digits.
 For base 11–16 (hex): addition-based range checks on both decimal and
 alpha ranges after casefolding, using bit 7 as the per-byte indicator.
 """
-function swar_digitconsts(::Type{T}, base::Int) where {T <: Unsigned}
+function swar_digitconsts(::Type{T}, base::Int, hexcase::Symbol = :mixed) where {T <: Unsigned}
     rep = T(0x01) * typemax(T) ÷ typemax(UInt8)  # 0x0101…
     if base <= 10
         (; kind = :nibble,
@@ -83,13 +83,14 @@ function swar_digitconsts(::Type{T}, base::Int) where {T <: Unsigned}
            nibmask  = T(0xF0) * rep,
            expected = T(0x30) * rep)
     else
-        alp_end = 0x61 + base - 10  # one past last valid alpha digit
-        (; kind = :hex,
+        alp_start = if hexcase === :upper 0x41 else 0x61 end
+        alp_end = alp_start + base - 10
+        (; kind = :hex, hexcase,
            foldmask = T(0x20) * rep,
            hibits   = T(0x80) * rep,
            dec_lo   = T(0x80 - 0x30) * rep,
            dec_hi   = T(0x80 - 0x3A) * rep,
-           alp_lo   = T(0x80 - 0x61) * rep,
+           alp_lo   = T(0x80 - alp_start) * rep,
            alp_hi   = T(0x80 - alp_end) * rep)
     end
 end
@@ -105,20 +106,21 @@ Emit an expression computing a non-digit indicator from `var::T` into
 For base ≤ 10, each byte of `result` is zero for valid digits and nonzero
 otherwise. For base > 10, bit 7 of each byte is set for non-digits.
 """
-function gen_swar_nondigits(::Type{T}, var::Symbol, result::Symbol, base::Int) where {T <: Unsigned}
-    c = swar_digitconsts(T, base)
+function gen_swar_nondigits(::Type{T}, var::Symbol, result::Symbol,
+                            base::Int, hexcase::Symbol = :mixed) where {T <: Unsigned}
+    c = swar_digitconsts(T, base, hexcase)
     if c.kind === :nibble
         :($result = ($var & ($var + $(c.addmask)) & $(c.nibmask)) ⊻ $(c.expected))
     else
         dec_ok = gensym("dec")
         alp_ok = gensym("alp")
-        folded = gensym("folded")
-        # Decimal check on original bytes (casefolding would alias control chars).
-        # Alpha check on casefolded bytes (A-F → a-f).
+        # Mixed: casefold then check a-f. Single case: check directly.
+        av = if c.hexcase === :mixed gensym("folded") else var end
+        fold = if c.hexcase === :mixed Expr(:(=), av, :($var | $(c.foldmask))) end
         quote
-            $folded = $var | $(c.foldmask)
+            $fold
             $dec_ok = ($var + $(c.dec_lo)) & ~($var + $(c.dec_hi)) & $(c.hibits)
-            $alp_ok = ($folded + $(c.alp_lo)) & ~($folded + $(c.alp_hi)) & $(c.hibits)
+            $alp_ok = ($av + $(c.alp_lo)) & ~($av + $(c.alp_hi)) & $(c.hibits)
             $result = ($dec_ok | $alp_ok) ⊻ $(c.hibits)
         end
     end
@@ -131,9 +133,10 @@ Check that `nd` high-aligned digit bytes in `var::T` are valid, evaluating
 `on_fail` otherwise. When `nd < sizeof(T)`, a mask restricts the check to
 the digit bytes only.
 """
-function gen_swar_digitcheck(::Type{T}, var::Symbol, base::Int, nd::Int, on_fail) where {T <: Unsigned}
+function gen_swar_digitcheck(::Type{T}, var::Symbol, base::Int, nd::Int, on_fail,
+                              hexcase::Symbol = :mixed) where {T <: Unsigned}
     nondig = gensym("nondig")
-    check_expr = gen_swar_nondigits(T, var, nondig, base)
+    check_expr = gen_swar_nondigits(T, var, nondig, base, hexcase)
     padding = sizeof(T) - nd
     checkmask = if !iszero(padding)
         padmask = typemax(T) - ((one(T) << (8 * padding)) - one(T))
@@ -250,7 +253,7 @@ end
 ## Loading strategies
 
 """
-    gen_swar_load(::Type{T}, var, nd; backward) -> Expr
+    gen_swar_load(::Type{T}, var, nd, backward) -> Expr
 
 Load `nd` digit bytes from `idbytes` at `pos` into `var::T`, high-aligned.
 
@@ -261,7 +264,7 @@ Three strategies:
 - Exact (`nd < sizeof(T)`, `backward=false`): power-of-2 sub-loads shifted
   and ORed together; reads exactly `nd` bytes.
 """
-function gen_swar_load(::Type{T}, var::Symbol, nd::Int; backward::Bool, offset::Int=0) where {T}
+function gen_swar_load(::Type{T}, var::Symbol, nd::Int, backward::Bool, offset::Int=0) where {T}
     posoff(n) = if iszero(n); :pos else :(pos + $n) end
     posexpr = posoff(offset)
     padding = sizeof(T) - nd
@@ -534,10 +537,10 @@ function gen_swar_fixed_single(state::ParserState, nctx::NodeCtx,
     load = if use_forward_overread
         shift = 8 * (sizeof(sT) - maxdigits)
         wide_load = :($swar_var = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos)))) << $shift)
-        narrow_load = gen_swar_load(sT, swar_var, maxdigits; backward=false)
+        narrow_load = gen_swar_load(sT, swar_var, maxdigits, false)
         Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)), wide_load, narrow_load)
     else
-        gen_swar_load(sT, swar_var, maxdigits; backward)
+        gen_swar_load(sT, swar_var, maxdigits, backward)
     end
     check_fn = on_fail -> gen_swar_chunk(sT, swar_var, maxdigits, base, on_fail)[1]
     parse_expr = if maxdigits == 1 ExprVarLine[] else gen_swarparse(sT, swar_var, base, maxdigits) end
@@ -557,9 +560,9 @@ function gen_swar_fixed_twochunk(state::ParserState, nctx::NodeCtx,
     upper_sT, lower_sT = UInt64, register_type(lower_nd)
     upper_var = Symbol("$(fieldvar)_upper")
     lower_var = Symbol("$(fieldvar)_lower")
-    upper_load = gen_swar_load(upper_sT, upper_var, upper_nd; backward=false)
+    upper_load = gen_swar_load(upper_sT, upper_var, upper_nd, false)
     lower_backward = sizeof(lower_sT) > lower_nd
-    lower_load = gen_swar_load(lower_sT, lower_var, lower_nd; backward=lower_backward, offset=upper_nd)
+    lower_load = gen_swar_load(lower_sT, lower_var, lower_nd, lower_backward, upper_nd)
     load_exprs = ExprVarLine[upper_load, lower_load]
     check_fn = on_fail -> begin
         uc, _ = gen_swar_chunk(upper_sT, upper_var, upper_nd, base, on_fail)

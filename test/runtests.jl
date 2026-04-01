@@ -2569,7 +2569,7 @@ end # alphnum
 @testset "hex" begin
     @testset "HexFolded" begin
         iddef = :(@defpacked HexFolded ("0x", :code(hex(8, casefold=true))))
-        @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=9:9)
+        @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=35:35)
         eval(iddef)
         id = parse(HexFolded, "0xDEADBEEF")
         @test id.code == "DEADBEEF"
@@ -2581,7 +2581,7 @@ end # alphnum
     end
     @testset "HexUpper" begin
         iddef = :(@defpacked HexUpper :code(hex(4, upper=true, casefold=false)))
-        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=29:29)
         eval(iddef)
         id = parse(HexUpper, "1A2B")
         @test id.code == "1A2B"
@@ -2591,7 +2591,7 @@ end # alphnum
     end
     @testset "HexLower" begin
         iddef = :(@defpacked HexLower :code(hex(4, lower=true, casefold=false)))
-        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=29:29)
         eval(iddef)
         id = parse(HexLower, "1a2b")
         @test id.code == "1a2b"
@@ -2637,7 +2637,7 @@ end # alphnum
         iddef = :(@defpacked HexWithDigits ("H-",
                    :hash(hex(6, casefold=true)),
                    "-", :ver(digits(max=99))))
-        @test parsebytes_complexity(iddef) == (branches=5:5, branch_total=5, ops=39:39)
+        @test parsebytes_complexity(iddef) == (branches=5:5, branch_total=5, ops=67:67)
         eval(iddef)
         id = parse(HexWithDigits, "H-A1B2C3-7")
         @test id.hash == "A1B2C3"

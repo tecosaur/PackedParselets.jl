@@ -248,7 +248,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
     bvc = backward_verify_chunk(minoptlen)
     use_backward = !isnothing(bvc) && !variable_len && b.parsed_min >= bvc.padding
     bve = if use_backward
-        gen_backward_verify(mopts, casefold, minoptlen, bvc, fieldvar; skip = hash_skip)
+        gen_backward_verify(mopts, casefold, minoptlen, bvc, fieldvar, hash_skip)
     else
         nothing
     end
@@ -552,7 +552,7 @@ end
 function gen_suffix_check(suffix::String, casefold::Bool, suffix_len::Int)
     chunks = register_chunks(suffix_len)
     foldr(chunks, init=:(true)) do c, rest
-        (; value, mask) = pack_chunk(suffix, c; casefold)
+        (; value, mask) = pack_chunk(suffix, c, casefold)
         tailoff = suffix_len - c.offset
         check = gen_masked_compare(c.iT, :(pos + optlen - $tailoff), value, mask)
         if rest == :(true) check else :($check && $rest) end
@@ -632,8 +632,8 @@ end
 # Backward-aligned single-register verify: loads from pos-padding, padding
 # bytes masked to 0x00. Returns (; destructure, checks) like gen_verify_exprs.
 function gen_backward_verify(options::Vector{String}, casefold::Bool,
-                             nbytes::Int, bvc, prefix::Symbol;
-                             skip::Union{Nothing, Tuple{Int, Int}} = nothing)
+                             nbytes::Int, bvc, prefix::Symbol,
+                             skip::Union{Nothing, Tuple{Int, Int}})
     (; iT, padding) = bvc
     w = sizeof(iT)
     mask = reduce(|, (begin

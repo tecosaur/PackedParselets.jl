@@ -472,6 +472,32 @@ end
         @test parse(VarDig, string(x)) == x
     end
     @test tryparse(VarDig, "100000") === nothing  # exceeds 5 digits
+    # Large values exercise bufprint_decimal UInt64 chunking paths
+    iddef = :(@defpacked BigDig (:n(digits(max=999_999_999_999_999_999))))
+    @test parsebytes_complexity(iddef).ops[1] > 0
+    eval(iddef)
+    for v in (10_000_000_000,          # two-chunk (hi fits UInt32)
+              1234567890123456,        # two-chunk
+              999_999_999_999_999_999) # three-chunk (hi > UInt32)
+        @test parse(BigDig, string(BigDig(v))) == BigDig(v)
+    end
+    @test_neverthrow PP.parsebytes(BigDig, ::Vector{UInt8})
+    # Full UInt64 range
+    iddef = :(@defpacked FullU64 (:n(digits(UInt64))))
+    @test parsebytes_complexity(iddef).ops[1] > 0
+    eval(iddef)
+    for v in (UInt64(0), UInt64(42), typemax(UInt64))
+        @test parse(FullU64, string(FullU64(v))) == FullU64(v)
+    end
+    @test_neverthrow PP.parsebytes(FullU64, ::Vector{UInt8})
+    # Padded large values: pad=10 matches maxdigits, exercises bufprint_decimal padding
+    iddef = :(@defpacked PadBig (:n(digits(10, pad=10))))
+    @test parsebytes_complexity(iddef).ops[1] > 0
+    eval(iddef)
+    for v in (0, 42, 9999999999)
+        @test parse(PadBig, string(PadBig(v))) == PadBig(v)
+    end
+    @test_neverthrow PP.parsebytes(PadBig, ::Vector{UInt8})
 end
 
 @testset "show forms" begin

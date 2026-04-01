@@ -169,16 +169,21 @@ function assemble_tobytes(pexprs::Vector{ExprVarLine}, state::ParserState, name:
     bufexprs = map(strip_segsets! ∘ copy, pexprs)
     filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, bufexprs)
     rewrite_bufprint!(bufexprs)
-    :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
-          buf = $(if fixedlen
-                      :(Base.StringMemory($maxbytes))
-                  else
-                      :(Memory{UInt8}(undef, $maxbytes))
-                  end)
-          pos = 0
-          $(bufexprs...)
-          buf, pos
-      end)
+    Expr(:block,
+        :(function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, id::$(esc(name)))
+              pos = 0
+              $(bufexprs...)
+              pos
+          end),
+        :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
+              buf = $(if fixedlen
+                          :(Base.StringMemory($maxbytes))
+                      else
+                          :(Memory{UInt8}(undef, $maxbytes))
+                      end)
+              len = $(GlobalRef(M, :tobytes))(buf, id)
+              buf, len
+          end))
 end
 
 ## print / string
@@ -212,15 +217,13 @@ function assemble_string(state::ParserState, name::Symbol)
     end
 end
 
-# Replace __tobytes_print(io, ...) markers with print(io, ...) for the IO code path.
-function resolve_print_markers!(exprs::Vector)
-    for expr in exprs
-        expr isa Expr || continue
-        if Meta.isexpr(expr, :call) && length(expr.args) >= 2 && expr.args[1] == :__tobytes_print
-            expr.args[1] = :print
-        else
-            resolve_print_markers!(expr.args)
+function resolve_print_markers!(exprs)
+    for item in exprs
+        item isa Expr || continue
+        if Meta.isexpr(item, :call) && !isempty(item.args) && item.args[1] == :__tobytes_print
+            item.args[1] = :print
         end
+        resolve_print_markers!(item.args)
     end
 end
 
@@ -465,7 +468,7 @@ end
     rewrite_bufprint!(pexprs)
 
 Rewrite `print(io, ...)` and `printchars(io, ...)` calls in `pexprs`
-into direct `Memory{UInt8}` buffer operations (`bufprint`, `bufprintchars`,
+into direct `Memory{UInt8}` buffer operations (`bufprint`, `unpackchars!`,
 `bufprint_static`), avoiding IO overhead in the generated `tobytes` method.
 
 Recurses into nested expressions. Modifies `pexprs` in place.
@@ -483,7 +486,7 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
             elseif fname == :write && length(args) == 1
                 Any[:(buf[pos += 1] = $(args[1]))]
             elseif fname == :printchars
-                Any[:(pos = bufprintchars(buf, pos, $(args...)))]
+                rewrite_printchars(args)
             elseif fname == :__tobytes_print
                 tobytes_ref = GlobalRef(PackedParselets, :tobytes)
                 ebuf = gensym("ebuf")
@@ -506,11 +509,60 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
     end
 end
 
+
+function rewrite_printchars(args)
+    if length(args) == 4 && args[2] isa Int && args[3] isa Tuple &&
+            args[4] isa Bool && !args[4] && length(args[3]) in (1, 2)
+        var, nchars, ranges, _ = args
+        return gen_swar_bufprintchars(var, nchars, cardbits(sum(length, ranges)), ranges)
+    end
+    Any[:(pos = unpackchars!(buf, pos, $(args...)))]
+end
+
+function gen_swar_bufprintchars(var, nchars::Int, bpc::Int, ranges)
+    exprs = Any[]
+    remaining = nchars
+    consumed = 0
+    for nf in (8, 4, 2)
+        remaining >= nf || continue
+        sT = register_type(nf)
+        svar = gensym("spread")
+        rshift = (remaining - nf) * bpc
+        lshift = 8 * nf - nf * bpc
+        extract = if iszero(rshift) var else :($var >> $rshift) end
+        init = :($extract % $sT)
+        if !iszero(lshift)
+            init = :($init << $lshift & $(typemax(sT) << lshift))
+        end
+        push!(exprs, Expr(:(=), svar, init))
+        append!(exprs, gen_reverse_swar(sT, svar, bpc, nf, ranges))
+        push!(exprs, :(Base.unsafe_store!(Ptr{$sT}(pointer(buf, pos + 1)), $svar)))
+        push!(exprs, :(pos += $nf))
+        consumed += nf
+        remaining -= nf
+    end
+    fmask = (1 << bpc) - 1
+    base1 = UInt8(first(first(ranges)))
+    len1 = UInt8(length(first(ranges)))
+    delta = if length(ranges) >= 2 UInt8(first(ranges[2])) - base1 - len1 else 0x00 end
+    for i in consumed:nchars-1
+        shift = (nchars - 1 - i) * bpc
+        shifted = if iszero(shift) var else :($var >> $shift) end
+        idx = :(UInt8($shifted & $fmask))
+        byte = if length(ranges) == 1
+            :($base1 + $idx)
+        else
+            :($base1 + $idx + ($idx >= $len1) * $delta)
+        end
+        push!(exprs, :(buf[pos += 1] = $byte))
+    end
+    exprs
+end
+
 function rewrite_print_call(args::Vector)
     if length(args) == 1
         arg = first(args)
         if Meta.isexpr(arg, :call) && first(arg.args) == :string
-            # print(io, string(var, kw...)) → bufprint(buf, pos, var, base, pad)
             sargs = arg.args[2:end]
             positional = Any[]
             base, pad = 10, 0
@@ -557,7 +609,7 @@ end
 # Bare references in finalize hooks are the hook author's responsibility.
 const RUNTIME_SYMS = Set{Symbol}([
     :parsechars, :parseint, :printchars, :chars2string,
-    :bufprint, :bufprintchars, :takestring!,
+    :bufprint, :radix100_store, :unpackchars!, :takestring!,
 ])
 
 """

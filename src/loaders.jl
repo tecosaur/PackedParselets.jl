@@ -68,7 +68,7 @@ function pack_bytes(str::String, offset::Int, width::Int, iT::DataType)
 end
 
 """
-    pack_chunk(str::String, chunk; casefold::Bool, valid::Int) -> (; value::iT, mask::iT)
+    pack_chunk(str::String, chunk, casefold::Bool[, valid::Int]) -> (; value::iT, mask::iT)
 
 Compute a masked register value for comparing `chunk` against `str`.
 
@@ -80,7 +80,7 @@ the mask.
 This encapsulates the recurring `build_chunk_mask` + `pack_bytes & mask` pattern
 used across string matching, choice verification, and tail checking.
 """
-function pack_chunk(str::String, chunk::@NamedTuple{offset::Int, width::Int, iT::DataType};
+function pack_chunk(str::String, chunk::@NamedTuple{offset::Int, width::Int, iT::DataType},
                     casefold::Bool, valid::Int = min(chunk.width, ncodeunits(str) - chunk.offset))
     (; offset, width, iT) = chunk
     mask = reduce(|, (begin

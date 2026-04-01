@@ -185,10 +185,8 @@ function digits_print_exprs(fieldvar::Symbol, fvalue, directvar::Bool, fnum::Sym
     else 0 end
     printex = if printpad > 0
         :(print(io, string($printvar, base=$base, pad=$printpad)))
-    elseif base == 10
-        :(print(io, $printvar))
     else
-        :(print(io, string($printvar, base=$base)))
+        :(print(io, string($printvar, base=$base, pad=0)))
     end
     prexprs = ExprVarLine[]
     directvar || push!(prexprs, :($fieldvar = $fvalue))
@@ -496,25 +494,13 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         hexcase = if cfold; :mixed
         elseif first(ranges[2]) == UInt8('A'); :upper
         else :lower end
-        sT = register_type(maxlen)
         svar = gensym("hexswar")
-        b = nctx[:current_branch]
-        backward = b.parsed_min >= sizeof(sT) - maxlen
-        use_fwd = !backward && maxlen < sizeof(sT)
-        load = if use_fwd
-            shift = 8 * (sizeof(sT) - maxlen)
-            Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
-                 :($svar = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos)))) << $shift),
-                 gen_swar_load(sT, svar, maxlen, false))
-        else
-            gen_swar_load(sT, svar, maxlen, backward)
-        end
+        sT, load = gen_swar_hiload(state, nctx, svar, maxlen)
         check = gen_swar_digitcheck(sT, svar, 16, maxlen, notfound, hexcase)
         parse = gen_swarparse(sT, svar, 16, maxlen)
         cast = if sT == cT Expr(:(=), charvar, svar) else Expr(:(=), charvar, :($svar % $cT)) end
-        lencheck = emit_lengthcheck(state, nctx, maxlen)
-        ExprVarLine[:($lencheck || $notfound), load, check..., parse...,
-                    cast, Expr(:(=), lenvar, maxlen)]
+        ExprVarLine[:($(emit_lengthcheck(state, nctx, maxlen)) || $notfound),
+                    load, check..., parse..., cast, Expr(:(=), lenvar, maxlen)]
     elseif has_skip
         ExprVarLine[:(($lenvar, $charvar, $scannedvar) =
             parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes)),

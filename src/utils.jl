@@ -6,7 +6,7 @@
 # Three families:
 # - Parsing: parseint, parsechars (digit/character scanning from byte vectors)
 # - IO printing: printchars, chars2string (character unpacking to IO/String)
-# - Buffer printing: bufprint, bufprintchars (direct Memory{UInt8} output)
+# - Buffer printing: bufprint (direct Memory{UInt8} output)
 
 ## Compat
 
@@ -134,17 +134,14 @@ end
 ## Character unpacking
 
 """
-    unpackchars(f!, packed::Unsigned, nchars, ranges[, oneindexed])
+    unpackchars!(buf, pos, packed::Unsigned, nchars, ranges[, oneindexed]) -> pos
 
 Unpack `nchars` characters from `packed` (MSB-first, same encoding as
-`parsechars`) and call `f!(byte)` for each decoded byte.
-
-This is the shared core of `printchars`, `chars2string`, and
-`bufprintchars` — each passes a different `f!` closure.
+`parsechars`) into `buf` starting at `pos+1`. Returns the updated position.
 """
-function unpackchars(f!::F, packed::P, nchars::Int,
-                     ranges::NTuple{N, UnitRange{UInt8}},
-                     oneindexed::Bool = false) where {F, P <: Unsigned, N}
+function unpackchars!(buf, pos::Int, packed::P, nchars::Int,
+                      ranges::NTuple{N, UnitRange{UInt8}},
+                      oneindexed::Bool = false) where {P <: Unsigned, N}
     nvals = sum(length, ranges)
     bpc = cardbits(nvals + oneindexed)
     topshift = 8 * sizeof(P) - bpc
@@ -155,13 +152,14 @@ function unpackchars(f!::F, packed::P, nchars::Int,
         for r in ranges
             rlen = length(r) % UInt8
             if idx < rlen
-                f!(first(r) + idx)
+                buf[pos += 1] = first(r) + idx
                 break
             end
             idx -= rlen
         end
         packed <<= bpc
     end
+    pos
 end
 
 """
@@ -172,8 +170,22 @@ Unpack `nchars` characters from `packed` and write them to `io`.
 function printchars(io::IO, packed::P, nchars::Int,
                     ranges::NTuple{N, UnitRange{UInt8}},
                     oneindexed::Bool = false) where {P <: Unsigned, N}
-    unpackchars(packed, nchars, ranges, oneindexed) do b
-        write(io, b)
+    nvals = sum(length, ranges)
+    bpc = cardbits(nvals + oneindexed)
+    topshift = 8 * sizeof(P) - bpc
+    packed <<= 8 * sizeof(P) - nchars * bpc
+    offset = UInt8(oneindexed)
+    @inbounds for _ in 1:nchars
+        idx = UInt8(packed >> topshift) - offset
+        for r in ranges
+            rlen = length(r) % UInt8
+            if idx < rlen
+                write(io, first(r) + idx)
+                break
+            end
+            idx -= rlen
+        end
+        packed <<= bpc
     end
 end
 
@@ -185,12 +197,9 @@ Unpack `nchars` characters from `packed` into a `String`.
 function chars2string(packed::P, nchars::Int,
                       ranges::NTuple{N, UnitRange{UInt8}},
                       oneindexed::Bool = false) where {P <: Unsigned, N}
-    buf = Vector{UInt8}(undef, nchars)
-    ci = Ref(0)
-    unpackchars(packed, nchars, ranges, oneindexed) do b
-        buf[ci[] += 1] = b
-    end
-    String(buf)
+    buf = Base.StringMemory(nchars)
+    unpackchars!(buf, 0, packed, nchars, ranges, oneindexed)
+    Base.unsafe_takestring(buf)
 end
 
 ## Buffer printing
@@ -201,7 +210,19 @@ function bufprint(buf::Memory{UInt8}, pos::Int, str::String)
     pos + n
 end
 
-Base.@constprop :aggressive function bufprint(buf::Memory{UInt8}, pos::Int, num::Integer, base::Int = 10, pad::Int = 0)
+# Radix-100 digit pair table for two-at-a-time decimal output.
+const RADIX100 = Tuple(UInt16(UInt8('0') + i % 10) << 8 | UInt16(UInt8('0') + i ÷ 10)
+                       for i in 0:99)
+
+@inline function radix100_store(buf::Memory{UInt8}, pos::Int, pair::Integer)
+    Base.unsafe_store!(Ptr{UInt16}(pointer(buf, pos)), @inbounds RADIX100[pair + 1])
+end
+
+Base.@constprop :aggressive @inline function bufprint(buf::Memory{UInt8}, pos::Int, num::Integer, base::Int = 10, pad::Int = 0)
+    base == 10 && return bufprint_decimal(buf, pos, num % UInt64, pad)
+    nd = ndigits(num; base)
+    endpos = pos + Base.max(nd, pad)
+    i = endpos
     @inline int2byte(d) = if d < 10
         UInt8('0') + d % UInt8
     elseif base <= 36
@@ -210,28 +231,81 @@ Base.@constprop :aggressive function bufprint(buf::Memory{UInt8}, pos::Int, num:
         db = d % UInt8
         ifelse(db < 36, UInt8('A') - 0x0a + db, UInt8('a') - 0x24 + db)
     end
-    nd = ndigits(num; base)
-    width = Base.max(nd, pad)
-    endpos = pos + width
-    i = endpos
     @inbounds while num != 0
         num, d = divrem(num, base)
         buf[i] = int2byte(d)
         i -= 1
     end
-    @inbounds while i > pos
-        buf[i] = UInt8('0')
-        i -= 1
-    end
+    @inbounds while i > pos; buf[i] = UInt8('0'); i -= 1 end
     endpos
 end
 
-function bufprintchars(buf::Memory{UInt8}, pos::Int, packed::P, nchars::Int,
-                       ranges::NTuple{N, UnitRange{UInt8}},
-                       oneindexed::Bool = false) where {P <: Unsigned, N}
-    posref = Ref(pos)
-    unpackchars(packed, nchars, ranges, oneindexed) do b
-        buf[posref[] += 1] = b
+# jeaiii multiply-shift: division-free decimal printing for UInt32.
+# Each range selects a magic constant; prod >> 32 gives digit pairs,
+# (UInt32(prod) * 100) advances to the next pair. The first pair's
+# value (< 10 or ≥ 10) determines odd/even digit count implicitly.
+# Ref: Jeon, "Faster integer formatting — jeaiii's algorithm", 2022.
+Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}, pos::Int, num::UInt64, pad::Int)
+    num <= typemax(UInt32) && return bufprint_decimal32(buf, pos, num % UInt32, pad)
+    startpos = pos
+    # Split into ≤8-digit UInt32 chunks via divrem by 10^8.
+    # UInt64 max ≈ 1.8×10^19 → at most three chunks (4+8+8 digits).
+    hi, lo = divrem(num, UInt64(100_000_000))
+    if hi <= typemax(UInt32)
+        pos = bufprint_decimal32(buf, pos, hi % UInt32, 0)
+    else
+        hi2, mid = divrem(hi, UInt64(100_000_000))
+        pos = bufprint_decimal32(buf, pos, hi2 % UInt32, 0)
+        pos = bufprint_decimal32(buf, pos, mid % UInt32, 8)
     end
-    posref[]
+    pos = bufprint_decimal32(buf, pos, lo % UInt32, 8)
+    # Pad if needed
+    nd = pos - startpos
+    if nd < pad
+        npad = pad - nd
+        @inbounds for j in pos:-1:startpos+1; buf[j + npad] = buf[j] end
+        @inbounds for j in startpos+1:startpos+npad; buf[j] = UInt8('0') end
+        pos += npad
+    end
+    pos
+end
+
+Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt8}, pos::Int, num::UInt32, pad::Int)
+    @inline function jeaiii_emit(buf, pos, prod, npairs)
+        pair = Int(prod >> 32)
+        if pair < 10
+            @inbounds buf[pos += 1] = UInt8('0') + pair % UInt8
+        else
+            radix100_store(buf, pos + 1, pair)
+            pos += 2
+        end
+        for _ in 1:npairs
+            prod = UInt64(prod % UInt32) * UInt64(100)
+            radix100_store(buf, pos + 1, Int(prod >> 32))
+            pos += 2
+        end
+        pos
+    end
+    startpos = pos
+    pos = if num < 100
+        if num < 10; @inbounds buf[pos + 1] = UInt8('0') + num % UInt8; pos + 1
+        else radix100_store(buf, pos + 1, num); pos + 2 end
+    elseif num < 1_000_000
+        if num < 10_000; jeaiii_emit(buf, pos, UInt64(num) * 42949673, 1)
+        else jeaiii_emit(buf, pos, UInt64(num) * 429497, 2) end
+    elseif num < 100_000_000
+        jeaiii_emit(buf, pos, (UInt64(num) * 281474978) >> 16, 3)
+    elseif num < 1_000_000_000
+        jeaiii_emit(buf, pos, (UInt64(num) * 1441151882) >> 25, 4)
+    else
+        jeaiii_emit(buf, pos, (UInt64(num) * 1441151881) >> 25, 4)
+    end
+    nd = pos - startpos
+    if nd < pad
+        npad = pad - nd
+        @inbounds for j in pos:-1:startpos+1; buf[j + npad] = buf[j] end
+        @inbounds for j in startpos+1:startpos+npad; buf[j] = UInt8('0') end
+        pos += npad
+    end
+    pos
 end

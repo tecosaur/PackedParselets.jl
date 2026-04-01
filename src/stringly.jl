@@ -51,7 +51,7 @@ function gen_skip_step(state::ParserState, nctx::NodeCtx,
                       alts::Vector{String}, casefold::Bool)
     refs = if casefold map(lowercase, alts) else alts end
     if length(refs) == 1
-        return gen_static_lchop(refs, casefold=casefold)
+        return gen_static_lchop(refs, casefold)
     end
     # Multiple alternatives: use the choice matcher for optimal dispatch
     fieldvar = gensym("skip_match")
@@ -123,7 +123,7 @@ end
 ## Prefix stripping
 
 """
-    gen_static_lchop(prefixes; casefold) -> Expr
+    gen_static_lchop(prefixes, casefold) -> Expr
 
 Generate an if/elseif chain that strips the first matching prefix by advancing
 `pos`. Prefixes are grouped by length (longest first), with same-length
@@ -132,7 +132,7 @@ alternatives as nested if/elseif.
 Assumes casefolded prefixes are already lowercased.
 Expects `idbytes`, `pos`, `nbytes` in scope.
 """
-function gen_static_lchop(prefixes::Vector{String}; casefold::Bool)
+function gen_static_lchop(prefixes::Vector{String}, casefold::Bool)
     groups = Dict{Int, Vector{String}}()
     for p in prefixes
         push!(get!(Vector{String}, groups, ncodeunits(p)), p)
@@ -175,7 +175,7 @@ function gen_string_match(str::String, casefold::Bool, nbytes::Int = ncodeunits(
     strlen = ncodeunits(str)
     map(register_chunks(nbytes)) do chunk
         valid = min(chunk.width, strlen - chunk.offset)
-        (; value, mask) = pack_chunk(str, chunk; casefold, valid)
+        (; value, mask) = pack_chunk(str, chunk, casefold, valid)
         posexpr = if iszero(chunk.offset)
             :pos
         else

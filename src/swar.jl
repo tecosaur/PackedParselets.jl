@@ -114,7 +114,6 @@ function gen_swar_nondigits(::Type{T}, var::Symbol, result::Symbol,
     else
         dec_ok = gensym("dec")
         alp_ok = gensym("alp")
-        # Mixed: casefold then check a-f. Single case: check directly.
         av = if c.hexcase === :mixed gensym("folded") else var end
         fold = if c.hexcase === :mixed Expr(:(=), av, :($var | $(c.foldmask))) end
         quote
@@ -251,6 +250,28 @@ function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail)
 end
 
 ## Loading strategies
+
+"""
+    gen_swar_hiload(state, nctx, var, nd) -> (sT, Expr)
+
+Emit a high-aligned register load of `nd` bytes from `idbytes` at `pos`,
+choosing the optimal strategy (backward, forward-overread, or exact sub-loads)
+based on the current branch's byte guarantee. Returns `(register_type, load_expr)`.
+"""
+function gen_swar_hiload(state::ParserState, nctx::NodeCtx, var::Symbol, nd::Int)
+    sT = register_type(nd)
+    b = nctx[:current_branch]
+    backward = b.parsed_min >= sizeof(sT) - nd
+    load = if !backward && nd < sizeof(sT)
+        shift = 8 * (sizeof(sT) - nd)
+        Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
+             :($var = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos)))) << $shift),
+             gen_swar_load(sT, var, nd, false))
+    else
+        gen_swar_load(sT, var, nd, backward)
+    end
+    sT, load
+end
 
 """
     gen_swar_load(::Type{T}, var, nd, backward) -> Expr
@@ -527,21 +548,8 @@ function gen_swar_fixed_single(state::ParserState, nctx::NodeCtx,
                                 vocab, dspec::NamedTuple)
     (; fnum, fieldvar) = vocab
     (; base, maxdigits, dI) = dspec
-    sT = register_type(maxdigits)
     swar_var = Symbol("$(fieldvar)_swar")
-    b = nctx[:current_branch]
-    backward = b.parsed_min >= sizeof(sT) - maxdigits
-    # Forward overread: full-width forward load + left-shift, cheaper than
-    # exact sub-loads when trailing content guarantees sizeof(sT) bytes
-    use_forward_overread = !backward && maxdigits < sizeof(sT)
-    load = if use_forward_overread
-        shift = 8 * (sizeof(sT) - maxdigits)
-        wide_load = :($swar_var = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos)))) << $shift)
-        narrow_load = gen_swar_load(sT, swar_var, maxdigits, false)
-        Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)), wide_load, narrow_load)
-    else
-        gen_swar_load(sT, swar_var, maxdigits, backward)
-    end
+    sT, load = gen_swar_hiload(state, nctx, swar_var, maxdigits)
     check_fn = on_fail -> gen_swar_chunk(sT, swar_var, maxdigits, base, on_fail)[1]
     parse_expr = if maxdigits == 1 ExprVarLine[] else gen_swarparse(sT, swar_var, base, maxdigits) end
     swar_cast = if sT == dI; :($fnum = $swar_var) else :($fnum = $swar_var % $dI) end
@@ -695,3 +703,45 @@ function gen_digit_parse(state::ParserState, nctx::NodeCtx,
     end
     (; exprs, vocab.parsevar, vocab.directvar)
 end
+
+## Reverse-SWAR: spread packed bpc-bit fields to one-per-byte for printing
+
+"""
+    gen_reverse_swar(::Type{T}, var, bpc, nfields, ranges) -> Vector{ExprVarLine}
+
+Spread `nfields` packed `bpc`-bit fields (MSB-aligned in `var::T`) into
+individual bytes with ASCII offsets from `ranges`, `hton`-ed for storage.
+Supports 1 or 2 contiguous ranges; 2-range uses branchless SWAR comparison.
+"""
+function gen_reverse_swar(::Type{T}, var::Symbol, bpc::Int, nfields::Int,
+                          ranges::NTuple{N, UnitRange{UInt8}}) where {T <: Unsigned, N}
+    rep = T(0x01) * typemax(T) ÷ typemax(UInt8)
+    nbits = 8 * sizeof(T)
+    exprs = ExprVarLine[]
+    groupsize, groupwidth = nfields, nfields * bpc
+    while groupsize > 1
+        half = groupsize >> 1
+        gap = half * (8 - bpc)
+        lomask = (one(T) << (half * bpc)) - one(T)
+        mask = reduce(|, lomask << (nbits - i * groupwidth - groupsize * bpc)
+                      for i in 0:nfields ÷ groupsize - 1; init=zero(T))
+        push!(exprs, Expr(:(=), var, :($var & $(~mask) | ($var & $mask) >> $gap)))
+        groupwidth = half * 8
+        groupsize = half
+    end
+    push!(exprs, Expr(:(=), var, :($var >> $(8 - bpc) & $(T((1 << bpc) - 1) * rep))))
+    base1 = T(first(ranges[1]))
+    if N == 1
+        push!(exprs, Expr(:(=), var, :(hton($var + $(base1 * rep)))))
+    else
+        len1 = T(length(ranges[1]))
+        delta = T(first(ranges[2])) - base1 - len1
+        hibits = T(0x80) * rep
+        mvar = gensym("rmask")
+        # (⊻ must be parenthesised: & binds tighter)
+        push!(exprs, Expr(:(=), mvar, :(($var | $hibits - $(len1 * rep) ⊻ $var) & $hibits)))
+        push!(exprs, Expr(:(=), var, :(hton($var + $(base1 * rep) + $mvar >> 7 * $delta))))
+    end
+    exprs
+end
+

@@ -10,8 +10,8 @@
 #+html: <a href="https://liberapay.com/tec"><img src="https://shields.io/badge/support%20my%20efforts-f6c915?logo=Liberapay&logoColor=black"></a>
 
 A parser-compiler toolkit for generating bit-packed primitive types from
-declarative patterns. It is intended as *a building block for other packages*
-that need efficient, compact representations of structured string formats
+declarative patterns. It is intended as /a building block for other packages/ that
+need efficient, compact representations of structured string formats
 (identifiers, version strings, timestamps, etc.), not as a user-facing package
 itself.
 
@@ -41,17 +41,27 @@ segment types can be added via the ~SegmentDef~ interface.
 
 * Examples
 
+~maketype~ returns a ~NamedTuple~ of expression components and a ~ParserState~.
+The expressions need ~esc()~ wrappers stripped and ~parse~/~tryparse~ methods
+added before use --- this is normally done by the downstream package's macro.
+The patterns below show the specification language; see the test harness for a
+working ~eval~ wrapper.
+
 ** Semver
 
 #+begin_src julia
-eval(maketype(CORE_SEGMENTS, @__MODULE__, :SemVer,
-    ("v", :major(digits(max=999)), ".", :minor(digits(max=999)), ".",
-     :patch(digits(max=999)),
-     optional("-", :pre(choice("alpha", "beta", "rc")),
-              optional(".", :prebuild(digits(max=99)))))))
+("v", :major(digits(max=999)), ".", :minor(digits(max=999)), ".",
+ :patch(digits(max=999)),
+ optional("-", :pre(choice("alpha", "beta", "rc")),
+          optional(".", :prebuild(digits(max=99)))))
 #+end_src
 
+Six fields and two levels of optionals, packed into 5 bytes. Parsing takes 9-16ns,
+printing ~7 ns (zero-allocation into a pre-allocated buffer).
+
 #+begin_src julia-repl
+julia> map(eval, values(maketype(...))) # Create `SemVer` type from DSL
+
 julia> v = parse(SemVer, "v2.14.0-rc.3")
 SemVer("v2.14.0-rc.3")
 
@@ -70,17 +80,33 @@ julia> sizeof(SemVer)
 
 ** RFC 3339 timestamp
 
+Timestamps following RFC3339 must follow the format =YYYY-MM-DDThh:mm:ss[.s]TZD=,
+that is
+- The year, month, day
+- The letter =T= in upper or lower case
+
 #+begin_src julia
-eval(maketype(CORE_SEGMENTS, @__MODULE__, :RFC3339,
-    (:year(digits(4, pad=4)), "-",
-     :month(digits(2, min=1, max=12, pad=2)), "-",
-     :day(digits(2, min=1, max=31, pad=2)), "T",
-     :hour(digits(2, max=23, pad=2)), ":",
-     :min(digits(2, max=59, pad=2)), ":",
-     :sec(digits(2, max=59, pad=2)), "Z")))
+(:year(digits(4, pad=4)), "-",
+ :month(digits(2, min=1, max=12, pad=2)), "-",
+ :day(digits(2, min=1, max=31, pad=2)),
+ "T",
+ :hour(digits(2, max=23, pad=2)), ":",
+ :min(digits(2, max=59, pad=2)), ":",
+ :sec(digits(2, max=60, pad=2)),
+ optional(".", :frac(digits(1:9))),
+ choice(:tz,
+        :utc    => "Z",
+        :offset => seq(:tzsign(choice("+", "-")),
+                       :tzhour(digits(2, max=23, pad=2)), ":",
+                       :tzmin(digits(2, max=59, pad=2)))))
 #+end_src
 
+The ten fields are packed into an 11-byte primitive type, that takes 7-11ns to
+parse, and ~20ns to write to pre-allocated memory.
+
 #+begin_src julia-repl
+julia> map(eval, values(maketype(...))) # Create `RFC3339` type from DSL
+
 julia> t = parse(RFC3339, "2025-03-17T14:30:00Z")
 RFC3339("2025-03-17T14:30:00Z")
 

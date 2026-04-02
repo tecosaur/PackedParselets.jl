@@ -1,13 +1,13 @@
 #+title: Bit-Packing
 
-Generated types are Julia ~primitive type~ values: fixed-size bags of bits with
-no heap allocation. Every field occupies a contiguous bit range within this
+Generated types are Julia ~primitive type~ values: fixed-size bags of bits with no
+heap allocation. Every field occupies a contiguous bit range within this
 representation.
 
 * Layout
 
-Fields are packed MSB-first in pattern order, and the total bit count is
-rounded up to the nearest multiple of 8.
+Fields are packed MSB-first in pattern order, and the total bit count is rounded
+up to the nearest multiple of 8.
 
 #+begin_example
 Pattern: ("PFX-", :major(digits(max=99)), ".", :minor(digits(max=99)))
@@ -42,9 +42,8 @@ value = (id >> (type_bits - field_end_bit)) & ((1 << field_width) - 1)
 #+end_src
 
 All shifts and masks are compile-time constants. The actual operations use
-~Core.Intrinsics~ (~zext_int~, ~trunc_int~, ~bitcast~) since the identifier
-type is not a standard integer (see casting sentinels in the
-[[file:overview.org][code generation overview]]).
+~Core.Intrinsics~ (~zext_int~, ~trunc_int~, ~bitcast~) since the identifier type is not
+a standard integer (see casting sentinels in the [[file:overview.org][code generation overview]]).
 
 * Field encoding
 
@@ -57,24 +56,23 @@ optional fields and value ranges compactly.
 A required field with ~min=0~ simply stores the raw value. When a field has a
 nonzero minimum or is optional, one of three strategies is chosen:
 
-+ Direct value :: when \lceil{}log_2(max - min + 1 + opt)\rceil{} =
-  \lceil{}log_2(max + 1)\rceil{} (where /opt/ is 1 if optional, 0 otherwise),
-  the raw value already fits without any arithmetic. This is the common case for
-  required fields with ~min=0~.
++ Direct value :: when \lceil{}log_2(max - min + 1 + opt)\rceil{} = \lceil{}log_2(max + 1)\rceil{} (where
+  /opt/ is 1 if optional, 0 otherwise), the raw value already fits without any
+  arithmetic. This is the common case for required fields with ~min=0~.
 + Offset encoding :: we shift the stored value so that the minimum maps to the
   lowest nonzero encoding. Optional fields with ~min=0~ store /v/ + 1 (with 0 =
-  absent); required fields with ~min > 0~ store /v/ - /min/; optional fields
-  with ~min > 0~ store /v/ - (/min/ - 1) (with 0 = absent). This costs one
-  addition or subtraction at both pack and extract time.
+  absent); required fields with ~min > 0~ store /v/ - /min/; optional fields with ~min
+  > 0~ store /v/ - (/min/ - 1) (with 0 = absent). This costs one addition or
+  subtraction at both pack and extract time.
 + Presence bit :: when neither of the above saves bits, a separate 1-bit flag is
   packed alongside the value.
 
 ** Character fields
 
 ~letters~, ~alphnum~, ~hex~, and ~charset~ fields pack each character into
-\lceil{}log_2(alphabet size)\rceil{} bits. For fixed-length optional character
-fields, if adding one extra value (for "absent") does not increase the bits per
-character, indices start at 1 so that an all-zero packed value means absent,
-avoiding the need for a separate presence bit. Variable-length character fields
-store both the packed characters and a length, with the length encoding
-following the same direct-vs-offset logic described above for digit fields.
+\lceil{}log_2(alphabet size)\rceil{} bits. For fixed-length optional character fields, if
+adding one extra value (for "absent") does not increase the bits per character,
+indices start at 1 so that an all-zero packed value means absent, avoiding the
+need for a separate presence bit. Variable-length character fields store both
+the packed characters and a length, with the length encoding following the same
+direct-vs-offset logic described above for digit fields.

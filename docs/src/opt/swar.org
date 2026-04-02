@@ -6,7 +6,7 @@ arithmetic rather than byte-by-byte loops.
 
 * Approach
 
-A scalar ~parseint~ loop processes one digit per iteration, roughly 3/n/
+A scalar ~parseint~ loop processes one digit per iteration, roughly 3​/n/
 operations for /n/ digits. SWAR replaces this with:
 
 1. A single word-sized load (1--8 bytes)
@@ -35,8 +35,8 @@ pipeline, see [[https://lemire.me/blog/2022/01/21/swar-explained-parsing-eight-d
 
 ** Worked example: 4-digit decimal parse
 
-To make this concrete, here's what happens when we parse ="1234"= from a
-~UInt32~ register:
+To make this concrete, here's what happens when we parse ="1234"= from a ~UInt32~
+register:
 
 #+begin_example
 Load:        val = 0x31_32_33_34       ('1','2','3','4' in memory order)
@@ -65,12 +65,11 @@ the integer value sits in the low bytes.
 We need to classify all bytes as digit/non-digit in parallel. Two algorithms
 handle this, depending on the base.
 
-For base \le 10, ASCII digits have a convenient structure: =0x30=--=0x39=, with
-high nibble =0x3= and low nibble =0x0=--=0x9=.
-[[https://lemire.me/blog/2018/09/30/quickly-identifying-a-sequence-of-digits-in-a-string-of-characters/][Lemire (2018)]]
-showed that this allows a single branchless expression to validate all bytes at
-once. We use his formulation, generalising the constant from =0x06= (base 10) to
-=(0x10 - base)= so it works for any base \le 10:
+For base \le 10, ASCII digits have a convenient structure: =0x30=--=0x39=, with high
+nibble =0x3= and low nibble =0x0=--=0x9=. [[https://lemire.me/blog/2018/09/30/quickly-identifying-a-sequence-of-digits-in-a-string-of-characters/][Lemire (2018)]] showed that this allows a
+single branchless expression to validate all bytes at once. We use his
+formulation, generalising the constant from =0x06= (base 10) to =(0x10 - base)= so
+it works for any base \le 10:
 
 #+begin_example
 diff = (val & (val + addmask) & 0xF0…) ⊻ 0x30…
@@ -80,10 +79,10 @@ Valid digit bytes produce zero; others produce nonzero. (For more on the
 nibble-structure observation behind this, [[http://0x80.pl/notesen/2016-12-21-swar-digits-validate.html][Muła (2016)]] explores several SWAR
 digit validation approaches.)
 
-For base 11--16, hex digits span two ASCII ranges (=0x30=--=0x39= and
-=0x41=--=0x46= / =0x61=--=0x66=), so the nibble trick doesn't apply. Instead we
-use two parallel addition-based overflow checks after casefolding, with bit 7 as
-the per-byte indicator:
+For base 11--16, hex digits span two ASCII ranges (=0x30=--=0x39= and =0x41=--=0x46= /
+=0x61=--=0x66=), so the nibble trick doesn't apply. Instead we use two parallel
+addition-based overflow checks after casefolding, with bit 7 as the per-byte
+indicator:
 
 #+begin_example
 folded = val | 0x20…
@@ -106,9 +105,9 @@ alpha = val & 0x40…              (0x40 for letters, 0x00 for digits)
 val = (alpha >> 6) * 9 + (val ⊻ alpha)
 #+end_example
 
-For digit bytes (~alpha = 0~), this is a no-op. For letters, ~alpha >> 6~ is 1,
-so the result is ~9 + (val without 0x40 bit)~ --- mapping ~a~ (stripped to
-~0x01~) to 10, ~b~ to 11, etc.
+For digit bytes (~alpha = 0~), this is a no-op. For letters, ~alpha >> 6~ is 1, so
+the result is ~9 + (val without 0x40 bit)~ --- mapping ~a~ (stripped to ~0x01~) to 10,
+~b~ to 11, etc.
 
 * Digit counting
 
@@ -149,34 +148,63 @@ intermediate:  val = ((val × Cₖ) >> shift) & mask    (3 ops)
 final:         val = (val × Cₖ) >> shift              (2 ops)
 #+end_example
 
-The number of steps is \lceil{}log_2(nd)\rceil{}. Digit bytes need to be
-high-aligned in the register for this arithmetic to work correctly; the standard
-[[file:dataloading.org][data loading]] strategies handle this, with the ASCII mask
-zeroing any extra bytes from backward or overread loads at no additional cost.
+The number of steps is \lceil{}log_2(nd)\rceil{}. Digit bytes need to be high-aligned in the
+register for this arithmetic to work correctly; the standard [[file:dataloading.org][data loading]]
+strategies handle this, with the ASCII mask zeroing any extra bytes from
+backward or overread loads at no additional cost.
 
 * Strategy selection
 
-| Strategy           | Eligibility                          |
-|--------------------+--------------------------------------|
-| Scalar ~parseint~    | base > 16 or maxdigits > SWAR limit  |
-| Fixed single-chunk | base \le 16, fixed, maxdigits \le 8      |
-| Fixed two-chunk    | base \le 16, fixed, 9 \le maxdigits \le 16 |
-| Variable-width     | base \le 16, variable, maxdigits \le 8   |
+| Strategy        | Eligibility                          |
+|-----------------+--------------------------------------|
+| Scalar ~parseint~ | base > 16, or maxdigits > SWAR limit |
+| Fixed-width     | base \le 16, fixed, maxdigits \le 16     |
+| Variable-width  | base \le 16, variable, maxdigits \le 8   |
+| Grouped         | base \le 16, ~groups~ kwarg, with ~skip~   |
+| Hex charseq     | ~hex(N)~, fixed, any /N/                 |
 
-** Fixed two-chunk (9--16 digits)
+All fixed-width and grouped strategies use a unified chunking facility
+(~gen_swar_chunks~) that splits the byte range into register-sized pieces, runs
+the SWAR pipeline on each, and combines results. The accumulation mode differs
+by context: ~:mul_add~ for digit fields (positional value), ~:shift_or~ for hex
+charseqs (nibble-packed encoding).
 
-Fields wider than a single register are split into an 8-digit upper chunk
-(~UInt64~) and a lower chunk of the remaining digits, following the approach
-described by [[https://kholdstare.github.io/technical/2020/05/26/faster-integer-parsing.html][Kholdstare (2020)]]. Each chunk is independently loaded, validated,
-and reduced through the standard SWAR pipeline, then combined:
+** Multi-chunk fixed-width
+
+Fields wider than a single register are split into register-sized chunks. For
+example, 12 digits become an 8-digit ~UInt64~ chunk and a 4-digit ~UInt32~ chunk.
+Each is independently loaded, validated, and reduced, then combined:
 
 #+begin_example
 result = upper × base^(lower_nd) + lower
 #+end_example
 
-The lower chunk's register type matches its digit count (e.g., ~UInt32~ for 4
-digits) and can often use the backward load strategy since the upper chunk's 8
-bytes now precede it.
+This generalises the approach described by [[https://kholdstare.github.io/technical/2020/05/26/faster-integer-parsing.html][Kholdstare (2020)]] to arbitrary chunk
+counts.
+
+** Grouped SWAR
+
+When ~groups~ and ~skip~ are both specified (e.g. =digits(16, skip="-",
+groups=(4,4,4,4))=), the generated code takes an optimistic fast path: check
+that separator bytes exist at the expected positions, then SWAR-parse each group
+independently and combine. If the separator checks fail (e.g. the input has no
+separators), the code falls back to the scalar ~parseint~ with skip, which accepts
+separators at any position.
+
+Groups larger than a register are automatically sub-chunked: a group of 12
+becomes chunks of 8 + 4 at the appropriate offsets. The same sub-chunking
+applies to hex charseq groups (e.g. UUID's 12-hex-digit final group).
+
+** Hex charseq SWAR
+
+~hex(N)~ charseq fields use the same SWAR hex validation and reduction as
+~digits(N, base=16)~, but accumulate via ~:shift_or~ to produce the nibble-packed
+charseq encoding rather than an integer value. This works for any /N/: fields
+wider than 8 are split into register-sized chunks automatically. The hex case
+variant (mixed/upper/lower) is determined from the resolved
+~casefold~/~upper~/~lower~ flags and passed through to the digit detection
+constants, which adjust the alpha range bounds accordingly (=a-f= for
+mixed/lower, =A-F= for upper).
 
 ** Variable-width (1--8 digits)
 
@@ -184,16 +212,16 @@ Since we don't know the digit count until runtime, we first load the bytes and
 count them, then left-shift to high-align before the standard reduction runs.
 Two load paths are emitted, with static branch folding selecting one:
 
-- Forward overread :: a single full-width load at ~pos~, then a branchless
-  digit count from the LSB.
+- Forward overread :: a single full-width load at ~pos~, then a branchless digit
+  count from the LSB.
 - Cascading sub-loads :: descending power-of-2 chunks (e.g. 4, 2, 1 for
   maxdigits=7), each conditionally loaded and digit-checked. Bytes accumulate
   low-aligned, with a running count.
 
-The reduction constants are precomputed for ~maxdigits~; zeroed low bytes
-beyond the actual count don't affect the result.
+The reduction constants are precomputed for ~maxdigits~; zeroed low bytes beyond
+the actual count don't affect the result.
 
 Length checks for individual digit fields are not emitted inline. Instead they
-are deferred via [[file:overview.org][sentinels]] and resolved later by the
-framework, which batches them across segment boundaries. When a branch's
-~parsed_min~ guarantee already covers a field, the check folds away entirely.
+are deferred via [[file:overview.org][sentinels]] and resolved later by the framework, which batches
+them across segment boundaries. When a branch's ~parsed_min~ guarantee already
+covers a field, the check folds away entirely.

@@ -1,7 +1,7 @@
 #+title: Code Generation Overview
 
-~maketype~ takes a pattern and compiles it into a bit-packed ~primitive type~
-with efficient parsing and serialisation, along with printing, property access,
+~maketype~ takes a pattern and compiles it into a bit-packed ~primitive type~ with
+efficient parsing and serialisation, along with printing, property access,
 comparison, and introspection, all generated from the same specification.
 
 * Pipeline
@@ -10,12 +10,10 @@ Code generation proceeds in five phases:
 
 1. *Pattern walking:* We traverse the pattern tree, dispatching each node to a
    segment handler that appends expressions to the parse, print, and property
-   accumulators. Handlers select [[file:dataloading.org][data loading]]
-   strategies and emit optimised code for
-   [[file:swar.org][digit parsing]], [[file:stringmatch.org][string matching]],
-   and [[file:perfecthash.org][choice resolution]].
-2. *Sentinel emission:* handlers emit placeholder expressions for quantities
-   that depend on the complete pattern (the final type size, total byte counts,
+   accumulators. Handlers select [[file:dataloading.org][data loading]] strategies and emit optimised code
+   for [[file:swar.org][digit parsing]], [[file:stringmatch.org][string matching]], and [[file:perfecthash.org][choice resolution]].
+2. *Sentinel emission:* handlers emit placeholder expressions for quantities that
+   depend on the complete pattern (the final type size, total byte counts,
    etc.). These can't be resolved yet.
 3. *Length-check insertion:* we analyse segment boundaries and insert the minimum
    number of runtime length checks, using greedy forward batching.
@@ -33,25 +31,25 @@ Each pattern node appends to three vectors:
 + Print :: extract values from ~id~ and write to ~io~, reconstructing the canonical string.
 + Properties :: per-field extraction code, keyed by the =:name(...)= field name.
 
-These expressions all reference shared variables (~pos~, ~idbytes~, ~nbytes~,
-~parsed~, ~id~, ~io~) that are bound by the enclosing function templates.
+These expressions all reference shared variables (~pos~, ~idbytes~, ~nbytes~, ~parsed~,
+~id~, ~io~) that are bound by the enclosing function templates.
 
 * Context threading
 
-State is threaded via an ~ImmutableDict~. Each handler may extend the context
-for its children without affecting siblings, modelling lexical scoping. For
-example, an ~optional~ block pushes its tracking variable so that inner nodes
-can decide whether a failure means "return an error" or "set the flag to false
-and jump to cleanup."
+State is threaded via an ~ImmutableDict~. Each handler may extend the context for
+its children without affecting siblings, modelling lexical scoping. For example,
+an ~optional~ block pushes its tracking variable so that inner nodes can decide
+whether a failure means "return an error" or "set the flag to false and jump to
+cleanup."
 
 * Sentinels and error handling
 
 Several quantities can't be determined until the full pattern has been
-processed. Rather than requiring a two-pass approach, handlers emit
-placeholder calls that are resolved after the walk completes.
+processed. Rather than requiring a two-pass approach, handlers emit placeholder
+calls that are resolved after the walk completes.
 
-Each length sentinel captures =(branch_id, emission_max, ...)= where
-~emission_max~ is the branch's ~parsed_max~ at the time of emission:
+Each length sentinel captures =(branch_id, emission_max, ...)= where ~emission_max~
+is the branch's ~parsed_max~ at the time of emission:
 
 + ~__length_check(branch_id, emission_max, n_min, n_max, n_expr)~ :: resolved to =true= when ~parsed_min - emission_max >= n_max~, or to a runtime check otherwise.
 + ~__length_bound(branch_id, emission_max, n)~ :: resolved to constant ~n~ when guaranteed, or ~min(n, nbytes - pos + 1)~.
@@ -59,12 +57,12 @@ Each length sentinel captures =(branch_id, emission_max, ...)= where
 + ~__branch_check~ :: root upfront guard or optional entry guard.
 
 Casting sentinels (~__cast_to_id~ / ~__cast_from_id~) are replaced with
-~Core.Intrinsics~ operations (~zext_int~, ~trunc_int~, or ~bitcast~) once the
-final type size is known.
+~Core.Intrinsics~ operations (~zext_int~, ~trunc_int~, or ~bitcast~) once the final type
+size is known.
 
-Parse errors are integer indices into a compile-time message tuple.
-~parsebytes~ returns either a valid instance or =(error_index, pos)=. No
-strings or exception objects are allocated on the hot path.
+Parse errors are integer indices into a compile-time message tuple. ~parsebytes~
+returns either a valid instance or =(error_index, pos)=. No strings or exception
+objects are allocated on the hot path.
 
 * Further reading
 
@@ -73,4 +71,4 @@ strings or exception objects are allocated on the hot path.
 + [[file:swar.org][SWAR digit parsing]] :: parallel digit validation and conversion
 + [[file:perfecthash.org][Perfect hashing]] :: ~choice~ matching
 + [[file:stringmatch.org][String matching]] :: literal and prefix matching
-+ [[file:bufprint.org][Buffer printing]] :: direct-to-memory output
++ [[file:bufprint.org][Buffer printing]] :: direct-to-memory output (jeaiii, reverse-SWAR)

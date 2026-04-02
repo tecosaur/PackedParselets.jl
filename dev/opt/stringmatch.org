@@ -1,0 +1,37 @@
+#+title: String Matching
+
+Patterns contain literal strings, prefix variants to strip, and [[file:perfecthash.org][choice
+verification]] steps. These all reduce to the same fundamental operation: compare
+a known string against input bytes at a position. =PackedParselets= generates
+these comparisons using word-sized loads rather than byte-by-byte loops.
+
+* Technique
+
+A string of /n/ bytes is [[file:dataloading.org][decomposed into register-sized chunks]] (8, 4, 2, 1 byte,
+largest first). Each chunk is loaded with a single ~unsafe_load~ and compared
+against a precomputed =(value, mask)= pair using [[file:dataloading.org#masked-comparison][masked comparison]]:
+
+#+begin_src julia
+# "Hello!" (6 bytes) → UInt32 + UInt16
+load32(pos) & foldmask32 == expected32 &&
+    load16(pos + 4) & foldmask16 == expected16
+#+end_src
+
+A byte-by-byte loop would require /n/ loads, /n/ comparisons, and /n/ branches.
+Word-sized matching reduces this to \lceil{}/n/ / 8\rceil{} loads and comparisons ---
+typically 1 or 2 for short literals.
+
+* Applications
+
+A *literal* in the pattern generates a word-sized match followed by ~pos += length~.
+A length check precedes the comparison; when the [[file:overview.org][sentinel system]] guarantees
+enough remaining bytes, it is folded away. When widening to a single register
+load reduces the chunk count, [[file:dataloading.org#wide-narrow-dual-paths][wide/narrow dual paths]] are emitted and branch
+folding selects the winner.
+
+*Prefix stripping* (~skip~) uses the same technique. Same-length prefixes share a
+length check, and prefixes are tried longest-first via an if/elseif chain.
+
+*Choice verification* uses word-sized comparisons after a [[file:perfecthash.org][perfect hash]] resolves a
+candidate. With an injective hash, bytes already validated by the hash window
+are excluded from verification.

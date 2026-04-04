@@ -235,7 +235,7 @@ end
 # Each range selects a magic constant; prod >> 32 gives digit pairs,
 # (UInt32(prod) * 100) advances to the next pair. The first pair's
 # value (< 10 or ≥ 10) determines odd/even digit count implicitly.
-# Ref: Jeon, "Faster integer formatting — jeaiii's algorithm", 2022.
+# Ref: Jeon, "Faster integer formatting: jeaiii's algorithm", 2022.
 Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}, pos::Int, num::UInt64, pad::Int)
     num <= typemax(UInt32) && return bufprint_decimal32(buf, pos, num % UInt32, pad)
     startpos = pos

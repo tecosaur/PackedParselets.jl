@@ -12,7 +12,7 @@
 const ExprVarLine = Union{Expr, Symbol, LineNumberNode}
 const NodeCtx = Base.ImmutableDict{Symbol, Any}
 
-## SegmentOutput — handler return type
+## SegmentOutput: handler return type
 
 """
     SentinelSpec(offset, width)
@@ -110,7 +110,7 @@ SegmentMeta(label, desc, shortform, argtype, argvar) =
 
 Structured return value from a segment compile handler.
 
-Handlers read `state` and `nctx` but must not mutate them — the framework
+Handlers read `state` and `nctx` but must not mutate them: the framework
 handles all state changes via `process_segment_output!` after the handler
 returns.
 """
@@ -121,7 +121,7 @@ struct SegmentOutput
     bytespans::Vector{Vector{ByteSet}}
 end
 
-## SegmentDef — segment registry entry
+## SegmentDef: segment registry entry
 
 """
     SegmentDef(name, compile, kwargs[, finalize])

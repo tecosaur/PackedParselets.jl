@@ -107,7 +107,7 @@ end
 """
     gen_literal_mismatch(state, nctx, str, casefold) -> Expr
 
-Emit an expression that is `true` when `idbytes` at `pos` does not match `str`.
+Emit an expression that is `true` when `data` at `pos` does not match `str`.
 
 When widening to a single register load reduces the chunk count, emits both
 wide and narrow paths gated by `emit_static_lengthcheck`, so that
@@ -137,7 +137,7 @@ Generate an if/elseif chain that strips the first matching prefix by advancing
 alternatives as nested if/elseif.
 
 Assumes casefolded prefixes are already lowercased.
-Expects `idbytes`, `pos`, `nbytes` in scope.
+Expects `data`, `pos`, `nbytes` in scope.
 """
 function gen_static_lchop(prefixes::Vector{String}, casefold::Bool)
     groups = Dict{Int, Vector{String}}()
@@ -171,7 +171,7 @@ end
 """
     gen_string_match(str, casefold[, nbytes]) -> Vector{Expr}
 
-Emit register-sized match checks for `str` against `idbytes` at `pos`.
+Emit register-sized match checks for `str` against `data` at `pos`.
 Each returned expression evaluates to `true` when its chunk matches.
 
 When `nbytes > ncodeunits(str)`, chunks are widened and overflow bytes

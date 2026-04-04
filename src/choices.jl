@@ -135,29 +135,20 @@ end
 
 function choice_value_codegen(state::ParserState, valtype::Symbol, sopts,
                                fieldvar, argvar, cint, bitpos)
-    if valtype === :Symbol
-        syms = Tuple(Symbol.(sopts))
-        extract_value = :(@inbounds $(syms)[$fieldvar])
-        impart_core = Expr[
-            :($fieldvar = let idx = findfirst(==(Symbol($argvar)), $syms)
-                  isnothing(idx) && throw(ArgumentError(
-                      string("Invalid option :", $argvar, "; expected one of: ", $(join(sopts, ", ")))))
-                  idx % $cint
-              end),
-            emit_pack(state, cint, fieldvar, bitpos)]
-        (extract_value, impart_core, :Symbol)
-    else # :String
-        strs = Tuple(sopts)
-        extract_value = :(@inbounds $(strs)[$fieldvar])
-        impart_core = Expr[
-            :($fieldvar = let idx = findfirst(==(String($argvar)), $strs)
-                  isnothing(idx) && throw(ArgumentError(
-                      string("Invalid option \"", $argvar, "\"; expected one of: ", $(join(sopts, ", ")))))
-                  idx % $cint
-              end),
-            emit_pack(state, cint, fieldvar, bitpos)]
-        (extract_value, impart_core, :AbstractString)
+    vals, conv, argtype = if valtype === :Symbol
+        Tuple(Symbol.(sopts)), :Symbol, :Symbol
+    else
+        Tuple(sopts), :String, :AbstractString
     end
+    extract_value = :(@inbounds $(vals)[$fieldvar])
+    impart_core = Expr[
+        :($fieldvar = let idx = findfirst(==($conv($argvar)), $vals)
+              isnothing(idx) && throw(ArgumentError(
+                  string("Invalid option ", repr($conv($argvar)), "; expected one of: ", $(join(sopts, ", ")))))
+              idx % $cint
+          end),
+        emit_pack(state, cint, fieldvar, bitpos)]
+    (extract_value, impart_core, argtype)
 end
 
 """
@@ -345,9 +336,9 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, cctx)
     optlens = Tuple(ncodeunits.(opts))
     optcus = Tuple(Tuple(codeunits(s)) for s in opts)
     loadbyte = if casefold
-        :(@inbounds idbytes[pos + j - 1] | 0x20)
+        :(@inbounds data[pos + j - 1] | 0x20)
     else
-        :(@inbounds idbytes[pos + j - 1])
+        :(@inbounds data[pos + j - 1])
     end
     action = onmatch(:(i % $cint))
     loop_body = quote
@@ -386,7 +377,7 @@ if no hash worked.
 """
 function search_hash_families(try_fn::F, nopts::Int, iT::DataType) where {F <: Function}
     best = (nothing, typemax(Int))
-    # Identity family (injective — hash hit uniquely identifies the option)
+    # Identity family (injective: hash hit uniquely identifies the option)
     res = try_fn(v -> v, v -> v, true, typemax(iT) % UInt64)
     !isnothing(res) && last(res) < last(best) && (best = res)
     iszero(last(best)) && return best
@@ -485,7 +476,7 @@ function classify_hash(hvals::Vector{UInt64}, nopts::Int,
     sorted_indices = sortperm(hvals)
     sorted_hvals = hvals[sorted_indices]
     lo, hi = Int(sorted_hvals[1]), Int(sorted_hvals[end])
-    # Direct: consecutive values — hashexpr(v) ± offset maps to 1:n
+    # Direct: consecutive values: hashexpr(v) ± offset maps to 1:n
     if hi - lo + 1 == nopts
         hashexpr = if lo == 1
             hashexpr_fn
@@ -711,9 +702,9 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
         tailtable = Tuple(Tuple(codeunits(t)) for t in tails)
         taillenst = Tuple(taillens)
         loadbyte = if casefold
-            :(@inbounds idbytes[pos + $minoptlen + j - 1] | 0x20)
+            :(@inbounds data[pos + $minoptlen + j - 1] | 0x20)
         else
-            :(@inbounds idbytes[pos + $minoptlen + j - 1])
+            :(@inbounds data[pos + $minoptlen + j - 1])
         end
         ExprVarLine[:(tailbytes = $tailtable[i]),
                      :(for j in 1:$taillenst[i]

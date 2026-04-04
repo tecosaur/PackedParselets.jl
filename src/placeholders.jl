@@ -4,7 +4,7 @@
 # Placeholder sentinel emission, resolution, and AST post-processing.
 #
 # During pattern walking, length checks and type casts are emitted as
-# placeholder sentinel calls (e.g. `__length_check`, `__cast_to_id`)
+# placeholder sentinel calls (e.g. `__length_check`, `__cast_to_packed`)
 # since the final byte counts and type sizes aren't known yet. After
 # the full pattern has been walked, `insert_length_checks!`,
 # `fold_static_branches!`, and `implement_casting!` replace these
@@ -269,13 +269,13 @@ function fold_branches!(items::AbstractVector)
     changed = false
     for (i, item) in enumerate(items)
         item isa Expr || continue
-        if item.head in (:if, :elseif) && item.args[1] isa Bool
-            push!(splices, (i, take_branch(item)))
-            changed = true
-        elseif item.head in (:if, :elseif) &&
+        # Normalize `!Bool` → `Bool` so the next check handles both
+        if item.head in (:if, :elseif) &&
                Meta.isexpr(item.args[1], :call, 2) &&
                item.args[1].args[1] === :! && item.args[1].args[2] isa Bool
             item.args[1] = !item.args[1].args[2]
+        end
+        if item.head in (:if, :elseif) && item.args[1] isa Bool
             push!(splices, (i, take_branch(item)))
             changed = true
         elseif item.head === :|| && item.args[1] isa Bool
@@ -317,12 +317,12 @@ end
 """
     implement_casting!(state, exprlikes) -> exprlikes
 
-Replace `__cast_to_id` / `__cast_from_id` sentinels with the appropriate
+Replace `__cast_to_packed` / `__cast_from_packed` sentinels with the appropriate
 `Core.bitcast`, `zext_int`, or `trunc_int` call, now that the final type
 size is known.
 
 Compares physical type sizes (`sizeof`) for intrinsic selection, since
-`zext_int`/`trunc_int` operate on physical widths — not logical bit counts.
+`zext_int`/`trunc_int` operate on physical widths not logical bit counts.
 This matters for embedded packed types whose `nbits` may be less than
 `8*sizeof`.
 """
@@ -337,9 +337,9 @@ function implement_casting!(state::ParserState, exprlikes::Vector{<:ExprVarLine}
 end
 
 function implement_casting!(expr::Expr, name::Symbol, targetsize::Int)
-    if Meta.isexpr(expr, :call, 3) && first(expr.args) in (:__cast_to_id, :__cast_from_id)
+    if Meta.isexpr(expr, :call, 3) && first(expr.args) in (:__cast_to_packed, :__cast_from_packed)
         casttype, valtype, value = expr.args
-        targettype, targetbits, valbits = if casttype == :__cast_to_id
+        targettype, targetbits, valbits = if casttype == :__cast_to_packed
             esc(name), targetsize, sizeof(valtype)
         else
             valtype, sizeof(valtype), targetsize

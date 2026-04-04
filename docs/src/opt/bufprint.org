@@ -71,10 +71,10 @@ assignment.
 
 * The ~tobytes~ / ~string~ pipeline
 
-~tobytes(buf, id)~ writes directly into a caller-provided ~Memory{UInt8}~, returning
+~tobytes(buf, val)~ writes directly into a caller-provided ~Memory{UInt8}~, returning
 the byte count. This is the zero-allocation inner method.
 
-~tobytes(id)~ allocates a buffer at the maximum output length, calls the 2-arg
-method, and returns =(buf, len)=. ~string(id)~ calls ~tobytes~ and then either uses
+~tobytes(val)~ allocates a buffer at the maximum output length, calls the 2-arg
+method, and returns =(buf, len)=. ~string(val)~ calls ~tobytes~ and then either uses
 ~unsafe_takestring~ (zero-copy) for fixed-length output, or copies to a
 correctly-sized ~StringMemory~ for variable-length output.

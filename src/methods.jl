@@ -26,7 +26,7 @@ or manipulate individual components before assembling.
 - `typedef`: primitive type declaration
 - `nbits`, `parsebounds`, `printbounds`: type-level query methods
 - `parsebytes`: `parsebytes` method
-- `tobytes`: `tobytes` methods (buf+id and allocating)
+- `tobytes`: `tobytes` methods (buf+val and allocating)
 - `print`: `Base.write`, `Base.print`, and `Base.string` methods
 - `propertynames`: `Base.propertynames` method
 - `properties`: `Base.getproperty` method
@@ -146,10 +146,10 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
     elseif !isnothing(split_idx)
         deleteat!(resolved, split_idx)
     end
-    :(Base.@assume_effects :foldable :nothrow function $(GlobalRef(M, :parsebytes))(::Type{$(esc(name))}, idbytes::AbstractVector{UInt8})
+    :(Base.@assume_effects :foldable :nothrow function $(GlobalRef(M, :parsebytes))(::Type{$(esc(name))}, data::AbstractVector{UInt8})
           parsed = $(zero_parsed_expr(state))
           pos = 1
-          nbytes = length(idbytes)
+          nbytes = length(data)
           $(resolved...)
           (parsed, pos)
       end)
@@ -169,9 +169,9 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
     directexprs = strip_print_markers!(copy(print.direct))
     rewrite_bufprint!(directexprs)
     allocating = if fixedlen
-        :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
+        :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
               buf = Base.StringMemory($(root.print_max))
-              $(GlobalRef(M, :tobytes))(buf, id)
+              $(GlobalRef(M, :tobytes))(buf, val)
               buf
           end)
     else
@@ -179,7 +179,7 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
         putvalexprs = strip_print_markers!(copy(print.putval))
         rewrite_bufprint!(putvalexprs)
         localdecls = [Expr(:(=), v, d) for (v, d) in print.vars]
-        :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
+        :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
               $(Expr(:local, localdecls...))
               pos = 0
               $(print.getval...)
@@ -191,8 +191,7 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
           end)
     end
     Expr(:block,
-        :(function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, id::$(esc(name)))
-              pos = 0
+        :(function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, val::$(esc(name)), pos::Int=0)
               $(directexprs...)
               pos
           end),
@@ -205,15 +204,15 @@ function assemble_print(::PrintExprs, state::ParserState, name::Symbol)
     maxbytes = state.branches[1].print_max
     M = PackedParselets
     Expr(:block,
-        :(function $(GlobalRef(Base, :write))(io::IO, id::$(esc(name)))
+        :(function $(GlobalRef(Base, :write))(io::IO, val::$(esc(name)))
               buf = Memory{UInt8}(undef, $maxbytes)
-              len = $(GlobalRef(M, :tobytes))(buf, id)
+              len = $(GlobalRef(M, :tobytes))(buf, val)
               Base.unsafe_write(io, pointer(buf), len)
           end),
-        :($(GlobalRef(Base, :print))(io::IO, id::$(esc(name))) =
-              ($(GlobalRef(Base, :write))(io, id); nothing)),
-        :($(GlobalRef(Base, :string))(id::$(esc(name))) =
-              Base.unsafe_takestring($(GlobalRef(M, :tobytes))(id))))
+        :($(GlobalRef(Base, :print))(io::IO, val::$(esc(name))) =
+              ($(GlobalRef(Base, :write))(io, val); nothing)),
+        :($(GlobalRef(Base, :string))(val::$(esc(name))) =
+              Base.unsafe_takestring($(GlobalRef(M, :tobytes))(val))))
 end
 
 function resolve_print_markers!(exprs)
@@ -256,7 +255,7 @@ function assemble_properties(properties::Vector{Pair{Symbol, Union{Symbol, Vecto
         body = Expr(:block, implement_casting!(state, prop_exprs)...)
         Expr(if i == 1; :if else :elseif end, :(prop === $qprop), body, rest)
     end
-    :(function $(GlobalRef(Base, :getproperty))(id::$(esc(name)), prop::Symbol)
+    :(function $(GlobalRef(Base, :getproperty))(val::$(esc(name)), prop::Symbol)
           $clauses
       end)
 end
@@ -347,14 +346,14 @@ function assemble_show(segs::Vector{ValueSegment},
     show_parts = ExprVarLine[]
     for pname in pnames
         isempty(show_parts) || push!(show_parts, :(print(io, ", ")))
-        push!(show_parts, :(show(io, getproperty(id, $(QuoteNode(pname))))))
+        push!(show_parts, :(show(io, getproperty(val, $(QuoteNode(pname))))))
     end
-    :(function $(GlobalRef(Base, :show))(io::IO, id::$(esc(name)))
+    :(function $(GlobalRef(Base, :show))(io::IO, val::$(esc(name)))
           if get(io, :limit, false) === true
               if get(io, :typeinfo, Nothing) != $(esc(name))
                   print(io, $(QuoteNode(name)), ':')
               end
-              print(io, id)
+              print(io, val)
           else
               show(io, $(esc(name)))
               print(io, '(')
@@ -385,7 +384,7 @@ function assemble_segments_value(segs::Vector{ValueSegment}, print::PrintExprs,
     for expr in pexprs2
         rewrite_segment_captures!(svars, segs, expr)
     end
-    :(function $(GlobalRef(M, :segments))(id::$(esc(name)))
+    :(function $(GlobalRef(M, :segments))(val::$(esc(name)))
           io = IOBuffer()
           $(Expr(:(=), Expr(:tuple, (s for (_, s) in svars)...), Expr(:tuple, ("" for _ in svars)...)))
           $(pexprs2...)
@@ -602,7 +601,7 @@ end
 
 # PackedParselets runtime symbols that appear bare in generated code.
 # These must be qualified with GlobalRef when the generated code is
-# eval'd outside the DefId module (which normally imports them).
+# eval'd outside the defining module (which normally imports them).
 # Note: parsebytes/tobytes are excluded — they are API functions whose
 # method definitions already use GlobalRef(PackedParselets, ...).
 # Bare references in finalize hooks are the hook author's responsibility.

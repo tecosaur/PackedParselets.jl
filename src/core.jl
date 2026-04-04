@@ -39,7 +39,7 @@ or an error code and position on failure.
 function parsebytes end
 
 """
-    tobytes(id) -> Memory{UInt8}
+    tobytes(val) -> Memory{UInt8}
 
 Buffer-based output. Returns a `StringMemory` of exact length.
 """
@@ -55,7 +55,7 @@ excluding zero-bit segments like literals).
 """ segments(::Type)
 
 @doc """
-    segments(id::T) -> Tuple{Tuple{Int, String}...}
+    segments(val::T) -> Tuple{Tuple{Int, String}...}
 
 Return instance-level segment values as `(index, formatted_string)` pairs,
 where `index` corresponds to the position in the schema tuple.
@@ -170,7 +170,7 @@ primitive type) into the `parsed` accumulator at bit position `shift`
 (counted from MSB).
 """
 function emit_pack(state::ParserState, type::Type, value::Union{Symbol, Expr, Bool}, shift::Int)
-    valcast = Expr(:call, :__cast_to_id, type, value)
+    valcast = Expr(:call, :__cast_to_packed, type, value)
     :(parsed = Core.Intrinsics.or_int(parsed, Core.Intrinsics.shl_int($valcast, (8 * sizeof($(esc(state.name))) - $shift))))
 end
 
@@ -178,14 +178,14 @@ end
     emit_extract(state, position, width[, fT]) -> Expr
 
 Emit an expression that extracts `width` bits ending at bit `position`
-(from MSB) from `id`, returning a value of type `fT` (defaults to
+(from MSB) from `val`, returning a value of type `fT` (defaults to
 `cardtype(width)`).
 """
 function emit_extract(state::ParserState, position::Int, width::Int,
                             fT::Type=cardtype(width))
     fTbits = 8 * sizeof(fT)
-    fval = :(Core.Intrinsics.lshr_int(id, 8 * sizeof($(esc(state.name))) - $position))
-    ival = Expr(:call, :__cast_from_id, fT, fval)
+    fval = :(Core.Intrinsics.lshr_int(val, 8 * sizeof($(esc(state.name))) - $position))
+    ival = Expr(:call, :__cast_from_packed, fT, fval)
     if width == fTbits
         ival
     elseif fT === cardtype(width)

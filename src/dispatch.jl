@@ -87,6 +87,9 @@ function pattern_dispatch!(exprs::PatternExprs,
 end
 
 ## Field capture
+
+copyex(e) = if e isa Expr copy(e) else e end
+
 """
     pattern_field!(exprs, state, nctx, segments, global_kwargs, node, args)
 
@@ -115,7 +118,6 @@ function pattern_field!(exprs::PatternExprs,
         all(s -> !isnothing(s.condition), new_value_segs) &&
         allunique(s.condition for s in new_value_segs)
     if all_exclusive
-        copyex(e) = if e isa Expr copy(e) else e end
         for seg in new_value_segs
             push!(exprs.properties, node.value => ExprVarLine[copyex(e) for e in seg.extract])
         end
@@ -138,7 +140,6 @@ end
 function resolve_extract(val::Union{Symbol, Vector{ExprVarLine}},
                          segs::Vector{ValueSegment},
                          range::AbstractVector{Int}=eachindex(segs))
-    copyex(e) = if e isa Expr copy(e) else e end
     if val isa Symbol
         idx = findfirst(i -> segs[i].label == val, range)
         if isnothing(idx) ExprVarLine[] else ExprVarLine[copyex(e) for e in segs[range[idx]].extract] end
@@ -210,7 +211,7 @@ function arm_clear_bits(state::ParserState, bits_before::Int)
     ExprVarLine[:(parsed = Core.Intrinsics.and_int(parsed,
         Core.Intrinsics.not_int(
             Core.Intrinsics.shl_int(
-                __cast_to_id($mT, $mask),
+                __cast_to_packed($mT, $mask),
                 8 * sizeof($(esc(state.name))) - $(state.bits)))))]
 end
 

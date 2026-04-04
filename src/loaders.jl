@@ -4,9 +4,9 @@
 # Register-loading and byte-comparison primitives for pattern codegen.
 #
 # Three layers:
-#   1. Register decomposition — break byte counts into typed register chunks
-#   2. Packing — encode compile-time string data into register values with masks
-#   3. Codegen — emit Expr nodes that load from idbytes and compare at runtime
+#   1. Register decomposition: break byte counts into typed register chunks
+#   2. Packing: encode compile-time string data into register values with masks
+#   3. Codegen: emit Expr nodes that load from data and compare at runtime
 
 ## Register decomposition
 
@@ -103,9 +103,9 @@ end
 
 function gen_load(iT::DataType, posexpr::Union{Symbol, Expr})
     if iT === UInt8
-        :(@inbounds idbytes[$posexpr])
+        :(@inbounds data[$posexpr])
     else
-        :(htol(Base.unsafe_load(Ptr{$iT}(pointer(idbytes, $posexpr)))))
+        :(htol(Base.unsafe_load(Ptr{$iT}(pointer(data, $posexpr)))))
     end
 end
 

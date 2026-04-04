@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Pattern handlers for value-carrying sequences: digits, character sequences
-# (letters, alphnum, hex, charset), and embedded identifier types. These
+# (letters, alphnum, hex, charset), and embedded packed types. These
 # return SegmentOutput and let process_segment_output! handle framework mutations.
 
 ## Kwargs: skip, groups, exclude
@@ -77,7 +77,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
         if T isa Type && T <: Unsigned
             get(nctx, :max, nothing) === nothing ||
                 throw(ArgumentError("Cannot specify both a UInt type and max for digits"))
-            nctx = NodeCtx(nctx, :max, Int128(typemax(T)))
+            nctx = NodeCtx(nctx, :max, typemax(T) % Int128)
             args = Any[]
         end
     end
@@ -136,7 +136,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     else
         fvalue
     end
-    printinfo = if isnothing(groups)
+    pinfo = if isnothing(groups)
         digits_print_exprs(fextract, dT, fieldvar, fvalue, directvar, fnum,
                            fixedwidth, maxdigits, pad, base, vmax)
     else
@@ -171,7 +171,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     end
     SegmentOutput(
         SegmentBounds(mindigits:parsed_max, printmin:printmax, dbits, sentinel),
-        SegmentCodegen(pexprs, seg_extract, printinfo, seg_impart),
+        SegmentCodegen(pexprs, seg_extract, pinfo, seg_impart),
         SegmentMeta(label, seg_desc, seg_shortform, :Integer, argvar),
         bytespans)
 end
@@ -369,11 +369,11 @@ end
 
 # Named charset canonical ranges.
 # letters/alphnum include both cases (case-preserving by default).
-# hex is single-case uppercase by default.
+# hex is single-case lowercase by default.
 const NAMED_CHARSETS = (
     letters = (UInt8('A'):UInt8('Z'), UInt8('a'):UInt8('z')),
     alphnum = (UInt8('0'):UInt8('9'), UInt8('A'):UInt8('Z'), UInt8('a'):UInt8('z')),
-    hex     = (UInt8('0'):UInt8('9'), UInt8('A'):UInt8('F')),
+    hex     = (UInt8('0'):UInt8('9'), UInt8('a'):UInt8('f')),
 )
 
 function compile_charseq(state::ParserState, nctx::NodeCtx, ::PatternExprs,
@@ -432,9 +432,8 @@ end
 
 Resolve `upper`/`lower`/`casefold` flags and transform character ranges.
 
-- `casefold=true`: collapse letter ranges to uppercase, `cfold=true`
 - `upper=true`: collapse letter ranges to uppercase, `cfold` from casefold flag
-- `lower=true`: collapse letter ranges to lowercase, `cfold` from casefold flag
+- `lower=true` or `casefold=true`: collapse letter ranges to lowercase, `cfold` from casefold flag
 - No flags, `casefold=false`: ranges unchanged, `cfold=false`
 
 Letter ranges (subsets of A-Z or a-z) are shifted to the target case and deduplicated.
@@ -445,10 +444,10 @@ function resolve_charseq_flags(::ParserState, nctx::NodeCtx, kind::Symbol, range
     lower = get(nctx, :lower, false)::Bool
     casefold = get(nctx, :casefold, false)::Bool
     upper && lower && throw(ArgumentError("Cannot specify both upper=true and lower=true for $kind"))
-    if lower
-        collapse_letter_ranges(ranges, :lower), casefold
-    elseif upper || casefold
+    if upper
         collapse_letter_ranges(ranges, :upper), casefold
+    elseif lower || casefold
+        collapse_letter_ranges(ranges, :lower), casefold
     else
         collect(UnitRange{UInt8}, ranges), false
     end
@@ -534,7 +533,7 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
                                         notfound, :shift_or, hexcase)
             push!(swar_body, Expr(:(=), lenvar, maxlen), Expr(:(=), scannedvar, total_bytes))
             fallback = ExprVarLine[
-                :(($lenvar, $charvar, $scannedvar) = parsechars($cT, idbytes, pos,
+                :(($lenvar, $charvar, $scannedvar) = parsechars($cT, data, pos,
                     $scanlimit, $ranges, $cfold, false, $skipbytes)),
                 :(if $lenvar != $maxlen; $notfound end)]
             lencheck = emit_lengthcheck(state, nctx, total_bytes)
@@ -552,11 +551,11 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         end
     elseif has_skip
         ExprVarLine[:(($lenvar, $charvar, $scannedvar) =
-            parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes)),
+            parsechars($cT, data, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes)),
             :(if $lenvar != $maxlen; $notfound end)]
     else
         exprs = ExprVarLine[:(($lenvar, $charvar) =
-            parsechars($cT, idbytes, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
+            parsechars($cT, data, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
         if !isnothing(option) && variable && iszero(minlen)
             push!(exprs, :($lenvar > 0 || $notfound))
         else
@@ -686,7 +685,7 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
     eshifted = Symbol("$(fieldvar)_shifted")
     pack = emit_pack(state, T, eshifted, bitpos - presbits)
     parse_exprs = ExprVarLine[
-          :(($eresult, $epos) = $(GlobalRef(PackedParselets, :parsebytes))($T, @view idbytes[pos:end])),
+          :(($eresult, $epos) = $(GlobalRef(PackedParselets, :parsebytes))($T, @view data[pos:end])),
           :(if !($eresult isa $T); $notfound end),
           :($eshifted = $(to_lsb(eresult))),
           pack]

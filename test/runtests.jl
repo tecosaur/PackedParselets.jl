@@ -31,7 +31,7 @@ function test_postprocess(state::PP.ParserState, name::Symbol)
        end))
 end
 
-# Strip Expr(:escape, x) wrappers inserted by esc() — needed when
+# Strip Expr(:escape, x) wrappers inserted by esc(): needed when
 # eval'ing generated code directly instead of macro-expanding it.
 function strip_esc(expr::Expr)
     if Meta.isexpr(expr, :escape, 1)
@@ -300,7 +300,7 @@ ttypeof(x) = typeof(x)
 # ── Core segment tests (from packed.jl) ──
 
 @testset "literal + digits" begin
-    @defpacked LitDigit ("AB", :val(digits(4, pad=4)))
+    @defpacked LitDigit ("AB", :val(digits(4)))
     @test parse(LitDigit, "AB0042") isa LitDigit
     x = parse(LitDigit, "AB0042")
     @test x.val == 42
@@ -345,7 +345,7 @@ end
 
 @testset "choice with field" begin
     @defpacked Flagged (:kind(choice("alpha", "beta", "gamma")),
-                        "-", :num(digits(3, pad=3)))
+                        "-", :num(digits(3)))
     x = parse(Flagged, "beta-007")
     @test x.kind == :beta
     @test x.num == 7
@@ -364,8 +364,8 @@ end
 @testset "letters" begin
     @defpacked Code3 (:code(letters(3)))
     x = parse(Code3, "ABC")
-    @test x.code == "ABC"
-    @test string(x) == "ABC"
+    @test x.code == "abc"
+    @test string(x) == "abc"
     # Case folding (default casefold=true)
     @test parse(Code3, "abc") == parse(Code3, "ABC")
 end
@@ -373,14 +373,14 @@ end
 @testset "alphnum" begin
     @defpacked AlphaNum4 (:tag(alphnum(4)))
     x = parse(AlphaNum4, "AB12")
-    @test string(x) == "AB12"
+    @test string(x) == "ab12"
     @test parse(AlphaNum4, "ab12") == x
 end
 
 @testset "hex" begin
     @defpacked HexId (:h(hex(4)))
     x = parse(HexId, "DEAD")
-    @test string(x) == "DEAD"
+    @test string(x) == "dead"
     @test parse(HexId, "dead") == x
     @test tryparse(HexId, "GHIJ") === nothing
 end
@@ -393,7 +393,7 @@ end
 end
 
 @testset "optional" begin
-    @defpacked OptSuffix (:num(digits(4, pad=4)),
+    @defpacked OptSuffix (:num(digits(4)),
                           optional(".", :ext(digits(max=255))))
     # Without optional
     x = parse(OptSuffix, "0042")
@@ -411,7 +411,7 @@ end
 end
 
 @testset "nested optional" begin
-    @defpacked NestedOpt (:a(digits(3, pad=3)),
+    @defpacked NestedOpt (:a(digits(3)),
                           optional(".", :b(digits(max=99)),
                                    optional(".", :c(digits(max=99)))))
     x = parse(NestedOpt, "042")
@@ -426,7 +426,7 @@ end
 end
 
 @testset "constructor" begin
-    @defpacked Constructed (:a(digits(3, pad=3)), "-",
+    @defpacked Constructed (:a(digits(3)), "-",
                             :b(choice("x", "y", "z")))
     x = Constructed(42, :y)
     @test x.a == 42
@@ -436,7 +436,7 @@ end
 end
 
 @testset "optional constructor" begin
-    @defpacked OptCons (:id(digits(4, pad=4)),
+    @defpacked OptCons (:id(digits(4)),
                         optional("v", :ver(digits(max=255))))
     x = OptCons(5, 3)
     @test x.id == 5 && x.ver == 3
@@ -456,13 +456,20 @@ end
 end
 
 @testset "segments introspection" begin
-    @defpacked SegInspect ("X", :val(digits(3, pad=3)))
+    @defpacked SegInspect ("X", :val(digits(3)))
     schema = PP.segments(SegInspect)
     @test length(schema) >= 1
     @test any(s -> s.label == :val, schema)
     x = parse(SegInspect, "X042")
     vals = PP.segments(x)
     @test length(vals) >= 1
+    # charseq: exercises printchars via segments(id)
+    iddef = :(@defpacked SegCharseq ("C-", :code(letters(3))))
+    @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=9:9)
+    eval(iddef)
+    cvals = PP.segments(parse(SegCharseq, "C-abc"))
+    @test any(v -> lowercase(v[2]) == "abc", cvals)
+    @test_neverthrow PP.parsebytes(SegCharseq, ::Vector{UInt8})
 end
 
 @testset "variable-width digits" begin
@@ -474,7 +481,7 @@ end
     @test tryparse(VarDig, "100000") === nothing  # exceeds 5 digits
     # Large values exercise bufprint_decimal UInt64 chunking paths
     iddef = :(@defpacked BigDig (:n(digits(max=999_999_999_999_999_999))))
-    @test parsebytes_complexity(iddef).ops[1] > 0
+    @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=9:9)
     eval(iddef)
     for v in (10_000_000_000,          # two-chunk (hi fits UInt32)
               1234567890123456,        # two-chunk
@@ -484,15 +491,15 @@ end
     @test_neverthrow PP.parsebytes(BigDig, ::Vector{UInt8})
     # Full UInt64 range
     iddef = :(@defpacked FullU64 (:n(digits(UInt64))))
-    @test parsebytes_complexity(iddef).ops[1] > 0
+    @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=9:9)
     eval(iddef)
     for v in (UInt64(0), UInt64(42), typemax(UInt64))
         @test parse(FullU64, string(FullU64(v))) == FullU64(v)
     end
     @test_neverthrow PP.parsebytes(FullU64, ::Vector{UInt8})
     # Padded large values: pad=10 matches maxdigits, exercises bufprint_decimal padding
-    iddef = :(@defpacked PadBig (:n(digits(10, pad=10))))
-    @test parsebytes_complexity(iddef).ops[1] > 0
+    iddef = :(@defpacked PadBig (:n(digits(10))))
+    @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=31:31)
     eval(iddef)
     for v in (0, 42, 9999999999)
         @test parse(PadBig, string(PadBig(v))) == PadBig(v)
@@ -501,7 +508,7 @@ end
 end
 
 @testset "show forms" begin
-    @defpacked ShowTest (:id(digits(3, pad=3)))
+    @defpacked ShowTest (:id(digits(3)))
     x = ShowTest(42)
     # Constructor form (no :limit)
     @test sprint(show, x) == "ShowTest(42)"
@@ -512,15 +519,15 @@ end
 end
 
 @testset "print and string" begin
-    @defpacked PrintTest (:a(digits(2, pad=2)), "-", :b(letters(3)))
+    @defpacked PrintTest (:a(digits(2)), "-", :b(letters(3)))
     x = parse(PrintTest, "42-ABC")
-    @test string(x) == "42-ABC"
-    @test sprint(print, x) == "42-ABC"
+    @test string(x) == "42-abc"
+    @test sprint(print, x) == "42-abc"
 end
 
-eval(packed_deftype(@__MODULE__, :EmbInner, :(:x(digits(2, pad=2)))))
+eval(packed_deftype(@__MODULE__, :EmbInner, :(:x(digits(2)))))
 eval(packed_deftype(@__MODULE__, :EmbOuter,
-    :(("E", :inner(embed(EmbInner)), "-", :extra(digits(2, pad=2))))))
+    :(("E", :inner(embed(EmbInner)), "-", :extra(digits(2))))))
 @testset "embed" begin
     x = parse(EmbOuter, "E05-10")
     @test x.inner isa EmbInner
@@ -558,11 +565,11 @@ end
         notfound = PP.build_fail_expr!(state, nctx, "Invalid timestamp")
         ylen = gensym("ylen"); mlen = gensym("mlen"); dlen = gensym("dlen")
         parse_exprs = PP.ExprVarLine[
-            :(($ylen, $yvar) = PP.parseint(UInt32, idbytes, pos, 10, 4)),
+            :(($ylen, $yvar) = PP.parseint(UInt32, data, pos, 10, 4)),
             :($ylen == 4 || $notfound),
-            :(($mlen, $mvar) = PP.parseint(UInt32, idbytes, pos + 4, 10, 2)),
+            :(($mlen, $mvar) = PP.parseint(UInt32, data, pos + 4, 10, 2)),
             :($mlen == 2 || $notfound),
-            :(($dlen, $dvar) = PP.parseint(UInt32, idbytes, pos + 6, 10, 2)),
+            :(($dlen, $dvar) = PP.parseint(UInt32, data, pos + 6, 10, 2)),
             :($dlen == 2 || $notfound),
             :($tvar = UInt32(($yvar - 2000) * 10000 + $mvar * 100 + $dvar)),
             PP.emit_pack(state, UInt32, tvar, nbits_pos - presbits)]
@@ -608,7 +615,7 @@ end
         PP.implement_casting!(state, extract_exprs)
         val_expr = extract_exprs[end]
         setup = extract_exprs[1:end-1]
-        (:(function dateof(id::$ename)
+        (:(function dateof(val::$ename)
                $(setup...)
                v = $val_expr
                (div(v, 10000) + 2000, div(v % 10000, 100), v % 100)
@@ -618,7 +625,7 @@ end
     TIMESTAMP_SEGMENTS = merge(PP.CORE_SEGMENTS, (timestamp = PP.SegmentDef(:timestamp, compile_timestamp, ()),))
 
     ts_typeparts, ts_state = PP.maketype(TIMESTAMP_SEGMENTS, @__MODULE__, :Event,
-        :(("EVT-", :date(timestamp()), "-", :id(digits(3, pad=3))));
+        :(("EVT-", :date(timestamp()), "-", :id(digits(3))));
         supertype=AbstractPacked)
     eval(strip_esc(Expr(:toplevel, values(ts_typeparts)...,
                          test_postprocess(ts_state, :Event)...,
@@ -663,7 +670,7 @@ end
 
     @testset "optional timestamp" begin
         ts_opt_typeparts, ts_opt_state = PP.maketype(TIMESTAMP_SEGMENTS, @__MODULE__, :MaybeEvent,
-            :((:id(digits(3, pad=3)), optional("-", :date(timestamp()))));
+            :((:id(digits(3)), optional("-", :date(timestamp()))));
             supertype=AbstractPacked)
         eval(strip_esc(Expr(:toplevel, values(ts_opt_typeparts)...,
                              test_postprocess(ts_opt_state, :MaybeEvent)...,
@@ -688,7 +695,7 @@ end
         fin_segments = merge(PP.CORE_SEGMENTS, (
             timestamp = PP.SegmentDef(:timestamp, compile_timestamp, (), ts_finalize),))
         parts, st = PP.maketype(fin_segments, @__MODULE__, :FinEvent,
-            :(("FE-", :date(timestamp()), "-", :id(digits(3, pad=3))));
+            :(("FE-", :date(timestamp()), "-", :id(digits(3))));
             supertype=AbstractPacked)
         eval(strip_esc(Expr(:toplevel, values(parts)..., test_postprocess(st, :FinEvent)...)))
         @test parse(FinEvent, "FE-20250615-042") isa FinEvent
@@ -700,7 +707,7 @@ end
 
 @testset "bare maketype (no post-processing)" begin
     typeparts, state = PP.maketype(PP.CORE_SEGMENTS, @__MODULE__, :Bare,
-                                  :(:val(digits(3, pad=3)));
+                                  :(:val(digits(3)));
                                   supertype=AbstractPacked)
     eval(strip_esc(Expr(:toplevel, values(typeparts)...)))
     @test Bare <: AbstractPacked
@@ -2051,7 +2058,7 @@ end
         @testset "ChoiceIs (is= keyword)" begin
             # `is=` collapses choice to a fixed-target check: only the
             # target string prints, all other options parse but produce
-            # the same output. No field wrapper — the choice is non-value.
+            # the same output. No field wrapper: the choice is non-value.
             iddef = :(@defpacked ChoiceIs (choice("alpha", "beta", "rc", is="beta"),
                        "-", :id(digits(max=999))))
             @test parsebytes_complexity(iddef) == (branches=8:9, branch_total=9, ops=44:45)
@@ -2131,7 +2138,7 @@ end
         end
 
         @testset "DigitTailVerify (non-alpha bytes in tail verify)" begin
-            # Variable-length with digit tail bytes — exercises the
+            # Variable-length with digit tail bytes: exercises the
             # non-casefold 0xFF mask path in gen_tail_verify
             iddef = :(@defpacked DigitTailV (:tag(choice("a1", "b", "c2")),
                        :id(digits(max=99))))
@@ -2147,7 +2154,7 @@ end
         end
 
         @testset "PrefixChoice (longest match with prefix options)" begin
-            # "v" is a prefix of "v2" — must pick longest match
+            # "v" is a prefix of "v2": must pick longest match
             iddef = :(@defpacked PfxChoice (:tag(choice("v", "v2", "rc")),
                        :id(digits(max=99))))
             @test parsebytes_complexity(iddef) == (branches=6:6, branch_total=6, ops=40:42)
@@ -2205,14 +2212,14 @@ end
             iddef = :(@defpacked SeqSkip (skip("http://", "www."), :host(letters(4))))
             @test parsebytes_complexity(iddef) == (branches=6:8, branch_total=8, ops=13:19)
             eval(iddef)
-            @test parse(SeqSkip, "http://www.abcd").host == "ABCD"
-            @test parse(SeqSkip, "http://abcd").host == "ABCD"
-            @test parse(SeqSkip, "www.abcd").host == "ABCD"
-            @test parse(SeqSkip, "abcd").host == "ABCD"
+            @test parse(SeqSkip, "http://www.abcd").host == "abcd"
+            @test parse(SeqSkip, "http://abcd").host == "abcd"
+            @test parse(SeqSkip, "www.abcd").host == "abcd"
+            @test parse(SeqSkip, "abcd").host == "abcd"
             # All forms produce the same value
             @test parse(SeqSkip, "http://www.abcd") == parse(SeqSkip, "abcd")
             @test parse(SeqSkip, "http://abcd") == parse(SeqSkip, "www.abcd")
-            check_roundtrips(SeqSkip, ("ABCD", "ZZZZ"))
+            check_roundtrips(SeqSkip, ("abcd", "zzzz"))
             @test_neverthrow PP.parsebytes(SeqSkip, ::Vector{UInt8})
         end
 
@@ -2222,17 +2229,17 @@ end
             @test parsebytes_complexity(iddef) == (branches=5:11, branch_total=11, ops=13:28)
             eval(iddef)
             # All combinations: scheme × www × neither
-            @test parse(MixedSkip, "https://www.abcd").host == "ABCD"
-            @test parse(MixedSkip, "http://www.abcd").host == "ABCD"
-            @test parse(MixedSkip, "https://abcd").host == "ABCD"
-            @test parse(MixedSkip, "http://abcd").host == "ABCD"
-            @test parse(MixedSkip, "www.abcd").host == "ABCD"
-            @test parse(MixedSkip, "abcd").host == "ABCD"
+            @test parse(MixedSkip, "https://www.abcd").host == "abcd"
+            @test parse(MixedSkip, "http://www.abcd").host == "abcd"
+            @test parse(MixedSkip, "https://abcd").host == "abcd"
+            @test parse(MixedSkip, "http://abcd").host == "abcd"
+            @test parse(MixedSkip, "www.abcd").host == "abcd"
+            @test parse(MixedSkip, "abcd").host == "abcd"
             # All equal
             @test allequal(parse(MixedSkip, s) for s in (
                 "https://www.abcd", "http://www.abcd", "https://abcd",
                 "http://abcd", "www.abcd", "abcd"))
-            check_roundtrips(MixedSkip, ("ABCD", "ZZZZ"))
+            check_roundtrips(MixedSkip, ("abcd", "zzzz"))
             @test_neverthrow PP.parsebytes(MixedSkip, ::Vector{UInt8})
         end
 
@@ -2603,11 +2610,11 @@ end # alphnum
         @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=35:35)
         eval(iddef)
         id = parse(HexFolded, "0xDEADBEEF")
-        @test id.code == "DEADBEEF"
+        @test id.code == "deadbeef"
         @test sizeof(HexFolded) == 4
         @test parse(HexFolded, "0xdeadbeef") == id
         @test parse(HexFolded, "0xDeAdBeEf") == id
-        check_roundtrips(HexFolded, ("0x00000000", "0xDEADBEEF", "0xFFFFFFFF"))
+        check_roundtrips(HexFolded, ("0x00000000", "0xdeadbeef", "0xffffffff"))
         @test_neverthrow PP.parsebytes(HexFolded, ::Vector{UInt8})
     end
     @testset "HexUpper" begin
@@ -2619,6 +2626,16 @@ end # alphnum
         @test tryparse(HexUpper, "1a2b") === nothing
         check_roundtrips(HexUpper, ("0000", "1A2B", "FFFF"))
         @test_neverthrow PP.parsebytes(HexUpper, ::Vector{UInt8})
+    end
+    @testset "HexUpperFolded" begin
+        iddef = :(@defpacked HexUpperFolded :code(hex(4, upper=true)))
+        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=30:30)
+        eval(iddef)
+        id = parse(HexUpperFolded, "1a2b")
+        @test id.code == "1A2B"
+        @test parse(HexUpperFolded, "1A2B") == id
+        check_roundtrips(HexUpperFolded, ("0000", "1A2B", "FFFF"))
+        @test_neverthrow PP.parsebytes(HexUpperFolded, ::Vector{UInt8})
     end
     @testset "HexLower" begin
         iddef = :(@defpacked HexLower :code(hex(4, lower=true, casefold=false)))
@@ -2637,12 +2654,12 @@ end # alphnum
         id2 = parse(HexVar, "AB")
         id3 = parse(HexVar, "ABC")
         id4 = parse(HexVar, "ABCD")
-        @test id2.code == "AB"
-        @test id3.code == "ABC"
-        @test id4.code == "ABCD"
+        @test id2.code == "ab"
+        @test id3.code == "abc"
+        @test id4.code == "abcd"
         @test tryparse(HexVar, "A") === nothing
         @test parse(HexVar, "ab") == id2
-        check_roundtrips(HexVar, ("AB", "ABC", "ABCD"))
+        check_roundtrips(HexVar, ("ab", "abc", "abcd"))
         @test_neverthrow PP.parsebytes(HexVar, ::Vector{UInt8})
     end
     @testset "OptHex" begin
@@ -2652,7 +2669,7 @@ end # alphnum
         eval(iddef)
         id = parse(OptHex, "42-FF")
         @test id.id == 42
-        @test id.tag == "FF"
+        @test id.tag == "ff"
         id = parse(OptHex, "42")
         @test id.id == 42
         @test id.tag === nothing
@@ -2671,10 +2688,10 @@ end # alphnum
         @test parsebytes_complexity(iddef) == (branches=5:5, branch_total=5, ops=67:67)
         eval(iddef)
         id = parse(HexWithDigits, "H-A1B2C3-7")
-        @test id.hash == "A1B2C3"
+        @test id.hash == "a1b2c3"
         @test id.ver == 7
         @test parse(HexWithDigits, "H-a1b2c3-7") == id
-        check_roundtrips(HexWithDigits, ("H-000000-0", "H-A1B2C3-7", "H-FFFFFF-99"))
+        check_roundtrips(HexWithDigits, ("H-000000-0", "H-a1b2c3-7", "H-ffffff-99"))
         @test_neverthrow PP.parsebytes(HexWithDigits, ::Vector{UInt8})
     end
     @testset "HexRejectsNonHex" begin
@@ -2684,8 +2701,8 @@ end # alphnum
         @test tryparse(HexReject, "abcg") === nothing
         @test parse(HexReject, "0000").code == "0000"
         @test parse(HexReject, "9999").code == "9999"
-        @test parse(HexReject, "AAAA").code == "AAAA"
-        @test parse(HexReject, "FFFF").code == "FFFF"
+        @test parse(HexReject, "AAAA").code == "aaaa"
+        @test parse(HexReject, "FFFF").code == "ffff"
     end
 end # hex
 
@@ -2696,17 +2713,17 @@ end # hex
         @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
         eval(iddef)
         id = parse(CharsetFixed, "A1B2")
-        @test id.code == "A1B2"
+        @test id.code == "a1b2"
         @test parse(CharsetFixed, "a1b2") == id
         @test parse(CharsetFixed, "z1b2") == parse(CharsetFixed, "Z1B2")
         @test parse(CharsetFixed, "0000").code == "0000"
         @test parse(CharsetFixed, "9999").code == "9999"
-        @test parse(CharsetFixed, "AAAA").code == "AAAA"
-        @test parse(CharsetFixed, "HHHH").code == "HHHH"
-        @test parse(CharsetFixed, "JJJJ").code == "JJJJ"
-        @test parse(CharsetFixed, "KKKK").code == "KKKK"
-        @test parse(CharsetFixed, "VVVV").code == "VVVV"
-        @test parse(CharsetFixed, "ZZZZ").code == "ZZZZ"
+        @test parse(CharsetFixed, "AAAA").code == "aaaa"
+        @test parse(CharsetFixed, "HHHH").code == "hhhh"
+        @test parse(CharsetFixed, "JJJJ").code == "jjjj"
+        @test parse(CharsetFixed, "KKKK").code == "kkkk"
+        @test parse(CharsetFixed, "VVVV").code == "vvvv"
+        @test parse(CharsetFixed, "ZZZZ").code == "zzzz"
         @test tryparse(CharsetFixed, "IIII") === nothing
         @test tryparse(CharsetFixed, "LLLL") === nothing
         @test tryparse(CharsetFixed, "OOOO") === nothing
@@ -2715,7 +2732,7 @@ end # hex
         @test tryparse(CharsetFixed, "[[[[") === nothing
         @test tryparse(CharsetFixed, "ABC") === nothing
         @test tryparse(CharsetFixed, "ABCDE") === nothing
-        check_roundtrips(CharsetFixed, ("0000", "A1B2", "ZZZZ", "HJKM"))
+        check_roundtrips(CharsetFixed, ("0000", "a1b2", "zzzz", "hjkm"))
         @test_neverthrow PP.parsebytes(CharsetFixed, ::Vector{UInt8})
     end
     @testset "CharsetSingleChars" begin
@@ -2745,20 +2762,20 @@ end # hex
         id2 = parse(CharsetVar, "AB")
         id3 = parse(CharsetVar, "1F3")
         id4 = parse(CharsetVar, "DEAD")
-        @test id2.code == "AB"
-        @test id3.code == "1F3"
-        @test id4.code == "DEAD"
+        @test id2.code == "ab"
+        @test id3.code == "1f3"
+        @test id4.code == "dead"
         @test tryparse(CharsetVar, "A") === nothing
         @test tryparse(CharsetVar, "ABCDE") === nothing
-        @test parse(CharsetVar, "AA").code == "AA"
-        @test parse(CharsetVar, "FF").code == "FF"
+        @test parse(CharsetVar, "AA").code == "aa"
+        @test parse(CharsetVar, "FF").code == "ff"
         @test parse(CharsetVar, "00").code == "00"
         @test parse(CharsetVar, "99").code == "99"
         @test tryparse(CharsetVar, "GG") === nothing
         @test tryparse(CharsetVar, "@@") === nothing
         @test parse(CharsetVar, "ab") == id2
         @test parse(CharsetVar, "dead") == id4
-        check_roundtrips(CharsetVar, ("AB", "1F3", "DEAD", "00", "FF", "9999"))
+        check_roundtrips(CharsetVar, ("ab", "1f3", "dead", "00", "ff", "9999"))
         @test_neverthrow PP.parsebytes(CharsetVar, ::Vector{UInt8})
     end
     @testset "OptCharset" begin
@@ -2768,19 +2785,19 @@ end # hex
         eval(iddef)
         id = parse(OptCharset, "42.AB")
         @test id.id == 42
-        @test id.tag == "AB"
+        @test id.tag == "ab"
         id = parse(OptCharset, "42")
         @test id.id == 42
         @test id.tag === nothing
         @test parse(OptCharset, "42.ab") == parse(OptCharset, "42.AB")
         @test parse(OptCharset, "42.00") != parse(OptCharset, "42")
-        @test parse(OptCharset, "42.AA").tag == "AA"
-        @test parse(OptCharset, "42.ZZ").tag == "ZZ"
+        @test parse(OptCharset, "42.AA").tag == "aa"
+        @test parse(OptCharset, "42.ZZ").tag == "zz"
         @test parse(OptCharset, "42.00").tag == "00"
         @test parse(OptCharset, "42.99").tag == "99"
         @test tryparse(OptCharset, "42.[[") === nothing
         @test tryparse(OptCharset, "42.//") === nothing
-        check_roundtrips(OptCharset, ("42", "42.00", "42.A0", "42.9Z", "42.ZZ"))
+        check_roundtrips(OptCharset, ("42", "42.00", "42.a0", "42.9z", "42.zz"))
         @test_neverthrow PP.parsebytes(OptCharset, ::Vector{UInt8})
     end
     @testset "CharsetNoCasefold" begin
@@ -2815,11 +2832,11 @@ end # hex
         @test parse(CharsetLowerFold, "0f9") == parse(CharsetLowerFold, "0F9")
         @test tryparse(CharsetLowerFold, "ggg") === nothing
         @test tryparse(CharsetLowerFold, "GGG") === nothing
-        for input in ("ABC", "DEF", "0F9", "999")
+        for input in ("abc", "def", "0f9", "999")
             @test string(parse(CharsetLowerFold, input)) == input
         end
         check_roundtrips(CharsetLowerFold, (
-            "000", "999", "A00", "F99", "0A0", "9F9", "ABC", "DEF", "0F9"))
+            "000", "999", "a00", "f99", "0a0", "9f9", "abc", "def", "0f9"))
         @test_neverthrow PP.parsebytes(CharsetLowerFold, ::Vector{UInt8})
     end
     @testset "CharsetWithLiteral" begin
@@ -2829,23 +2846,23 @@ end # hex
         @test parsebytes_complexity(iddef) == (branches=5:5, branch_total=5, ops=39:39)
         eval(iddef)
         id = parse(CharsetWithLiteral, "X-A1B2-7")
-        @test id.hash == "A1B2"
+        @test id.hash == "a1b2"
         @test id.ver == 7
         @test parse(CharsetWithLiteral, "X-a1b2-7") == id
         @test parse(CharsetWithLiteral, "X-0000-0").hash == "0000"
         @test parse(CharsetWithLiteral, "X-9999-0").hash == "9999"
-        @test parse(CharsetWithLiteral, "X-AAAA-0").hash == "AAAA"
-        @test parse(CharsetWithLiteral, "X-FFFF-0").hash == "FFFF"
+        @test parse(CharsetWithLiteral, "X-AAAA-0").hash == "aaaa"
+        @test parse(CharsetWithLiteral, "X-FFFF-0").hash == "ffff"
         @test tryparse(CharsetWithLiteral, "X-GHIJ-1") === nothing
         @test tryparse(CharsetWithLiteral, "X-////-1") === nothing
-        check_roundtrips(CharsetWithLiteral, ("X-0000-0", "X-A1B2-7", "X-FFFF-99"))
+        check_roundtrips(CharsetWithLiteral, ("X-0000-0", "X-a1b2-7", "X-ffff-99"))
         @test_neverthrow PP.parsebytes(CharsetWithLiteral, ::Vector{UInt8})
     end
     @testset "NumericCharset (Crockford base-32)" begin
         # Crockford base-32: 0-9 a-h j-k m-n p-t v-z (32 values, skipping i l o u)
         croc32 = :(charset(6, '0':'9', 'a':'h', 'j':'k', 'm':'n', 'p':'t', 'v':'z',
                            numeric=true, casefold=true))
-        iddef = :(@defpacked CrocNum ("0", :id($croc32), :check(digits(2, pad=2))))
+        iddef = :(@defpacked CrocNum ("0", :id($croc32), :check(digits(2))))
         @test parsebytes_complexity(iddef) == (branches=4:4, branch_total=4, ops=22:22)
         eval(iddef)
         # 32^6 - 1 = 1073741823 is the maximum value
@@ -3056,22 +3073,22 @@ end # embed
         iddef = :(@defpacked UuidLike ("X", :id(hex(8, skip="-"))))
         @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=9:9)
         eval(iddef)
-        @test parse(UuidLike, "X550e-8400").id == "550E8400"
-        @test parse(UuidLike, "X550E8400").id == "550E8400"
+        @test parse(UuidLike, "X550e-8400").id == "550e8400"
+        @test parse(UuidLike, "X550E8400").id == "550e8400"
         @test parse(UuidLike, "X550e-8400") == parse(UuidLike, "X550E8400")
         @test tryparse(UuidLike, "X550e84") === nothing
-        check_roundtrips(UuidLike, ("X550E8400", "XDEADBEEF", "X00000000"))
+        check_roundtrips(UuidLike, ("X550e8400", "Xdeadbeef", "X00000000"))
         @test_neverthrow PP.parsebytes(UuidLike, ::Vector{UInt8})
     end
     @testset "letters with skip" begin
         iddef = :(@defpacked SkipLetters (:code(letters(4, skip="."))))
         @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
         eval(iddef)
-        @test parse(SkipLetters, "AB.CD").code == "ABCD"
-        @test parse(SkipLetters, "ABCD").code == "ABCD"
-        @test parse(SkipLetters, "A.B.C.D").code == "ABCD"
+        @test parse(SkipLetters, "AB.CD").code == "abcd"
+        @test parse(SkipLetters, "ABCD").code == "abcd"
+        @test parse(SkipLetters, "A.B.C.D").code == "abcd"
         @test tryparse(SkipLetters, "ABC") === nothing
-        check_roundtrips(SkipLetters, ("ABCD", "ZZZZ", "ABAB"))
+        check_roundtrips(SkipLetters, ("abcd", "zzzz", "abab"))
         @test_neverthrow PP.parsebytes(SkipLetters, ::Vector{UInt8})
     end
     @testset "digits with multi-char skip" begin
@@ -3130,21 +3147,21 @@ end # skip kwarg
         iddef = :(@defpacked HexGrouped ("X", :id(hex(8, skip="-", groups=4))))
         @test parsebytes_complexity(iddef) == (branches=5:6, branch_total=7, ops=11:59)
         eval(iddef)
-        @test parse(HexGrouped, "XDEAD-BEEF").id == "DEADBEEF"
-        @test parse(HexGrouped, "XDEADBEEF").id == "DEADBEEF"
-        @test string(parse(HexGrouped, "XDEADBEEF")) == "XDEAD-BEEF"
+        @test parse(HexGrouped, "XDEAD-BEEF").id == "deadbeef"
+        @test parse(HexGrouped, "XDEADBEEF").id == "deadbeef"
+        @test string(parse(HexGrouped, "XDEADBEEF")) == "Xdead-beef"
         check_roundtrips(HexGrouped, (
-            "X0000-0000", "XDEAD-BEEF", "XFFFF-FFFF"))
+            "X0000-0000", "Xdead-beef", "Xffff-ffff"))
         @test_neverthrow PP.parsebytes(HexGrouped, ::Vector{UInt8})
     end
     @testset "letters groups" begin
         iddef = :(@defpacked LetterGrouped (:code(letters(6, skip="-", groups=3))))
         @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=7:7)
         eval(iddef)
-        @test parse(LetterGrouped, "ABC-DEF").code == "ABCDEF"
-        @test parse(LetterGrouped, "ABCDEF").code == "ABCDEF"
-        @test string(parse(LetterGrouped, "ABCDEF")) == "ABC-DEF"
-        check_roundtrips(LetterGrouped, ("AAA-AAA", "ABC-DEF", "ZZZ-ZZZ"))
+        @test parse(LetterGrouped, "ABC-DEF").code == "abcdef"
+        @test parse(LetterGrouped, "ABCDEF").code == "abcdef"
+        @test string(parse(LetterGrouped, "ABCDEF")) == "abc-def"
+        check_roundtrips(LetterGrouped, ("aaa-aaa", "abc-def", "zzz-zzz"))
         @test_neverthrow PP.parsebytes(LetterGrouped, ::Vector{UInt8})
     end
     @testset "multi-chunk hex" begin
@@ -3152,31 +3169,31 @@ end # skip kwarg
         @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=60:60)
         eval(iddef)
         id = parse(Hex16, "0123456789ABCDEF")
-        @test id.val == "0123456789ABCDEF"
+        @test id.val == "0123456789abcdef"
         @test parse(Hex16, "0123456789abcdef") == id
-        check_roundtrips(Hex16, ("0000000000000000", "0123456789ABCDEF", "FFFFFFFFFFFFFFFF"))
+        check_roundtrips(Hex16, ("0000000000000000", "0123456789abcdef", "ffffffffffffffff"))
         @test_neverthrow PP.parsebytes(Hex16, ::Vector{UInt8})
         iddef = :(@defpacked Hex32 :val(hex(32)))
         @test parsebytes_complexity(iddef) == (branches=5:5, branch_total=5, ops=120:120)
         eval(iddef)
         id = parse(Hex32, "550E8400E29B41D4A716446655440000")
-        @test id.val == "550E8400E29B41D4A716446655440000"
+        @test id.val == "550e8400e29b41d4a716446655440000"
         check_roundtrips(Hex32, ("00000000000000000000000000000000",
-                                "550E8400E29B41D4A716446655440000",
-                                "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"))
+                                "550e8400e29b41d4a716446655440000",
+                                "ffffffffffffffffffffffffffffffff"))
         @test_neverthrow PP.parsebytes(Hex32, ::Vector{UInt8})
     end
     @testset "grouped hex with sub-chunking" begin
         iddef = :(@defpacked UuidHex (:id(hex(32, skip="-", groups=(8,4,4,4,12)))))
         @test parsebytes_complexity(iddef) == (branches=4:12, branch_total=13, ops=9:172)
         eval(iddef)
-        @test parse(UuidHex, "550E8400-E29B-41D4-A716-446655440000").id == "550E8400E29B41D4A716446655440000"
-        @test parse(UuidHex, "550e8400-e29b-41d4-a716-446655440000").id == "550E8400E29B41D4A716446655440000"
-        @test parse(UuidHex, "550E8400E29B41D4A716446655440000").id == "550E8400E29B41D4A716446655440000"
-        @test string(parse(UuidHex, "550E8400E29B41D4A716446655440000")) == "550E8400-E29B-41D4-A716-446655440000"
+        @test parse(UuidHex, "550E8400-E29B-41D4-A716-446655440000").id == "550e8400e29b41d4a716446655440000"
+        @test parse(UuidHex, "550e8400-e29b-41d4-a716-446655440000").id == "550e8400e29b41d4a716446655440000"
+        @test parse(UuidHex, "550E8400E29B41D4A716446655440000").id == "550e8400e29b41d4a716446655440000"
+        @test string(parse(UuidHex, "550E8400E29B41D4A716446655440000")) == "550e8400-e29b-41d4-a716-446655440000"
         check_roundtrips(UuidHex, ("00000000-0000-0000-0000-000000000000",
-                                   "550E8400-E29B-41D4-A716-446655440000",
-                                   "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"))
+                                   "550e8400-e29b-41d4-a716-446655440000",
+                                   "ffffffff-ffff-ffff-ffff-ffffffffffff"))
         @test_neverthrow PP.parsebytes(UuidHex, ::Vector{UInt8})
     end
 end
@@ -3390,7 +3407,7 @@ end
 
 @testset "structured choice" begin
     @testset "two-arm basic" begin
-        iddef = :(@defpacked StructChoice1 (:id(choice(("A", digits(2, pad=2)), ("B", digits(3, pad=3))))))
+        iddef = :(@defpacked StructChoice1 (:id(choice(("A", digits(2)), ("B", digits(3))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:63)
         eval(iddef)
         @test string(parse(StructChoice1, "A42")) == "A42"
@@ -3400,7 +3417,7 @@ end
         check_roundtrips(StructChoice1, ("A00", "A99", "B000", "B999"))
     end
     @testset "two-arm with fields" begin
-        iddef = :(@defpacked StructChoice2 (choice(:a(digits(2, pad=2)), ("X", :b(digits(3, pad=3))))))
+        iddef = :(@defpacked StructChoice2 (choice(:a(digits(2)), ("X", :b(digits(3))))))
         @test parsebytes_complexity(iddef) == (branches=5:12, branch_total=12, ops=2:60)
         eval(iddef)
         @test parse(StructChoice2, "42").a == 42
@@ -3410,7 +3427,7 @@ end
         check_roundtrips(StructChoice2, ("00", "99", "X000", "X999"))
     end
     @testset "with empty arm" begin
-        iddef = :(@defpacked StructChoiceOpt (choice(("A", :x(digits(2, pad=2))), ("B", :y(digits(3, pad=3))), "")))
+        iddef = :(@defpacked StructChoiceOpt (choice(("A", :x(digits(2))), ("B", :y(digits(3))), "")))
         @test parsebytes_complexity(iddef) == (branches=2:10, branch_total=10, ops=3:65)
         eval(iddef)
         @test parse(StructChoiceOpt, "A42").x == 42
@@ -3420,7 +3437,7 @@ end
         @test tryparse(StructChoiceOpt, "C99") === nothing
     end
     @testset "letter-range dispatch" begin
-        iddef = :(@defpacked LetterChoice (choice(("X", :a(digits(3, pad=3))), ("Y", :b(digits(2, pad=2))), ("Z", :c(digits(1))))))
+        iddef = :(@defpacked LetterChoice (choice(("X", :a(digits(3))), ("Y", :b(digits(2))), ("Z", :c(digits(1))))))
         @test parsebytes_complexity(iddef) == (branches=5:19, branch_total=19, ops=2:84)
         eval(iddef)
         @test parse(LetterChoice, "X042").a == 42
@@ -3435,14 +3452,14 @@ end
             (charset(1, 'A':'N', 'R':'Z'), :d3(digits(1)), :a2(alphnum(8))))))
         @test parsebytes_complexity(iddef) == (branches=5:17, branch_total=17, ops=2:75)
         eval(iddef)
-        @test string(parse(ComplexChoice, "P3ABC5")) == "P3ABC5"
-        @test string(parse(ComplexChoice, "A1ABCDEFGH")) == "A1ABCDEFGH"
+        @test string(parse(ComplexChoice, "P3ABC5")) == "P3abc5"
+        @test string(parse(ComplexChoice, "A1ABCDEFGH")) == "a1abcdefgh"
         @test tryparse(ComplexChoice, "O") === nothing
         @test tryparse(ComplexChoice, "") === nothing
-        check_roundtrips(ComplexChoice, ("O0AAA0", "Q9ZZZ9", "A0AAAAAAAA", "N9ZZZZZZZZ"))
+        check_roundtrips(ComplexChoice, ("O0aaa0", "Q9zzz9", "a0aaaaaaaa", "n9zzzzzzzz"))
     end
     @testset "casefold dispatch" begin
-        iddef = :(@defpacked CaseFoldChoice (choice(("ab", :x(digits(2, pad=2))), ("cd", :y(digits(2, pad=2))))))
+        iddef = :(@defpacked CaseFoldChoice (choice(("ab", :x(digits(2))), ("cd", :y(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:60)
         eval(iddef)
         @test parse(CaseFoldChoice, "ab42").x == 42
@@ -3453,7 +3470,7 @@ end
         check_roundtrips(CaseFoldChoice, ("ab00", "ab99", "cd00", "cd99"))
     end
     @testset "cascade fallback" begin
-        iddef = :(@defpacked CascadeChoice (choice((:a(digits(2, pad=2)), "X"), (:b(digits(2, pad=2)), "Y"))))
+        iddef = :(@defpacked CascadeChoice (choice((:a(digits(2)), "X"), (:b(digits(2)), "Y"))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:58)
         eval(iddef)
         @test parse(CascadeChoice, "42X").a == 42
@@ -3464,7 +3481,7 @@ end
         check_roundtrips(CascadeChoice, ("00X", "99X", "00Y", "99Y"))
     end
     @testset "multi-byte window dispatch" begin
-        iddef = :(@defpacked MultiByteChoice (choice(("AX", :x(digits(2, pad=2))), ("AY", :y(digits(2, pad=2))))))
+        iddef = :(@defpacked MultiByteChoice (choice(("AX", :x(digits(2))), ("AY", :y(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:59)
         eval(iddef)
         @test parse(MultiByteChoice, "AX42").x == 42
@@ -3476,8 +3493,8 @@ end
     end
     @testset "four arms" begin
         iddef = :(@defpacked FourArm (choice(
-            ("A", :a(digits(2, pad=2))), ("B", :b(digits(2, pad=2))),
-            ("C", :c(digits(2, pad=2))), ("D", :d(digits(2, pad=2))))))
+            ("A", :a(digits(2))), ("B", :b(digits(2))),
+            ("C", :c(digits(2))), ("D", :d(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:25, branch_total=25, ops=2:112)
         eval(iddef)
         @test parse(FourArm, "A42").a == 42
@@ -3489,7 +3506,7 @@ end
         check_roundtrips(FourArm, ("A00", "B00", "C00", "D00", "A99", "D99"))
     end
     @testset "digit vs letter discrimination" begin
-        iddef = :(@defpacked DigitLetterChoice (choice((:n(digits(3, pad=3))), (letters(1), :m(digits(2, pad=2))))))
+        iddef = :(@defpacked DigitLetterChoice (choice((:n(digits(3))), (letters(1), :m(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:12, branch_total=12, ops=2:68)
         eval(iddef)
         @test parse(DigitLetterChoice, "042").n == 42
@@ -3499,7 +3516,7 @@ end
         check_roundtrips(DigitLetterChoice, ("000", "999", "A00", "Z99"))
     end
     @testset "empty arm with dispatch" begin
-        iddef = :(@defpacked DispatchOpt (choice(("X", :x(digits(2, pad=2))), ("Y", :y(digits(2, pad=2))), "")))
+        iddef = :(@defpacked DispatchOpt (choice(("X", :x(digits(2))), ("Y", :y(digits(2))), "")))
         @test parsebytes_complexity(iddef) == (branches=2:10, branch_total=10, ops=3:60)
         eval(iddef)
         @test parse(DispatchOpt, "X42").x == 42
@@ -3509,7 +3526,7 @@ end
         check_roundtrips(DispatchOpt, ("X00", "X99", "Y00", "Y99"))
     end
     @testset "field wrapping structured choice" begin
-        iddef = :(@defpacked FieldChoice (:id(choice(("A", digits(2, pad=2)), ("B", digits(3, pad=3))))))
+        iddef = :(@defpacked FieldChoice (:id(choice(("A", digits(2)), ("B", digits(3))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:63)
         eval(iddef)
         @test parse(FieldChoice, "A42").id == "A42"
@@ -3519,8 +3536,8 @@ end
     end
     @testset "tagged choice" begin
         iddef = :(@defpacked TaggedChoice (choice(:kind,
-            :alpha => seq("A", :val(digits(2, pad=2))),
-            :beta  => seq("B", :val(digits(3, pad=3))))))
+            :alpha => seq("A", :val(digits(2))),
+            :beta  => seq("B", :val(digits(3))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:63)
         eval(iddef)
         a = parse(TaggedChoice, "A42")
@@ -3535,8 +3552,8 @@ end
         @test_neverthrow PP.parsebytes(TaggedChoice, ::Vector{UInt8})
     end
     @testset "duplicate field name across choice arms" begin
-        iddef = :(@defpacked DupField (choice(seq("VCV", :id(digits(3, pad=3))),
-                                              seq("RCV", :id(digits(3, pad=3))))))
+        iddef = :(@defpacked DupField (choice(seq("VCV", :id(digits(3))),
+                                              seq("RCV", :id(digits(3))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:70)
         eval(iddef)
         @test parse(DupField, "VCV123").id == 123
@@ -3556,10 +3573,10 @@ end
         iddef = :(@defpacked NestedDupField (
             choice(
                 seq("A", choice(
-                    seq("x", :id(digits(2, pad=2))),
-                    seq("y", :id(digits(3, pad=3))))),
-                seq("B", :id(digits(4, pad=4))),
-                seq("C", :tag(choice("p", "q")), :id(digits(2, pad=2))))))
+                    seq("x", :id(digits(2))),
+                    seq("y", :id(digits(3))))),
+                seq("B", :id(digits(4))),
+                seq("C", :tag(choice("p", "q")), :id(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:35, branch_total=35, ops=2:144)
         eval(iddef)
         # Each arm parses and extracts :id correctly
@@ -3583,7 +3600,7 @@ end
         @test_neverthrow PP.parsebytes(NestedDupField, ::Vector{UInt8})
     end
     @testset "string choice inside arm" begin
-        iddef = :(@defpacked InnerChoice (choice((:tag(choice("alpha", "beta")), :n(digits(1))), ("X", :m(digits(2, pad=2))))))
+        iddef = :(@defpacked InnerChoice (choice((:tag(choice("alpha", "beta")), :n(digits(1))), ("X", :m(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:18, branch_total=18, ops=2:63)
         eval(iddef)
         @test parse(InnerChoice, "alpha3").tag == :alpha
@@ -3594,7 +3611,7 @@ end
         check_roundtrips(InnerChoice, ("alpha0", "beta9", "X00", "X99"))
     end
     @testset "optional inside arm" begin
-        iddef = :(@defpacked OptInArm (choice(("A", :x(digits(2, pad=2)), optional("-", :y(digits(1)))), ("B", :z(digits(2, pad=2))))))
+        iddef = :(@defpacked OptInArm (choice(("A", :x(digits(2)), optional("-", :y(digits(1)))), ("B", :z(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:18, branch_total=18, ops=2:74)
         eval(iddef)
         @test parse(OptInArm, "A42").x == 42
@@ -3630,7 +3647,7 @@ end
     end
     @testset "nested: structured choice inside optional" begin
         iddef = :(@defpacked ChoiceInOpt (:id(digits(max=99)),
-            optional("-", choice(("A", :x(digits(2, pad=2))), ("B", :y(digits(2, pad=2)))))))
+            optional("-", choice(("A", :x(digits(2))), ("B", :y(digits(2)))))))
         @test parsebytes_complexity(iddef) == (branches=6:24, branch_total=24, ops=20:102)
         eval(iddef)
         bare = parse(ChoiceInOpt, "42")
@@ -3648,8 +3665,8 @@ end
     end
     @testset "overlapping bit allocation" begin
         iddef = :(@defpacked OverlapBits (choice(
-            seq("S", :x(digits(2, pad=2))),
-            seq("L", :y(digits(4, pad=4))))))
+            seq("S", :x(digits(2))),
+            seq("L", :y(digits(4))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:62)
         eval(iddef)
         # discriminant: ceil(log2(3)) = 2, arm1: 7 bits, arm2: 14 bits → 2 + 14 = 16
@@ -3660,16 +3677,16 @@ end
         @test parse(OverlapBits, "L1234").x === nothing
         check_roundtrips(OverlapBits, ("S00", "S99", "L0000", "L9999"))
     end
-    @testset "nested tagged choice — inactive arm returns nothing" begin
+    @testset "nested tagged choice: inactive arm returns nothing" begin
         iddef = :(@defpacked NestedTag (choice(:format,
-            :new => :num(digits(4, pad=4)),
+            :new => :num(digits(4)),
             :old => seq(choice(:kind, :a => "AA", :b => "BB"),
-                        :num(digits(2, pad=2))))))
+                        :num(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:25, branch_total=25, ops=2:77)
         eval(:(@defpacked NestedTag (choice(:format,
-            :new => :num(digits(4, pad=4)),
+            :new => :num(digits(4)),
             :old => seq(choice(:kind, :a => "AA", :b => "BB"),
-                        :num(digits(2, pad=2)))))))
+                        :num(digits(2)))))))
         n = parse(NestedTag, "1234")
         o = parse(NestedTag, "AA42")
         # New format: no kind tag
@@ -3704,14 +3721,14 @@ end
     end
     @testset "nested choice dispatch propagation" begin
         iddef = :(@defpacked NestedDispatch (choice(
-            seq(:year(digits(2, pad=2)), ".", :num(digits(4, pad=4))),
+            seq(:year(digits(2)), ".", :num(digits(4))),
             seq(choice(seq("math.", :class(choice("GT", "CO"))), "gr-qc"),
-                "/", :num(digits(7, pad=7))))))
+                "/", :num(digits(7))))))
         @test parsebytes_complexity(iddef) == (branches=5:34, branch_total=34, ops=2:123)
         eval(:(@defpacked NestedDispatch (choice(
-            seq(:year(digits(2, pad=2)), ".", :num(digits(4, pad=4))),
+            seq(:year(digits(2)), ".", :num(digits(4))),
             seq(choice(seq("math.", :class(choice("GT", "CO"))), "gr-qc"),
-                "/", :num(digits(7, pad=7)))))))
+                "/", :num(digits(7)))))))
         @test parse(NestedDispatch, "14.1607").year == 14
         @test parse(NestedDispatch, "math.GT/0309136").class === :GT
         @test parse(NestedDispatch, "gr-qc/0309136").num == 309136
@@ -3742,7 +3759,7 @@ end
 @testset "tuple-level kwargs" begin
     # casefold=false as a tuple-level kwarg rather than per-segment
     expr = packed_deftype(@__MODULE__, :TupleKw,
-                          :((casefold=false, "PFX-", :id(digits(3, pad=3)))))
+                          :((casefold=false, "PFX-", :id(digits(3)))))
     eval(expr)
     @test parse(TupleKw, "PFX-042").id == 42
     @test tryparse(TupleKw, "pfx-042") === nothing

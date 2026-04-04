@@ -4,11 +4,11 @@
 # SWAR (SIMD-Within-A-Register) digit parsing codegen.
 #
 # Four layers:
-#   1. Constants — precomputed masks and multiply-shift reduction parameters
-#   2. Digit detection — codegen for per-byte digit/non-digit classification
-#   3. Loading — strategies for getting digit bytes into a register (backward,
+#   1. Constants: precomputed masks and multiply-shift reduction parameters
+#   2. Digit detection: codegen for per-byte digit/non-digit classification
+#   3. Loading: strategies for getting digit bytes into a register (backward,
 #      forward-overread, exact sub-loads, cascading variable-width)
-#   4. Strategy dispatch — assemble complete parse expressions for a digit field,
+#   4. Strategy dispatch: assemble complete parse expressions for a digit field,
 #      choosing between SWAR fixed/variable and scalar parseint fallback
 
 ## Constants
@@ -255,7 +255,7 @@ end
 """
     gen_swar_hiload(state, nctx, var, nd) -> (sT, Expr)
 
-Emit a high-aligned register load of `nd` bytes from `idbytes` at `pos`,
+Emit a high-aligned register load of `nd` bytes from `data` at `pos`,
 choosing the optimal strategy (backward, forward-overread, or exact sub-loads)
 based on the current branch's byte guarantee. Returns `(register_type, load_expr)`.
 """
@@ -266,7 +266,7 @@ function gen_swar_hiload(state::ParserState, nctx::NodeCtx, var::Symbol, nd::Int
     load = if !backward && nd < sizeof(sT)
         shift = 8 * (sizeof(sT) - nd)
         Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
-             :($var = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos)))) << $shift),
+             :($var = htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos)))) << $shift),
              gen_swar_load(sT, var, nd, false))
     else
         gen_swar_load(sT, var, nd, backward)
@@ -277,7 +277,7 @@ end
 """
     gen_swar_load(::Type{T}, var, nd, backward) -> Expr
 
-Load `nd` digit bytes from `idbytes` at `pos` into `var::T`, high-aligned.
+Load `nd` digit bytes from `data` at `pos` into `var::T`, high-aligned.
 
 Three strategies:
 - Full-width (`nd == sizeof(T)`): single load, no padding needed.
@@ -290,18 +290,18 @@ function gen_swar_load(::Type{T}, var::Symbol, nd::Int, backward::Bool, offset::
     posoff(n) = if iszero(n); :pos else :(pos + $n) end
     posexpr = posoff(offset)
     padding = sizeof(T) - nd
-    # Full-width — single load, no alignment needed
+    # Full-width: single load, no alignment needed
     if nd == sizeof(T)
         if T === UInt8
-            return :($var = @inbounds idbytes[$posexpr])
+            return :($var = @inbounds data[$posexpr])
         end
-        return :($var = htol(Base.unsafe_load(Ptr{$T}(pointer(idbytes, $posexpr)))))
+        return :($var = htol(Base.unsafe_load(Ptr{$T}(pointer(data, $posexpr)))))
     end
-    # Backward — single wide load using preceding bytes as padding
+    # Backward: single wide load using preceding bytes as padding
     if backward
-        return :($var = htol(Base.unsafe_load(Ptr{$T}(pointer(idbytes, $(posoff(offset - padding)))))))
+        return :($var = htol(Base.unsafe_load(Ptr{$T}(pointer(data, $(posoff(offset - padding)))))))
     end
-    # Exact — decompose nd into power-of-2 chunks, shift each to its
+    # Exact: decompose nd into power-of-2 chunks, shift each to its
     # high-aligned position and OR together
     chunks = Tuple{Int,Int}[]  # (chunk_bytes, string_offset)
     remaining, coff = nd, 0
@@ -316,9 +316,9 @@ function gen_swar_load(::Type{T}, var::Symbol, nd::Int, backward::Bool, offset::
         cT = register_type(chunk)
         cposexpr = posoff(offset + off)
         load = if cT === UInt8
-            :($T(@inbounds idbytes[$cposexpr]))
+            :($T(@inbounds data[$cposexpr]))
         else
-            :(htol(Base.unsafe_load(Ptr{$cT}(pointer(idbytes, $cposexpr)))) % $T)
+            :(htol(Base.unsafe_load(Ptr{$cT}(pointer(data, $cposexpr)))) % $T)
         end
         if iszero(bit_shift) load else :($load << $bit_shift) end
     end
@@ -337,7 +337,7 @@ Generate a cascading variable-width load for SWAR digit parsing.
 
 Decomposes `maxdigits` into descending power-of-2 chunks, each conditionally
 loaded and digit-checked. After execution, `var` holds digit bytes low-aligned
-and `countvar` holds the count (0 to `maxdigits`). References `idbytes`, `pos`,
+and `countvar` holds the count (0 to `maxdigits`). References `data`, `pos`,
 and `availvar` from the enclosing parse context.
 """
 function gen_swar_varload(::Type{sT}, var::Symbol, countvar::Symbol,
@@ -372,9 +372,9 @@ function gen_varload_chunks(::Type{sT}, var::Symbol, countvar::Symbol,
     chunk_var = gensym("chunk$(chunk)")
     nondig_var = gensym("nondig$(chunk)")
     load_expr = if cT === UInt8
-        :($chunk_var = @inbounds idbytes[pos + $countvar])
+        :($chunk_var = @inbounds data[pos + $countvar])
     else
-        :($chunk_var = htol(Base.unsafe_load(Ptr{$cT}(pointer(idbytes, pos + $countvar)))))
+        :($chunk_var = htol(Base.unsafe_load(Ptr{$cT}(pointer(data, pos + $countvar)))))
     end
     nondig_raw = gen_swar_nondigits(cT, chunk_var, nondig_var, base)
     nondig_stmts = if Meta.isexpr(nondig_raw, :block)
@@ -495,10 +495,10 @@ function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
         :(!iszero($bitsconsumed))
     end
     fnum_set = if isnothing(skipbytes)
-        :(($bitsconsumed, $fnum) = parseint($(dspec.dI), idbytes, pos, $base, $scanlimit))
+        :(($bitsconsumed, $fnum) = parseint($(dspec.dI), data, pos, $base, $scanlimit))
     else
         scanned = Symbol("$(vocab.fieldvar)_scanned")
-        :(($bitsconsumed, $fnum, $scanned) = parseint($(dspec.dI), idbytes, pos, $base, $scanlimit, $skipbytes))
+        :(($bitsconsumed, $fnum, $scanned) = parseint($(dspec.dI), data, pos, $base, $scanlimit, $skipbytes))
     end
     result = ExprVarLine[fnum_set, :($matchcond || $fail_expr)]
     rangecheck != :() && push!(result, rangecheck)
@@ -592,7 +592,7 @@ function gen_vardigit_backward(::ParserState, nctx::NodeCtx,
     (; base, mindigits, maxdigits) = dspec
     backload = ExprVarLine[
         :($swar_var = htol(Base.unsafe_load(
-            Ptr{$sT}(pointer(idbytes, pos + $availvar - $(sizeof(sT))))))),
+            Ptr{$sT}(pointer(data, pos + $availvar - $(sizeof(sT))))))),
         :($swar_var >>>= ($(sizeof(sT)) - $availvar) << 3),
         gen_swar_digitcount(sT, swar_var, countvar, base, maxdigits)...]
     guard_n = Base.max(mindigits, 1)
@@ -610,7 +610,7 @@ function gen_vardigit_forward(state::ParserState, nctx::NodeCtx,
     (; base, mindigits, maxdigits) = dspec
     # Forward overread: single full-width load at pos, digits at LSB
     fwdload = ExprVarLine[
-        :($swar_var = htol(Base.unsafe_load(Ptr{$sT}(pointer(idbytes, pos))))),
+        :($swar_var = htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos))))),
         gen_swar_digitcount(sT, swar_var, countvar, base, maxdigits)...]
     guard_n = Base.max(mindigits, 1)
     guard_check = Expr(:call, :__length_check, b.id, b.parsed_max, guard_n, guard_n, guard_n)
@@ -715,7 +715,7 @@ function grouped_chunks_and_check(groups, skipbytes, chunksize::Int = sizeof(UIn
         (offsets[i] + chunksize * j, Base.min(chunksize, groups[i] - chunksize * j))
         for i in 1:ngroups for j in 0:cld(groups[i], chunksize)-1)
     sep_check = foldl(1:ngroups-1; init=:(true)) do acc, i
-        :($acc && @inbounds idbytes[pos + $(offsets[i] + groups[i])] == $sep)
+        :($acc && @inbounds data[pos + $(offsets[i] + groups[i])] == $sep)
     end
     (; chunks, sep_check, total_bytes)
 end
@@ -733,7 +733,7 @@ function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
     scanlimit = emit_lengthbound(state, nctx, maxdigits)
     fallback = ExprVarLine[
         :(($bitsconsumed, $fnum, $scanned) =
-            parseint($(dI), idbytes, pos, $base, $scanlimit, $skipbytes)),
+            parseint($(dI), data, pos, $base, $scanlimit, $skipbytes)),
         :($bitsconsumed == $maxdigits || $fail_expr)]
     lencheck = emit_lengthcheck(state, nctx, total_bytes)
     result = ExprVarLine[

@@ -103,7 +103,7 @@ function pattern_field!(exprs::PatternExprs,
     isnothing(get(nctx, :fieldvar, nothing)) || throw(ArgumentError("Fields may not be nested"))
     nctx = NodeCtx(nctx, :fieldvar, Symbol("attr_$(node.value)"))
     initial_segs = length(exprs.segments)
-    initialprints = length(exprs.print)
+    initialprints = length(exprs.print.direct)
     for arg in args
         pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, arg)
     end
@@ -122,7 +122,7 @@ function pattern_field!(exprs::PatternExprs,
     elseif length(new_value_segs) == 1
         push!(exprs.properties, node.value => new_value_segs[1].label)
     else
-        propprints = map(strip_segsets! ∘ copy, exprs.print[initialprints+1:end])
+        propprints = map(strip_segsets! ∘ copy, exprs.print.direct[initialprints+1:end])
         filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, propprints)
         push!(exprs.properties, node.value => ExprVarLine[(
             quote
@@ -392,7 +392,7 @@ function pattern_choice_optional!(exprs::PatternExprs,
     nctx = NodeCtx(nctx, :optional_sentinel, sentinel_ref)
     seg_start = length(exprs.segments)
     bits_before = state.bits
-    oexprs = PatternExprs(ExprVarLine[], ExprVarLine[],
+    oexprs = PatternExprs(ExprVarLine[], PrintExprs(),
                           exprs.segments, exprs.properties, Vector{ByteSet}[])
     walk_choice_arm!(oexprs, state, nctx, segments, global_kwargs, arm)
     if sentinel_ref[] === nothing
@@ -413,9 +413,20 @@ function pattern_choice_optional!(exprs::PatternExprs,
     push!(exprs.parse, :(if $optvar; $(oexprs.parse...) end))
     push!(exprs.parse, :(@label $end_label))
     push!(exprs.parse, :(if !$optvar; pos = $savedpos; $(arm_clear_bits(state, bits_before)...) end))
-    append!(exprs.print, nctx[:oprint_detect])
-    push!(exprs.print, :($optvar = $check))
-    push!(exprs.print, :(if $optvar; $(oexprs.print...) end))
+    # Print: hoist extraction + condition, wrap bodies in if
+    odetect = nctx[:oprint_detect]
+    cond_assign = :($optvar = $check)
+    for field in (:direct, :getval)
+        append!(getfield(exprs.print, field), odetect)
+        push!(getfield(exprs.print, field), cond_assign)
+    end
+    append!(exprs.print.vars, oexprs.print.vars)
+    push!(exprs.print.vars, optvar => false)
+    for field in (:direct, :getval, :getlen, :putval)
+        body = getfield(oexprs.print, field)
+        isempty(body) && continue
+        push!(getfield(exprs.print, field), :(if $optvar; $(body...) end))
+    end
     if !isempty(oexprs.bytespans)
         extend_bytespans!(exprs.bytespans, push!(copy(oexprs.bytespans), ByteSet[]))
     end
@@ -463,7 +474,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
         state.bits = arm_base
         bits_before = state.bits
         arm_props = Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}[]
-        oexprs = PatternExprs(ExprVarLine[], ExprVarLine[],
+        oexprs = PatternExprs(ExprVarLine[], PrintExprs(),
                               exprs.segments, arm_props, Vector{ByteSet}[])
         arm !== "" && walk_choice_arm!(oexprs, state, arm_nctx, segments, global_kwargs, arm)
         bits_after = state.bits
@@ -496,13 +507,20 @@ function pattern_choice_multi!(exprs::PatternExprs,
                             "" in arms)
     end
     state.bits = final_bits
-    # Separate `if` blocks (not if/elseif) so rewrite_bufprint! can reach print calls.
+    # Emit per-arm print blocks. Separate `if` blocks (not if/elseif) so
+    # rewrite_bufprint! can reach print calls inside each arm.
     discrim_extract = emit_extract(state, discrim_pos, discrim_bits)
     for (k, ad) in enumerate(arm_data)
-        append!(exprs.print, ad.arm_nctx[:oprint_detect])
-        push!(exprs.print, :(if $discrim_extract == $(discrim_type(k))
-                                 $(ad.oexprs.print...)
-                             end))
+        odetect = ad.arm_nctx[:oprint_detect]
+        cond = :($discrim_extract == $(discrim_type(k)))
+        # direct: self-contained (odetect + direct inside if)
+        append!(exprs.print.direct, odetect)
+        push!(exprs.print.direct, :(if $cond; $(ad.oexprs.print.direct...) end))
+        # split path: everything inside the if (no hoisting for choice arms)
+        append!(exprs.print.vars, ad.oexprs.print.vars)
+        push!(exprs.print.getval, :(if $cond; $(odetect...); $(ad.oexprs.print.getval...) end))
+        push!(exprs.print.getlen, :(if $cond; $(ad.oexprs.print.getlen...) end))
+        push!(exprs.print.putval, :(if $cond; $(ad.oexprs.print.putval...) end))
     end
     # Propagate bytespans upward so parent sequences can dispatch on our content.
     # A choice contributes the union of all arm alternatives.

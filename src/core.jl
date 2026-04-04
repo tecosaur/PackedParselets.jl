@@ -39,9 +39,9 @@ or an error code and position on failure.
 function parsebytes end
 
 """
-    tobytes(id) -> (buf, len)
+    tobytes(id) -> Memory{UInt8}
 
-Buffer-based output. Returns `(Memory{UInt8}, length)`.
+Buffer-based output. Returns a `StringMemory` of exact length.
 """
 function tobytes end
 
@@ -319,16 +319,19 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     end
     inc_parsed!(nctx, first(bounds.parsed), last(bounds.parsed))
     inc_print!(nctx, first(bounds.printed), last(bounds.printed))
-    # Route print-detect expressions to the optional handler or exprs.print
-    pdetect = if isnothing(option) exprs.print else nctx[:oprint_detect] end
-    append!(pdetect, codegen.print_detect)
-    append!(exprs.print, codegen.print)
+    # Route print expressions: getval hoisted to oprint_detect inside optionals
+    (; direct, vars, getval, getlen, putval) = codegen.print
+    append!(exprs.print.direct, direct)
+    append!(exprs.print.vars, vars)
+    append!(if isnothing(option) exprs.print.getval else nctx[:oprint_detect] end, getval)
+    append!(exprs.print.getlen, getlen)
+    append!(exprs.print.putval, putval)
     argvar = something(meta.argvar, :_)
     push!(exprs.segments, ValueSegment(
         bounds.nbits, kind, meta.label, meta.desc, meta.shortform,
         meta.argtype, argvar,
         codegen.extract, codegen.impart, option))
-    push!(exprs.print, :(__segment_printed = $(length(exprs.segments))))
+    push!(exprs.print.direct, :(__segment_printed = $(length(exprs.segments))))
     push!(state.segment_outputs, kind => output)
     extend_bytespans!(exprs.bytespans, output.bytespans)
 end

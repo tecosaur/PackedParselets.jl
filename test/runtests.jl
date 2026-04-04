@@ -586,9 +586,14 @@ end
         extract_setup = PP.ExprVarLine[fextract]
         seg_extract, seg_impart = PP.optional_wrap(option, argvar, extract_setup, fieldvar, impart_body)
         label = Symbol(chopprefix(String(fieldvar), "attr_"))
+        pinfo = PP.PrintExprs(direct = PP.ExprVarLine[fextract, print_exprs...],
+                              vars = Pair{Symbol,Any}[fieldvar => UInt32(0)],
+                              getval = PP.ExprVarLine[fextract],
+                              getlen = PP.ExprVarLine[:(pos += 8)],
+                              putval = print_exprs)
         PP.SegmentOutput(
             PP.SegmentBounds(8:8, 8:8, nbits, sentinel),
-            PP.SegmentCodegen(parse_exprs, seg_extract, copy(extract_setup), seg_impart, print_exprs),
+            PP.SegmentCodegen(parse_exprs, seg_extract, pinfo, seg_impart),
             PP.SegmentMeta(label, "timestamp (YYYYMMDD)", "YYYYMMDD", :Integer, argvar),
             Vector{PP.ByteSet}[])
     end

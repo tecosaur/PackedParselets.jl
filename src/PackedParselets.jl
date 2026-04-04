@@ -26,7 +26,7 @@ export parsebytes, tobytes, segments, nbits, parsebounds, printbounds,
     maketype, CORE_SEGMENTS
 
 # Extension API for custom segment handlers
-public ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet,
+public ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet, PrintExprs,
     SegmentDef, SegmentOutput, SegmentBounds, SegmentCodegen, SegmentMeta,
     build_fail_expr!, emit_pack, emit_extract, emit_lengthcheck,
     is_sentinel_unclaimed, implement_casting!

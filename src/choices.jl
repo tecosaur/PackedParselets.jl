@@ -94,25 +94,23 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
           emit_pack(state, cint, fieldvar, bitpos)]
     fextract = :($fieldvar = $(emit_extract(state, bitpos, cbits)))
     present = :(!iszero($fieldvar))
-    printexpr = :(print(io, @inbounds $(Tuple(sopts))[$fieldvar]))
-    # When allowempty without an enclosing optional, guard print on presence
-    prexprs = ExprVarLine[if allowempty && isnothing(option)
-              :(if $present; $printexpr end)
-          else
-              printexpr
-          end]
+    opttuple = Tuple(sopts)
+    printexpr = :(print(io, @inbounds $opttuple[$fieldvar]))
+    optlens = ncodeunits.(sopts)
+    lenexpr = if allequal(optlens)
+        :(pos += $(first(optlens)))
+    else
+        :(pos += $(GlobalRef(Base, :ncodeunits))(@inbounds $opttuple[$fieldvar]))
+    end
+    # When allowempty without an enclosing optional, guard on presence
+    emptyguard = allowempty && isnothing(option)
+    guard(ex) = if emptyguard; :(if $present; $ex end) else ex end
+    vars = Pair{Symbol,Any}[fieldvar => :(zero($cint))]
     argvar = gensym("arg_choice")
     extract_value, impart_core, argtype = choice_value_codegen(
         state, valtype, sopts, fieldvar, argvar, cint, bitpos)
-    # For allowempty without an enclosing optional, wrap extract in a presence guard
-    if allowempty && isnothing(option)
-        extract_value = :(if $present; $extract_value end)
-    end
-    eopt = if allowempty && isnothing(option)
-        gensym("emptyopt")
-    else
-        option
-    end
+    emptyguard && (extract_value = guard(extract_value))
+    eopt = if emptyguard gensym("emptyopt") else option end
     sentinel = if claims SentinelSpec((0, cbits)) end
     pmax = maximum(ncodeunits, sopts)
     casefold = get(nctx, :casefold, false) === true
@@ -124,7 +122,13 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
     seg_extract, seg_impart = optional_wrap(eopt, argvar, extract_setup, extract_value, impart_core)
     SegmentOutput(
         SegmentBounds(pmin:pmax, pmin:pmax, cbits, sentinel),
-        SegmentCodegen(pexprs, seg_extract, extract_setup, seg_impart, prexprs),
+        SegmentCodegen(pexprs, seg_extract,
+            PrintExprs(direct = ExprVarLine[fextract, guard(copy(printexpr))],
+                       vars = vars,
+                       getval = ExprVarLine[fextract],
+                       getlen = ExprVarLine[guard(lenexpr)],
+                       putval = ExprVarLine[guard(copy(printexpr))]),
+            seg_impart),
         SegmentMeta(label, desc, desc, argtype, argvar),
         arrangements)
 end
@@ -176,10 +180,13 @@ function compile_choice_fixed(::ParserState, nctx::NodeCtx, ctx)
     casefold = get(nctx, :casefold, false) === true
     arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
                      for o in sopts]
+    printout = ExprVarLine[:(print(io, $target))]
     SegmentOutput(
         SegmentBounds(pmin:maximum(ncodeunits, sopts), tlen:tlen, 0, nothing),
-        SegmentCodegen(pexprs, ExprVarLine[], ExprVarLine[], Expr[],
-                       ExprVarLine[:(print(io, $target))]),
+        SegmentCodegen(pexprs, ExprVarLine[],
+            PrintExprs(direct=printout, putval=copy(printout),
+                       getlen=ExprVarLine[:(pos += $tlen)]),
+            Expr[]),
         SegmentMeta(label,
                     string("Choice of literal string \"", target, "\" vs ", join(sopts, ", ")),
                     join(sopts, " | "), nothing, nothing),

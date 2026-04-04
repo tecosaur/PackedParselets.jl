@@ -42,22 +42,44 @@ struct SegmentBounds
 end
 
 """
-    SegmentCodegen(parse, extract, print_detect, impart, print)
+    PrintExprs(; direct, vars, getval, getlen, putval)
+
+Print-phase expression bundle produced by segment handlers.
+
+- `direct`: self-contained extract+write (for `tobytes(buf, id)` and `print(io, id)`)
+- `vars`: variables shared across phases, with default values (`Symbol => init`)
+- `getval`: extract bit-packed values to variables declared in `vars`
+- `getlen`: increment `pos` by the output byte count (using variables from `getval`)
+- `putval`: write to buffer/IO using variables from `getval`, incrementing `pos`
+"""
+const PrintExprs = @NamedTuple{
+    direct::Vector{ExprVarLine},
+    vars::Vector{Pair{Symbol, Any}},
+    getval::Vector{ExprVarLine},
+    getlen::Vector{ExprVarLine},
+    putval::Vector{ExprVarLine},
+}
+
+PrintExprs(; direct=ExprVarLine[], vars=Pair{Symbol,Any}[],
+             getval=ExprVarLine[], getlen=ExprVarLine[],
+             putval=ExprVarLine[]) =
+    (direct=direct, vars=vars, getval=getval, getlen=getlen, putval=putval)
+
+"""
+    SegmentCodegen(parse, extract, print, impart)
 
 Expression vectors produced by a segment handler.
 
 - `parse`: input bytes -> value variable (appended to the parse expression list)
 - `extract`: raw bits -> user-facing value (for getproperty, show, segments)
-- `print_detect`: extract setup expressions routed to print or optional detect list
+- `print`: output expressions as a `PrintExprs` named tuple
 - `impart`: user argument -> raw value for bit-packing (for the constructor)
-- `print`: extracted value -> formatted output (appended to the print expression list)
 """
 struct SegmentCodegen
     parse::Vector{ExprVarLine}        # input bytes -> value var
     extract::Vector{ExprVarLine}      # raw bits -> user-facing value (full extract for segments)
-    print_detect::Vector{ExprVarLine} # extract setup routed to print-time detection
+    print::PrintExprs                 # output expression bundle
     impart::Vector{Expr}               # user arg -> raw value for packing
-    print::Vector{ExprVarLine}        # extracted value -> formatted output
 end
 
 """
@@ -154,12 +176,12 @@ with the parent while owning separate `parse`, `print`, and `bytespans` vectors.
 """
 struct PatternExprs
     parse::Vector{ExprVarLine}
-    print::Vector{ExprVarLine}
+    print::PrintExprs
     segments::Vector{ValueSegment}
     properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}}
     bytespans::Vector{Vector{ByteSet}}
 end
-PatternExprs() = PatternExprs([], [], [], [], [])
+PatternExprs() = PatternExprs([], PrintExprs(), [], [], [])
 
 """
     ParseBranch

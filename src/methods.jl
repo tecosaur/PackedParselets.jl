@@ -17,20 +17,20 @@
 Full compilation pipeline: create state, walk the pattern, and assemble all
 method definitions for a bit-packed primitive type.
 
-Returns `(typeparts, state)`. `typeparts` is a `NamedTuple` of generated `Expr`s
-(one per method/definition). Use `Expr(:toplevel, values(typeparts)...)` to
-produce a block ready for `eval`, or manipulate individual components
-(e.g. replace `typeparts.print`) before assembling.
+Returns `(typeparts, state)`. `typeparts` is a `NamedTuple` of generated `Expr`s.
+Use `Expr(:toplevel, values(typeparts)...)` to produce a block ready for `eval`,
+or manipulate individual components before assembling.
 
 # Components
 
-- `typedef`: primitive type declaration + nbits/parsebounds/printbounds methods
+- `typedef`: primitive type declaration
+- `nbits`, `parsebounds`, `printbounds`: type-level query methods
 - `parsebytes`: `parsebytes` method
-- `tobytes`: `tobytes` method
-- `print`: `Base.print` method
-- `string`: `Base.string` method
-- `properties`: `propertynames` + `getproperty` methods
-- `segments`: `segments(::Type)` + `segments(::instance)` methods
+- `tobytes`: `tobytes` methods (buf+id and allocating)
+- `print`: `Base.write`, `Base.print`, and `Base.string` methods
+- `propertynames`: `Base.propertynames` method
+- `properties`: `Base.getproperty` method
+- `segments_type`, `segments_value`: `segments(::Type)` and `segments(::instance)` methods
 - `constructor`: positional constructor
 - `show`: `Base.show` method
 - `isless`: `Base.isless` method
@@ -66,7 +66,9 @@ in the `hookdata` field.
 function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
                        @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}) = (;))
     numbits = 8 * cld(state.bits, 8)
-    implement_casting!(state, exprs.print)
+    for field in (:direct, :getval, :getlen, :putval)
+        implement_casting!(state, getfield(exprs.print, field))
+    end
     root = state.branches[1]
     M = PackedParselets
     # Run finalize hooks, collecting extra expressions
@@ -82,22 +84,19 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
             end
         end
     end
+    pnames = Tuple(unique(map(first, exprs.properties)))
     typeparts = (;
-        typedef = Expr(:block,
-            :(Base.@__doc__(primitive type $(esc(name)) <: $(state.supertype) $numbits end)),
-            :($(GlobalRef(M, :nbits))(::Type{$(esc(name))}) = $(state.bits)),
-            :($(GlobalRef(M, :parsebounds))(::Type{$(esc(name))}) = $((root.parsed_min, root.parsed_max))),
-            :($(GlobalRef(M, :printbounds))(::Type{$(esc(name))}) = $((root.print_min, root.print_max)))),
+        typedef = :(Base.@__doc__(primitive type $(esc(name)) <: $(state.supertype) $numbits end)),
+        nbits = :($(GlobalRef(M, :nbits))(::Type{$(esc(name))}) = $(state.bits)),
+        parsebounds = :($(GlobalRef(M, :parsebounds))(::Type{$(esc(name))}) = $((root.parsed_min, root.parsed_max))),
+        printbounds = :($(GlobalRef(M, :printbounds))(::Type{$(esc(name))}) = $((root.print_min, root.print_max))),
         parsebytes = assemble_parsebytes(exprs.parse, exprs.segments, state, name),
         tobytes = assemble_tobytes(exprs.print, state, name),
         print = assemble_print(exprs.print, state, name),
-        string = assemble_string(state, name),
-        properties = Expr(:block,
-            :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(unique(map(first, exprs.properties))))),
-            assemble_properties(exprs.properties, exprs.segments, state, name)),
-        segments = Expr(:block,
-            assemble_segments_type(exprs.segments, state, name),
-            assemble_segments_value(exprs.segments, exprs.print, state, name)),
+        propertynames = :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $pnames),
+        properties = assemble_properties(exprs.properties, exprs.segments, state, name),
+        segments_type = assemble_segments_type(exprs.segments, state, name),
+        segments_value = assemble_segments_value(exprs.segments, exprs.print, state, name),
         constructor = assemble_constructor(exprs.segments, exprs.properties, state, name),
         show = assemble_show(exprs.segments, exprs.properties, state, name),
         isless = :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
@@ -158,63 +157,63 @@ end
 
 ## tobytes
 
-function assemble_tobytes(pexprs::Vector{ExprVarLine}, state::ParserState, name::Symbol)
+function strip_print_markers!(pexprs::Vector)
+    map!(strip_segsets! ∘ copy, pexprs, pexprs)
+    filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, pexprs)
+end
+
+function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
     root = state.branches[1]
-    maxbytes = root.print_max
-    minbytes = root.print_min
-    fixedlen = minbytes == maxbytes
+    fixedlen = root.print_min == root.print_max
     M = PackedParselets
-    # Build buffer-based expressions from the print expressions,
-    # stripping __segment_printed assignments used only by segments()
-    bufexprs = map(strip_segsets! ∘ copy, pexprs)
-    filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, bufexprs)
-    rewrite_bufprint!(bufexprs)
+    directexprs = strip_print_markers!(copy(print.direct))
+    rewrite_bufprint!(directexprs)
+    allocating = if fixedlen
+        :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
+              buf = Base.StringMemory($(root.print_max))
+              $(GlobalRef(M, :tobytes))(buf, id)
+              buf
+          end)
+    else
+        # Fused: getval+getlen → alloc exact buffer → putval
+        putvalexprs = strip_print_markers!(copy(print.putval))
+        rewrite_bufprint!(putvalexprs)
+        localdecls = [Expr(:(=), v, d) for (v, d) in print.vars]
+        :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
+              $(Expr(:local, localdecls...))
+              pos = 0
+              $(print.getval...)
+              $(print.getlen...)
+              buf = Base.StringMemory(pos)
+              pos = 0
+              $(putvalexprs...)
+              buf
+          end)
+    end
     Expr(:block,
         :(function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, id::$(esc(name)))
               pos = 0
-              $(bufexprs...)
+              $(directexprs...)
               pos
           end),
-        :(function $(GlobalRef(M, :tobytes))(id::$(esc(name)))
-              buf = $(if fixedlen
-                          :(Base.StringMemory($maxbytes))
-                      else
-                          :(Memory{UInt8}(undef, $maxbytes))
-                      end)
-              len = $(GlobalRef(M, :tobytes))(buf, id)
-              buf, len
-          end))
+        allocating)
 end
 
 ## print / string
 
-function assemble_print(pexprs::Vector{ExprVarLine}, ::ParserState, name::Symbol)
-    ioexprs = map(strip_segsets! ∘ copy, pexprs)
-    filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, ioexprs)
-    # Resolve __tobytes_print(io, ...) markers to print(io, ...) for the IO path
-    resolve_print_markers!(ioexprs)
-    :(function $(GlobalRef(Base, :print))(io::IO, id::$(esc(name)))
-          $(ioexprs...)
-      end)
-end
-
-function assemble_string(state::ParserState, name::Symbol)
-    root = state.branches[1]
-    fixedlen = root.print_min == root.print_max
+function assemble_print(::PrintExprs, state::ParserState, name::Symbol)
+    maxbytes = state.branches[1].print_max
     M = PackedParselets
-    if fixedlen
-        :(function $(GlobalRef(Base, :string))(id::$(esc(name)))
-              buf, _ = $(GlobalRef(M, :tobytes))(id)
-              Base.unsafe_takestring(buf)
-          end)
-    else
-        :(function $(GlobalRef(Base, :string))(id::$(esc(name)))
-              buf, len = $(GlobalRef(M, :tobytes))(id)
-              str = Base.StringMemory(len)
-              Base.unsafe_copyto!(pointer(str), pointer(buf), len)
-              Base.unsafe_takestring(str)
-          end)
-    end
+    Expr(:block,
+        :(function $(GlobalRef(Base, :write))(io::IO, id::$(esc(name)))
+              buf = Memory{UInt8}(undef, $maxbytes)
+              len = $(GlobalRef(M, :tobytes))(buf, id)
+              Base.unsafe_write(io, pointer(buf), len)
+          end),
+        :($(GlobalRef(Base, :print))(io::IO, id::$(esc(name))) =
+              ($(GlobalRef(Base, :write))(io, id); nothing)),
+        :($(GlobalRef(Base, :string))(id::$(esc(name))) =
+              Base.unsafe_takestring($(GlobalRef(M, :tobytes))(id))))
 end
 
 function resolve_print_markers!(exprs)
@@ -376,12 +375,13 @@ function assemble_segments_type(segs::Vector{ValueSegment}, ::ParserState, name:
       end)
 end
 
-function assemble_segments_value(segs::Vector{ValueSegment}, pexprs::Vector{ExprVarLine},
+function assemble_segments_value(segs::Vector{ValueSegment}, print::PrintExprs,
                                   ::ParserState, name::Symbol)
     isempty(segs) && return :()
     M = PackedParselets
     svars = Tuple{Int, Symbol}[]
-    pexprs2 = map(copy, pexprs)
+    pexprs2 = map(copy, print.direct)
+    resolve_print_markers!(pexprs2)
     for expr in pexprs2
         rewrite_segment_captures!(svars, segs, expr)
     end
@@ -484,16 +484,15 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
             replacement = if fname == :print
                 rewrite_print_call(args)
             elseif fname == :write && length(args) == 1
-                Any[:(buf[pos += 1] = $(args[1]))]
+                Any[:(@inbounds buf[pos += 1] = $(args[1]))]
             elseif fname == :printchars
                 rewrite_printchars(args)
             elseif fname == :__tobytes_print
                 tobytes_ref = GlobalRef(PackedParselets, :tobytes)
                 ebuf = gensym("ebuf")
-                elen = gensym("elen")
-                Any[:(($ebuf, $elen) = $tobytes_ref($(args...))),
-                    :(Base.unsafe_copyto!(pointer(buf, pos + 1), pointer($ebuf), $elen)),
-                    :(pos += $elen)]
+                Any[:($ebuf = $tobytes_ref($(args...))),
+                    :(Base.unsafe_copyto!(pointer(buf, pos + 1), pointer($ebuf), length($ebuf))),
+                    :(pos += length($ebuf))]
             end
             push!(splices, (i, replacement))
         elseif expr isa Expr
@@ -554,7 +553,7 @@ function gen_swar_bufprintchars(var, nchars::Int, bpc::Int, ranges)
         else
             :($base1 + $idx + ($idx >= $len1) * $delta)
         end
-        push!(exprs, :(buf[pos += 1] = $byte))
+        push!(exprs, :(@inbounds buf[pos += 1] = $byte))
     end
     exprs
 end
@@ -590,7 +589,7 @@ function bufprint_static(str::String)
     reduce(register_chunks(ncodeunits(str)), init = Expr[]) do exprs, (; offset, width, iT)
         value = pack_bytes(str, offset, width, iT)
         if iT === UInt8
-            push!(exprs, :(buf[pos += 1] = $value))
+            push!(exprs, :(@inbounds buf[pos += 1] = $value))
         else
             push!(exprs,
                   :(Base.unsafe_store!(Ptr{$iT}(pointer(buf, pos + 1)), htol($value))),

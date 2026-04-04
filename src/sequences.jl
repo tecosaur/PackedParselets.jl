@@ -77,28 +77,28 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
         if T isa Type && T <: Unsigned
             get(nctx, :max, nothing) === nothing ||
                 throw(ArgumentError("Cannot specify both a UInt type and max for digits"))
-            nctx = NodeCtx(nctx, :max, Int(typemax(T)))
+            nctx = NodeCtx(nctx, :max, Int128(typemax(T)))
             args = Any[]
         end
     end
     base = get(nctx, :base, 10)::Int
-    min = get(nctx, :min, 0)::Int
-    max = get(nctx, :max, nothing)
-    if max isa Expr
-        max = Core.eval(state.mod, max)::Int
+    vmin = Int128(get(nctx, :min, 0)::Integer)
+    vmax = get(nctx, :max, nothing)
+    if vmax isa Expr
+        vmax = Core.eval(state.mod, vmax)::Integer
     end
     pad = get(nctx, :pad, 0)::Int
     skipbytes = parse_skip_kwarg(nctx)
-    mindigits, maxdigits = parse_digit_range(args, max, base)
-    min > 0 && (mindigits = Base.max(mindigits, ndigits(min; base)))
+    mindigits, maxdigits = parse_digit_range(args, vmax, base)
+    vmin > 0 && (mindigits = max(mindigits, ndigits(vmin; base)))
     fixedwidth = mindigits == maxdigits
-    isnothing(max) && (max = (base^maxdigits) - 1)
+    vmax = Int128(something(vmax, Int128(base)^maxdigits - 1))
     option = get(nctx, :optional, nothing)
     claims = is_sentinel_unclaimed(nctx)
-    range = max - min + 1 + claims
-    directval = cardbits(range) == cardbits(max + 1) && (min > 0 || !claims)
+    range = vmax - vmin + 1 + claims
+    directval = cardbits(range) == cardbits(vmax + 1) && (vmin > 0 || !claims)
     dbits = cardbits(range)
-    dI = cardtype(cardbits(max + 1))
+    dI = cardtype(cardbits(vmax + 1))
     dT = cardtype(dbits)
     fieldvar = get(nctx, :fieldvar, gensym("digits"))
     bitpos = state.bits + dbits
@@ -108,7 +108,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     groups = parse_groups_kwarg(nctx, maxdigits, skipbytes)
     !isnothing(groups) && !fixedwidth &&
         throw(ArgumentError("groups requires fixed-width digits"))
-    dspec = (; base, mindigits, maxdigits, min, max, pad, dI, dT, claims_sentinel=claims, skipbytes, exclude, groups)
+    dspec = (; base, mindigits, maxdigits, vmin, vmax, pad, dI, dT, claims_sentinel=claims, skipbytes, exclude, groups)
     parsed = gen_digit_parse(state, nctx, fieldvar, option, dspec)
     fnum = Symbol("$(fieldvar)_num")
     (; parsevar, directvar) = parsed
@@ -124,21 +124,21 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     # Extract: raw bits → user-facing integer value
     fextract = :($fnum = $(emit_extract(state, bitpos, dbits)))
     fcast = if dI == dT fnum else :($fnum % $dI) end
-    fvalue = if iszero(min) && claims
+    fvalue = if iszero(vmin) && claims
         :($fcast - $(one(dI)))
-    elseif !directval && min - claims > 0
-        :(($fcast + $(dI(min - claims))) % $dI)
+    elseif !directval && vmin - claims > 0
+        :(($fcast + $(dI(vmin - claims))) % $dI)
     else
         fcast
     end
-    propvalue = if max < typemax(dI) ÷ 2
+    propvalue = if vmax < typemax(dI) ÷ 2
         :($fvalue % $(signed(dI)))
     else
         fvalue
     end
     printinfo = if isnothing(groups)
         digits_print_exprs(fextract, dT, fieldvar, fvalue, directvar, fnum,
-                           fixedwidth, maxdigits, pad, base)
+                           fixedwidth, maxdigits, pad, base, vmax)
     else
         grouped_digits_print(fextract, dT, fieldvar, fvalue, directvar, fnum,
                              groups, first(skipbytes), base)
@@ -151,7 +151,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, propvalue, body)
     # Metadata and bytespans
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
-    seg_shortform, seg_desc = digits_meta(base, min, max, pad, mindigits, maxdigits, fixedwidth)
+    seg_shortform, seg_desc = digits_meta(base, vmin, vmax, pad, mindigits, maxdigits, fixedwidth)
     sentinel = if claims SentinelSpec((0, dbits)) end
     has_skip = !isnothing(skipbytes)
     parsed_max = if has_skip
@@ -161,8 +161,8 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     end
     fixedpad = if fixedwidth maxdigits else 0 end
     nseps = if isnothing(groups) 0 else length(groups) - 1 end
-    printmin = Base.max(ndigits(Base.max(min, 1); base), pad, fixedpad) + nseps
-    printmax = Base.max(ndigits(max; base), pad, fixedpad) + nseps
+    printmin = max(ndigits(max(vmin, 1); base), pad, fixedpad) + nseps
+    printmax = max(ndigits(vmax; base), pad, fixedpad) + nseps
     digit_set = digits_byteset(base)
     bytespans = if has_skip
         Vector{ByteSet}[]
@@ -178,7 +178,8 @@ end
 
 function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, fvalue,
                             directvar::Bool, fnum::Symbol,
-                            fixedwidth::Bool, maxdigits::Int, pad::Int, base::Int)
+                            fixedwidth::Bool, maxdigits::Int, pad::Int, base::Int,
+                            max::Integer)
     printvar = if directvar fnum else fieldvar end
     printpad = if fixedwidth && maxdigits > 1; maxdigits
     elseif pad > 0; pad
@@ -193,7 +194,7 @@ function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, fval
     directvar || push!(getval, :($fieldvar = $fvalue))
     # getlen: compile-time constant when pad ≥ maxdigits, otherwise runtime
     lenex = if printpad >= maxdigits; printpad
-    else gen_digit_count(printvar, maxdigits, base, Base.max(printpad, 1)) end
+    else gen_digit_count(printvar, maxdigits, base, Base.max(printpad, 1), max) end
     vars = Pair{Symbol,Any}[fnum => zero(dT)]
     directvar || push!(vars, fieldvar => zero(dT))
     PrintExprs(direct = ExprVarLine[getval..., printex],
@@ -234,9 +235,13 @@ function grouped_digits_print(fextract::Expr, dT::DataType, fieldvar::Symbol, fv
 end
 
 # Branchless digit count: min + (x >= base^min) + (x >= base^(min+1)) + ...
-function gen_digit_count(var, maxdigits::Int, base::Int=10, mindigits::Int=1)
+# Thresholds that exceed the variable's type range are omitted (always false).
+function gen_digit_count(var, maxdigits::Int, base::Int=10, mindigits::Int=1,
+                         maxval::Integer=Int128(base)^maxdigits - 1)
     foldl(mindigits:maxdigits-1; init=mindigits) do ex, i
-        :($ex + ($var >= $(base^i)))
+        threshold = Int128(base)^i
+        threshold > maxval && return ex
+        :($ex + ($var >= $(threshold > typemax(Int64) ? UInt64(threshold) : Int(threshold))))
     end
 end
 
@@ -244,8 +249,8 @@ function digits_impart_exprs(state::ParserState, argvar::Symbol, fnum::Symbol,
                              parsevar::Symbol, dI::DataType, dT::DataType,
                              dspec::NamedTuple, directval::Bool, claims::Bool,
                              bitpos::Int)
-    (; min, max) = dspec
-    offset = min - claims
+    (; vmin, vmax) = dspec
+    offset = vmin - claims
     encode_expr = if directval || iszero(offset)
         if dI != dT; :($parsevar = $fnum % $dT) else :($parsevar = $fnum) end
     elseif offset > 0
@@ -254,17 +259,17 @@ function digits_impart_exprs(state::ParserState, argvar::Symbol, fnum::Symbol,
         :($parsevar = ($fnum + $(one(dT))) % $dT)
     end
     body = Expr[]
-    push!(body, :($argvar >= $min || throw(ArgumentError(
-        string("Value ", $argvar, " is below minimum ", $min)))))
-    push!(body, :($argvar <= $max || throw(ArgumentError(
-        string("Value ", $argvar, " is above maximum ", $max)))))
+    push!(body, :($argvar >= $vmin || throw(ArgumentError(
+        string("Value ", $argvar, " is below minimum ", $vmin)))))
+    push!(body, :($argvar <= $vmax || throw(ArgumentError(
+        string("Value ", $argvar, " is above maximum ", $vmax)))))
     push!(body, :($fnum = $argvar % $dI))
     directval || push!(body, encode_expr)
     push!(body, emit_pack(state, dT, parsevar, bitpos))
     body
 end
 
-function digits_meta(base::Int, min::Int, max::Int, pad::Int,
+function digits_meta(base::Int, vmin::Int128, vmax::Int128, pad::Int,
                      mindigits::Int, maxdigits::Int, fixedwidth::Bool)
     charset = if base <= 10; "0-$(Char('0' + base - 1))"
     else "0-9A-$(Char('A' + base - 11))" end
@@ -273,12 +278,12 @@ function digits_meta(base::Int, min::Int, max::Int, pad::Int,
     desc = string(if fixedwidth; "$maxdigits" else "$mindigits-$maxdigits" end,
                   if isone(maxdigits) " digit" else " digits" end,
                   if base != 10 " in base $base" else "" end,
-                  if min > 0 && max < base^maxdigits - 1
-                      " between $(string(min; base, pad)) and $(string(max; base, pad))"
-                  elseif min > 0
-                      ", at least $(string(min; base, pad))"
-                  elseif max < base^maxdigits - 1
-                      ", at most $(string(max; base, pad))"
+                  if vmin > 0 && vmax < Int128(base)^maxdigits - 1
+                      " between $(string(vmin; base, pad)) and $(string(vmax; base, pad))"
+                  elseif vmin > 0
+                      ", at least $(string(vmin; base, pad))"
+                  elseif vmax < Int128(base)^maxdigits - 1
+                      ", at most $(string(vmax; base, pad))"
                   else "" end)
     shortform, desc
 end

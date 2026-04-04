@@ -418,15 +418,15 @@ end
 # expressions, range checks, and error messages. Used by the three
 # strategy functions below.
 function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, dspec::NamedTuple)
-    (; base, maxdigits, min, max, pad, exclude) = dspec
+    (; base, maxdigits, vmin, vmax, pad, exclude) = dspec
     checks = Expr[]
-    if min > 0
-        fail = build_fail_expr!(state, nctx, "Expected at least a value of $(string(min; base, pad))")
-        push!(checks, :($var >= $min || $fail))
+    if vmin > 0
+        fail = build_fail_expr!(state, nctx, "Expected at least a value of $(string(vmin; base, pad))")
+        push!(checks, :($var >= $vmin || $fail))
     end
-    if max < base^maxdigits - 1
-        fail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(max; base, pad))")
-        push!(checks, :($var <= $max || $fail))
+    if vmax < Int128(base)^maxdigits - 1
+        fail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(vmax; base, pad))")
+        push!(checks, :($var <= $vmax || $fail))
     end
     if !isnothing(exclude)
         for r in exclude
@@ -450,18 +450,18 @@ end
 
 function compute_digit_vocab(state::ParserState, nctx::NodeCtx,
                              fieldvar::Symbol, option, dspec::NamedTuple)
-    (; base, mindigits, maxdigits, min, max, dI, dT, claims_sentinel) = dspec
+    (; base, mindigits, maxdigits, vmin, vmax, dI, dT, claims_sentinel) = dspec
     fixedwidth = mindigits == maxdigits
     fnum = Symbol("$(fieldvar)_num")
     # numexpr: transform raw fnum into the stored representation
-    directval = cardbits(max - min + 1 + claims_sentinel) ==
-                cardbits(max + 1) && (min > 0 || !claims_sentinel)
+    directval = cardbits(vmax - vmin + 1 + claims_sentinel) ==
+                cardbits(vmax + 1) && (vmin > 0 || !claims_sentinel)
     numexpr = if directval
         if dI != dT; :($fnum % $dT) else fnum end
-    elseif iszero(min) && claims_sentinel
+    elseif iszero(vmin) && claims_sentinel
         :($fnum + $(one(dT)))
-    elseif min - claims_sentinel > 0
-        :(($fnum - $(dT(min - claims_sentinel))) % $dT)
+    elseif vmin - claims_sentinel > 0
+        :(($fnum - $(dT(vmin - claims_sentinel))) % $dT)
     else
         if dI != dT; :($fnum % $dT) else fnum end
     end

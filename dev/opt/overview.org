@@ -27,12 +27,12 @@ Code generation proceeds in five phases:
 
 Each pattern node appends to three vectors:
 
-+ Parse :: advance ~pos~ through ~idbytes~, validate, extract, and pack into the ~parsed~ bit-accumulator.
-+ Print :: extract values from ~id~ and write to ~io~, reconstructing the canonical string.
++ Parse :: advance ~pos~ through ~data~, validate, extract, and pack into the ~parsed~ bit-accumulator.
++ Print :: extract values from ~val~ and write to ~io~, reconstructing the canonical string.
 + Properties :: per-field extraction code, keyed by the =:name(...)= field name.
 
-These expressions all reference shared variables (~pos~, ~idbytes~, ~nbytes~, ~parsed~,
-~id~, ~io~) that are bound by the enclosing function templates.
+These expressions all reference shared variables (~pos~, ~data~, ~nbytes~, ~parsed~,
+~val~, ~io~) that are bound by the enclosing function templates.
 
 * Context threading
 
@@ -56,7 +56,7 @@ is the branch's ~parsed_max~ at the time of emission:
 + ~__static_length_check(branch_id, emission_max, n)~ :: compile-time branch selection for choosing between wide and narrow [[file:dataloading.org][load paths]].
 + ~__branch_check~ :: root upfront guard or optional entry guard.
 
-Casting sentinels (~__cast_to_id~ / ~__cast_from_id~) are replaced with
+Casting sentinels (~__cast_to_packed~ / ~__cast_from_packed~) are replaced with
 ~Core.Intrinsics~ operations (~zext_int~, ~trunc_int~, or ~bitcast~) once the final type
 size is known.
 

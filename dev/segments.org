@@ -25,7 +25,7 @@ printed forms into a string.
 ** Optional
 
 ~optional(args...)~ wraps content that may be absent. Internally
-this is equivalent to ~choice(seq(args...), "")~ — a choice between
+this is equivalent to ~choice(seq(args...), "")~: a choice between
 the content and nothing. On parse failure within the optional,
 ~pos~ is rewound and the optional is marked absent. Properties
 return ~nothing~ when absent.
@@ -93,7 +93,7 @@ Each character is packed into \lceil{}log_2(alphabet size)\rceil{} bits.
 
 All character sequence segments (~letters~, ~alphnum~, ~hex~, ~charset~)
 support the ~skip~ and ~groups~ keywords with the same semantics as
-~digits~ — see above.
+~digits~: see above.
 
 ** ~alphnum~
 
@@ -181,8 +181,8 @@ Arms that share the same field name produce a single property that
 dispatches on the discriminant:
 
 #+begin_src julia
-choice(seq("VCV", :id(digits(9, pad=9))),
-       seq("RCV", :id(digits(8, pad=8))))
+choice(seq("VCV", :id(digits(9))),
+       seq("RCV", :id(digits(8))))
 # .id returns the active arm's value
 #+end_src
 
@@ -193,8 +193,8 @@ user-specified tag values:
 
 #+begin_src julia
 choice(:kind,
-  :alpha => seq("A", :val(digits(2, pad=2))),
-  :beta  => seq("B", :val(digits(3, pad=3))))
+  :alpha => seq("A", :val(digits(2))),
+  :beta  => seq("B", :val(digits(3))))
 #+end_src
 
 The first argument is a ~QuoteNode~ naming the tag property.
@@ -203,7 +203,7 @@ returns ~:alpha~ or ~:beta~ depending on which arm matched.
 Tags may be any type (symbols, strings, integers) so long as all
 arms use the same type.
 
-Tagged choices nest naturally — an inner tagged choice inside an
+Tagged choices nest naturally: an inner tagged choice inside an
 outer choice arm returns ~nothing~ for its tag when the outer arm
 is inactive.
 
@@ -235,7 +235,7 @@ Uses [[file:opt/stringmatch.org][word-sized comparisons]].
 
 Strip optional prefixes on parse. Does not store any value.
 
-Each argument is a sequential step — tried in order, each optionally
+Each argument is a sequential step: tried in order, each optionally
 stripping one prefix.  A bare string is a step with one alternative;
 ~choice(...)~ provides multiple alternatives at the same position.
 

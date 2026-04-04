@@ -13,7 +13,7 @@ allocation or regular expressions.
 Given a pattern like:
 
 #+begin_src julia
-("PFX-", :id(digits(4, pad=4)), optional(".v", :ver(digits(max=255))))
+("PFX-", :id(digits(4)), optional(".v", :ver(digits(max=255))))
 #+end_src
 
 =PackedParselets= generates:

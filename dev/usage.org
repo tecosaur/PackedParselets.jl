@@ -65,7 +65,7 @@ call syntax invokes segment handlers:
 
 #+begin_src julia
 # Literal prefix, captured digit field, optional version suffix
-("PFX-", :id(digits(4, pad=4)), optional(".v", :ver(digits(max=255))))
+("PFX-", :id(digits(4)), optional(".v", :ver(digits(max=255))))
 #+end_src
 
 Fields are captured with =:name(...)= syntax and become type properties.

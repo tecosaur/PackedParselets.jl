@@ -38,11 +38,11 @@ parsed |= widen(value) << (type_bits - field_end_bit)
 Extraction reverses this with a right shift and mask:
 
 #+begin_src julia
-value = (id >> (type_bits - field_end_bit)) & ((1 << field_width) - 1)
+value = (val >> (type_bits - field_end_bit)) & ((1 << field_width) - 1)
 #+end_src
 
 All shifts and masks are compile-time constants. The actual operations use
-~Core.Intrinsics~ (~zext_int~, ~trunc_int~, ~bitcast~) since the identifier type is not
+~Core.Intrinsics~ (~zext_int~, ~trunc_int~, ~bitcast~) since the packed type is not
 a standard integer (see casting sentinels in the [[file:overview.org][code generation overview]]).
 
 * Field encoding

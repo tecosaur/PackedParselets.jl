@@ -266,6 +266,20 @@ function check_roundtrips(T, inputs)
 end
 
 """
+    parse_allocations(T, input) -> Int
+
+Bytes allocated by a warmed-up `parsebytes(T, codeunits(input))`.
+
+Kept out of the testsets: `@allocated` force-compiles its enclosing top-level
+thunk, which for the one-block test suite means the entire file.
+"""
+function parse_allocations(::Type{T}, input) where {T}
+    data = codeunits(input)
+    PP.parsebytes(T, data)
+    @allocated PP.parsebytes(T, data)
+end
+
+"""
     @test_neverthrow f(arg1, ::Type, ...)
 
 Test that the LLVM IR for the given method signature contains no `throw` calls
@@ -306,6 +320,8 @@ ttypeof(x) = typeof(x)
     @test x.val == 42
     @test string(x) == "AB0042"
     @test tryparse(LitDigit, "AB0042") == x
+    # Casefold (default on) must accept lowercase against an uppercase literal.
+    @test tryparse(LitDigit, "ab0042") == x
     @test tryparse(LitDigit, "XX0042") === nothing
     @test tryparse(LitDigit, "AB") === nothing
     # Round-trip
@@ -317,6 +333,10 @@ ttypeof(x) = typeof(x)
     @test isprimitivetype(LitDigit)
     @test PP.parsebounds(LitDigit) == (6, 6)
     @test PP.printbounds(LitDigit) == (6, 6)
+    # Register-width uppercase literal: the casefold mask must cover all 4 bytes.
+    @defpacked Lit4 ("HGNC", :val(digits(1:5)))
+    @test parse(Lit4, "hgnc42").val == 42
+    @test parse(Lit4, "HGNC42") == parse(Lit4, "hgnc42")
 end
 
 @testset "digits(UInt type)" begin
@@ -1926,7 +1946,8 @@ end
         @testset "LinearChoice (linear scan fallback)" begin
             iddef = :(@defpacked LinearChoice (:pfx(choice("ab", "abc", "abcd", "abcde")),
                        :id(digits(max=99))))
-            @test parsebytes_complexity(iddef) == (branches=7:7, branch_total=7, ops=42:44)
+            # Unrolled linear matcher: one register-compare arm per option.
+            @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=40:54)
             eval(iddef)
             for p in ("ab", "abc", "abcd", "abcde")
                 id = parse(LinearChoice, "$(p)42")
@@ -2061,7 +2082,7 @@ end
             # the same output. No field wrapper: the choice is non-value.
             iddef = :(@defpacked ChoiceIs (choice("alpha", "beta", "rc", is="beta"),
                        "-", :id(digits(max=999))))
-            @test parsebytes_complexity(iddef) == (branches=8:9, branch_total=9, ops=44:45)
+            @test parsebytes_complexity(iddef) == (branches=7:15, branch_total=15, ops=42:54)
             eval(iddef)
             @test parse(ChoiceIs, "beta-42").id == 42
             @test parse(ChoiceIs, "alpha-42").id == 42
@@ -2079,7 +2100,7 @@ end
         @testset "ChoiceIs allowempty (is= with empty option)" begin
             iddef = :(@defpacked ChoiceIsEmpty (choice("v", "", is="v"),
                        :id(digits(max=999))))
-            @test parsebytes_complexity(iddef) == (branches=6:8, branch_total=8, ops=24:45)
+            @test parsebytes_complexity(iddef) == (branches=6:10, branch_total=10, ops=24:48)
             eval(iddef)
             @test parse(ChoiceIsEmpty, "v42").id == 42
             @test parse(ChoiceIsEmpty, "42").id == 42
@@ -2157,7 +2178,7 @@ end
             # "v" is a prefix of "v2": must pick longest match
             iddef = :(@defpacked PfxChoice (:tag(choice("v", "v2", "rc")),
                        :id(digits(max=99))))
-            @test parsebytes_complexity(iddef) == (branches=6:6, branch_total=6, ops=40:42)
+            @test parsebytes_complexity(iddef) == (branches=6:10, branch_total=10, ops=40:47)
             eval(iddef)
             @test parse(PfxChoice, "v242").tag === :v2
             @test parse(PfxChoice, "v42").tag === :v
@@ -2167,6 +2188,38 @@ end
             check_roundtrips(PfxChoice, (
                 "v0", "v99", "v20", "v299", "rc0", "rc99"))
             @test_neverthrow PP.parsebytes(PfxChoice, ::Vector{UInt8})
+        end
+
+        @testset "LinearCasefoldNonLetter (linear scan, non-letter discriminator)" begin
+            # Bare "cl" forces minlen 2 -> no hash window -> linear scan path.
+            # The discriminating bytes ':'/'_' are non-letters: casefolding must
+            # not corrupt them (a blanket `| 0x20` made the "cl_" arm unreachable).
+            iddef = :(@defpacked CLkind (:k(choice("cl:", "cl_", "cl")),
+                       :id(digits(max=99))))
+            @test parsebytes_complexity(iddef) == (branches=6:12, branch_total=12, ops=40:49)
+            eval(iddef)
+            @test parse(CLkind, "cl:42").k === Symbol("cl:")
+            @test parse(CLkind, "cl_42").k === Symbol("cl_")
+            @test parse(CLkind, "cl42").k === :cl
+            check_roundtrips(CLkind, ("cl:0", "cl_0", "cl0", "cl:99", "cl_99"))
+            @test_neverthrow PP.parsebytes(CLkind, ::Vector{UInt8})
+            # Linear scan must not box (heterogeneous option-tuple iteration did).
+            @test parse_allocations(CLkind, "cl_42") == 0
+        end
+
+        @testset "SkipChoiceEmpty (skip with empty + non-letter alternatives)" begin
+            # Two-step skip; the second step's empty arm exercises allowempty in
+            # the skip path, which must not reach the choice matcher.
+            iddef = :(@defpacked CLskip (skip("cl", choice("", ":", "_")),
+                       :id(digits(max=99))))
+            @test parsebytes_complexity(iddef) == (branches=7:10, branch_total=10, ops=23:41)
+            eval(iddef)
+            for sep in ("", ":", "_")
+                @test parse(CLskip, "cl$(sep)42").id == 42
+            end
+            @test parse(CLskip, "42").id == 42  # whole prefix optional
+            @test_neverthrow PP.parsebytes(CLskip, ::Vector{UInt8})
+            @test parse_allocations(CLskip, "cl_42") == 0
         end
 
     end # choice
@@ -2258,6 +2311,29 @@ end
             @test string(parse(SkipCP, "12-34")) == "12.34"
             check_roundtrips(SkipCP, ("12.34", "00.00", "99.99"))
             @test_neverthrow PP.parsebytes(SkipCP, ::Vector{UInt8})
+        end
+        @testset "SkipLongest (never a shorter skip when a longer one is present)" begin
+            # The trailing field would silently absorb a short skip's leftovers.
+            # Prefix-related options collide in every hash window -> linear path.
+            iddef = :(@defpacked SkipPfx (skip(choice("ab", "abc", "abcd")),
+                       :x(letters(1:4, lower=true))))
+            @test parsebytes_complexity(iddef) == (branches=3:10, branch_total=10, ops=18:30)
+            eval(iddef)
+            @test parse(SkipPfx, "abcdef").x == "ef"
+            @test parse(SkipPfx, "abcxy").x == "xy"
+            @test parse(SkipPfx, "abz").x == "z"
+            @test parse(SkipPfx, "ABCDef").x == "ef"
+            @test_neverthrow PP.parsebytes(SkipPfx, ::Vector{UInt8})
+            # No option is a prefix of another -> hash-eligible
+            iddef = :(@defpacked SkipDisjoint (skip(choice("pxd", "rpxd", "abc")),
+                       :x(letters(1:4, lower=true))))
+            @test parsebytes_complexity(iddef) == (branches=3:9, branch_total=9, ops=18:31)
+            eval(iddef)
+            @test parse(SkipDisjoint, "rpxdab").x == "ab"
+            @test parse(SkipDisjoint, "pxdab").x == "ab"
+            @test parse(SkipDisjoint, "abcde").x == "de"
+            @test parse(SkipDisjoint, "xyz").x == "xyz"
+            @test_neverthrow PP.parsebytes(SkipDisjoint, ::Vector{UInt8})
         end
     end # skip
 

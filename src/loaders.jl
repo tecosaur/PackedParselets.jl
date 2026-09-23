@@ -86,7 +86,7 @@ function pack_chunk(str::String, chunk::@NamedTuple{offset::Int, width::Int, iT:
     mask = reduce(|, (begin
         if j < valid
             byte = codeunit(str, offset + j + 1)
-            if casefold && UInt8('a') <= byte <= UInt8('z')
+            if casefold && UInt8('a') <= (byte | 0x20) <= UInt8('z')
                 iT(0xDF) << (8j)
             else
                 iT(0xFF) << (8j)

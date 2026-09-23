@@ -332,35 +332,23 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, cctx)
     perm = sortperm(mopts, by=ncodeunits, rev=true)
     mopts = mopts[perm]
     sopts = sopts[perm]
-    opts = if casefold; mopts else sopts end
-    optlens = Tuple(ncodeunits.(opts))
-    optcus = Tuple(Tuple(codeunits(s)) for s in opts)
-    loadbyte = if casefold
-        :(@inbounds data[pos + j - 1] | 0x20)
-    else
-        :(@inbounds data[pos + j - 1])
-    end
-    action = onmatch(:(i % $cint))
-    loop_body = quote
-        found = true
-        for j in 1:prefixlen
-            $loadbyte == prefixbytes[j] || (found = false; break)
+    # Unrolled if/elseif rather than iterating a tuple of byte-tuples, which boxes.
+    arms = map(enumerate(sopts)) do (i, opt)
+        n = ncodeunits(opt)
+        fit = :(nbytes - pos + 1 >= $n)
+        nomatch = gen_literal_mismatch(state, nctx, opt, casefold)
+        cond = :($fit && !$nomatch)
+        body = quote
+            $(onmatch(:($(i % cint))))
+            pos += $n
         end
-        if found; $action; pos += prefixlen; break end
+        cond => body
     end
-    guarded_loop = :(
-        for (i, (prefixlen, prefixbytes)) in enumerate(zip($optlens, $optcus))
-            nbytes - pos + 1 >= prefixlen || continue
-            $(loop_body.args...)
-        end)
-    unguarded_loop = :(
-        for (i, (prefixlen, prefixbytes)) in enumerate(zip($optlens, $optcus))
-            $(loop_body.args...)
-        end)
-    maxlen = maximum(optlens)
-    all_fit = emit_static_lengthcheck(state, nctx, maxlen)
-    matcher = ExprVarLine[Expr(:if, all_fit, unguarded_loop, guarded_loop)]
-    (matcher, mopts, sopts)
+    chain = foldr(arms; init = nothing) do (cond, body), rest
+        if isnothing(rest); Expr(:if, cond, body)
+        else Expr(:elseif, cond, body, rest) end
+    end
+    (ExprVarLine[chain], mopts, sopts)
 end
 
 ## Perfect hashing

@@ -53,11 +53,14 @@ end
 
 function gen_skip_step(state::ParserState, nctx::NodeCtx,
                       alts::Vector{String}, casefold::Bool)
+    # "" matches zero bytes, which a skip's no-match fall-through already covers.
+    alts = filter(!isempty, alts)
     refs = if casefold map(lowercase, alts) else alts end
-    if length(refs) == 1
+    if length(refs) <= 1
         return gen_static_lchop(refs, casefold)
     end
-    # Multiple alternatives: use the choice matcher for optimal dispatch
+    # Multiple alternatives: the choice matcher's hash dispatch narrows the
+    # candidates to verify, rather than trying each in turn.
     fieldvar = gensym("skip_match")
     cint = cardtype(cardbits(length(refs) + 1))
     cctx = (; mopts=refs, sopts=alts, casefold, fieldvar,
@@ -133,37 +136,23 @@ end
     gen_static_lchop(prefixes, casefold) -> Expr
 
 Generate an if/elseif chain that strips the first matching prefix by advancing
-`pos`. Prefixes are grouped by length (longest first), with same-length
-alternatives as nested if/elseif.
+`pos`. Prefixes are tried longest-first, so a failed match falls through to a
+shorter prefix even when one prefix is a prefix of another (e.g. "CL:" / "CL").
 
-Assumes casefolded prefixes are already lowercased.
+Assumes prefixes are non-empty, and casefolded prefixes already lowercased.
 Expects `data`, `pos`, `nbytes` in scope.
 """
 function gen_static_lchop(prefixes::Vector{String}, casefold::Bool)
-    groups = Dict{Int, Vector{String}}()
-    for p in prefixes
-        push!(get!(Vector{String}, groups, ncodeunits(p)), p)
+    ordered = sort(prefixes, by=ncodeunits, rev=true)
+    arms = map(ordered) do p
+        nb = ncodeunits(p)
+        cond = :(nbytes - pos + 1 >= $nb && $(conjoin_match(p, casefold)))
+        cond => :(pos += $nb)
     end
-    lengths = sort!(collect(keys(groups)), rev=true)
-    branches = map(lengths) do nb
-        grp = groups[nb]
-        lencheck = :(nbytes - pos + 1 >= $nb)
-        if length(grp) == 1
-            :(if $lencheck && $(conjoin_match(only(grp), casefold)); pos += $nb end)
-        else
-            inner = :(if $(conjoin_match(last(grp), casefold)); pos += $nb end)
-            for i in length(grp)-1:-1:1
-                inner = Expr(:elseif, conjoin_match(grp[i], casefold), :(pos += $nb), inner)
-            end
-            :(if $lencheck; $inner end)
-        end
+    foldr(arms; init = nothing) do (cond, body), rest
+        if isnothing(rest); Expr(:if, cond, body)
+        else Expr(:elseif, cond, body, rest) end
     end
-    result = branches[end]
-    for i in length(branches)-1:-1:1
-        br = branches[i]
-        result = Expr(:if, br.args[1], br.args[2], result)
-    end
-    result
 end
 
 ## String matching primitives

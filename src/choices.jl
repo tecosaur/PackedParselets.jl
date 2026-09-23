@@ -354,24 +354,26 @@ end
 function build_linear_matcher(state::ParserState, nctx::NodeCtx, @nospecialize(cctx))
     (; mopts, sopts, casefold, onmatch, cint) = cctx
     # Sort longest-first for greedy matching when options share prefixes
-    perm = sortperm(mopts, by=ncodeunits, rev=true)
+    perm = sortperm(mopts, by=ncodeunits, rev=true, alg=InsertionSort)
     mopts = mopts[perm]
     sopts = sopts[perm]
     # Unrolled if/elseif rather than iterating a tuple of byte-tuples, which boxes.
-    arms = map(enumerate(sopts)) do (i, opt)
-        n = ncodeunits(opt)
+    # Built last option first by a loop, not a closure: `cint` is a type, which a
+    # closure would specialise on.
+    chain = nothing
+    for i in reverse(eachindex(sopts))
+        n = ncodeunits(sopts[i])
         fit = :(nbytes - pos + 1 >= $n)
-        nomatch = gen_literal_mismatch(state, nctx, opt, casefold)
-        cond = :($fit && !$nomatch)
+        nomatch = gen_literal_mismatch(state, nctx, sopts[i], casefold)
         body = quote
             $(onmatch(:($(i % cint))))
             pos += $n
         end
-        cond => body
-    end
-    chain = foldr(arms; init = nothing) do (cond, body), rest
-        if isnothing(rest); Expr(:if, cond, body)
-        else Expr(:elseif, cond, body, rest) end
+        chain = if isnothing(chain)
+            Expr(:if, :($fit && !$nomatch), body)
+        else
+            Expr(:elseif, :($fit && !$nomatch), body, chain)
+        end
     end
     (ExprVarLine[chain], mopts, sopts)
 end
@@ -486,7 +488,7 @@ function classify_hash(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask::
                        hash::WindowHash, injective::Bool; max_tablelen::Int = 4 * length(hvals))
     nopts = length(hvals)
     allunique(hvals) || return nothing
-    sorted_indices = sortperm(hvals)
+    sorted_indices = sortperm(hvals, alg=InsertionSort)
     lo, hi = Int(hvals[first(sorted_indices)]), Int(hvals[last(sorted_indices)])
     # Direct: consecutive values, so the hash less an offset is the option index
     if hi - lo + 1 == nopts

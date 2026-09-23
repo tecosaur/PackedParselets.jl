@@ -474,7 +474,7 @@ function collapse_letter_ranges(ranges, target::Symbol)
             push!(out, mapped)
         end
     end
-    sort!(out; by=first)
+    sort!(out; by=first, alg=InsertionSort)
 end
 
 function compile_charseq_impl(state::ParserState, nctx::NodeCtx,

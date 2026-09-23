@@ -30,19 +30,12 @@ public ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet, PrintExprs,
     build_fail_expr!, emit_pack, emit_extract, emit_lengthcheck,
     is_sentinel_unclaimed, implement_casting!
 
-precompile(Core.kwcall,
-           (NamedTuple{(:supertype, :casefold, :globals, :global_kwargs),
-                       Tuple{Type, Bool, NamedTuple, Tuple}},
-            typeof(maketype), NamedTuple, Module, Symbol, Any))
-precompile(pattern_dispatch!,
-           (PatternExprs, ParserState, NodeCtx, NamedTuple, Tuple, Expr))
-
 # Run maketype on representative patterns so the choice/charseq codegen functions
 # (build_hash_matcher, choice_setup, build_linear_matcher, gen_tail_verify, …) are
-# inferred and cached here, instead of re-inferred at every downstream @defid. The
-# `ph`/`cctx` argument types involve a runtime-selected hash closure, so only an
-# actual maketype call — not a hand-written precompile directive — can warm them.
-# maketype stops before eval, so no type is defined or leaked.
+# inferred and cached here, instead of re-inferred at every downstream @defid.
+# Segment handlers are reached through `SegmentDef` function fields, which
+# inference can't follow from an entry-point precompile directive, so only actual
+# maketype calls warm them. maketype stops before eval, so no type is defined or leaked.
 using PrecompileTools: @compile_workload
 @compile_workload begin
     m = @__MODULE__

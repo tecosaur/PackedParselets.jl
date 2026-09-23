@@ -143,7 +143,7 @@ Assumes prefixes are non-empty, and casefolded prefixes already lowercased.
 Expects `data`, `pos`, `nbytes` in scope.
 """
 function gen_static_lchop(prefixes::Vector{String}, casefold::Bool)
-    ordered = sort(prefixes, by=ncodeunits, rev=true)
+    ordered = sort(prefixes, by=ncodeunits, rev=true, alg=InsertionSort)
     arms = map(ordered) do p
         nb = ncodeunits(p)
         cond = :(nbytes - pos + 1 >= $nb && $(conjoin_match(p, casefold)))

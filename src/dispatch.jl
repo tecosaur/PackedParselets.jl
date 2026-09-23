@@ -272,7 +272,7 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::S
         end
         hx = hashexpr(hash, reg, iT)
         if direct
-            sorted = sortperm(arm_vals)
+            sorted = sortperm(arm_vals, alg=InsertionSort)
             vals = arm_vals[sorted]
             if vals[end] - vals[1] + 1 == narms
                 idx = :($hx - $(iT(vals[1]) - one(iT)))
@@ -314,11 +314,14 @@ end
 # find_window_hash for direct arithmetic dispatch over table lookups.
 function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Symbol)
     casefold = false
-    prefixes = map(arm_spans) do spans
-        isempty(spans) && return nothing
+    prefixes = String[]
+    for spans in arm_spans
         bytes = UInt8[]
         for bpos in 1:min_len
-            bs = reduce(∪, (alt[bpos] for alt in spans if bpos <= length(alt)); init=ByteSet())
+            bs = ByteSet()
+            for alt in spans
+                bpos <= length(alt) && (bs = bs ∪ alt[bpos])
+            end
             lo = first(iterate(bs))
             if length(bs) == 1
                 push!(bytes, lo)
@@ -329,9 +332,9 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Sym
                 casefold = true
             else break end
         end
-        isempty(bytes) ? nothing : String(bytes)
+        isempty(bytes) && return nothing
+        push!(prefixes, String(bytes))
     end
-    any(isnothing, prefixes) && return nothing
     allunique(prefixes) || return nothing
     ph = find_window_hash(classify_hash, prefixes, casefold)
     isnothing(ph) && return nothing
@@ -665,7 +668,7 @@ whether every success `clears_threshold`; and whether it may `static_commit`:
 clearing the threshold with no earlier arm able to have deferred a better match.
 """
 function cascade_commit_plan(consumed::Vector{UnitRange{Int}})
-    order = sortperm(consumed, by=last, rev=true)
+    order = sortperm(consumed, by=last, rev=true, alg=InsertionSort)
     plan = map(eachindex(order)) do rank
         src = order[rank]
         later = order[rank+1:end]

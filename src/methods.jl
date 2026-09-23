@@ -176,9 +176,8 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
               buf
           end)
     else
-        # Fused: getval+getlen → alloc exact buffer → putval
-        putvalexprs = strip_print_markers!(copy(print.putval))
-        rewrite_bufprint!(putvalexprs)
+        # Measure the exact length, then write through the buffer method rather than
+        # a second copy of the print code.
         localdecls = [Expr(:(=), v, d) for (v, d) in print.vars]
         :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
               $(Expr(:local, localdecls...))
@@ -186,8 +185,7 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
               $(print.getval...)
               $(print.getlen...)
               buf = Base.StringMemory(pos)
-              pos = 0
-              $(putvalexprs...)
+              $(GlobalRef(M, :tobytes))(buf, val)
               buf
           end)
     end

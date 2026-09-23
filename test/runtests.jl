@@ -2018,6 +2018,26 @@ end
             @test_neverthrow PP.parsebytes(BackwardChoice, ::Vector{UInt8})
         end
 
+        @testset "MixedTailChoice (hashed, tails of several lengths)" begin
+            # Tails "_x" / "" / "_yz" take the per-option tail table; '_' is a
+            # non-letter that casefolding must leave untouched.
+            iddef = :(@defpacked MixedTail (:k(choice("ab_x", "cd", "ef_yz")), :id(digits(2))))
+            @test parsebytes_complexity(iddef) == (branches=5:10, branch_total=10, ops=25:32)
+            eval(iddef)
+            @test parse(MixedTail, "ab_x12").k === :ab_x
+            @test parse(MixedTail, "AB_X12").k === :ab_x
+            @test parse(MixedTail, "cd12").k === :cd
+            @test parse(MixedTail, "ef_yz12").k === :ef_yz
+            @test tryparse(MixedTail, "ab-x12") === nothing
+            @test tryparse(MixedTail, "ef_yy12") === nothing
+            check_roundtrips(MixedTail, ("ab_x00", "cd99", "ef_yz42"))
+            @test_neverthrow PP.parsebytes(MixedTail, ::Vector{UInt8})
+            # The tail table must be homogeneous: no runtime field lookup per parse
+            ir = sprint(code_llvm, PP.parsebytes, Tuple{Type{MixedTail}, Vector{UInt8}}; context=:debuginfo => :none)
+            @test !occursin("get_nth_field", ir)
+            @test parse_allocations(MixedTail, "ef_yz12") == 0
+        end
+
         @testset "SuffixChoice (common suffix optimisation)" begin
             iddef = :(@defpacked SuffixChoice (:kind(choice("alpha/", "beta/", "delta/")),
                        :id(digits(max=999))))

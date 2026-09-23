@@ -686,21 +686,27 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
         tve = gen_verify_exprs(vt, Symbol(prefix, "_tail"); pos_offset = minoptlen)
         ExprVarLine[tve.destructure..., :(found = $(tve.checks))]
     else
-        # Multiple tail lengths: codeunit loop over tail bytes
-        tailtable = Tuple(Tuple(codeunits(t)) for t in tails)
+        # Multiple tail lengths: codeunit loop over tail bytes. Tails are padded
+        # to one length so the tables are homogeneous (indexing a tuple of
+        # differently-sized tuples by `i` is a runtime field lookup), and bytes
+        # compare under a per-byte mask so casefolding spares non-letters.
+        maxtail = maximum(taillens)
+        masktable = Tuple(ntuple(maxtail) do j
+                              if j > ncodeunits(t) 0x00
+                              elseif casefold && UInt8('a') <= (codeunit(t, j) | 0x20) <= UInt8('z') 0xDF
+                              else 0xFF end
+                          end for t in tails)
+        bytetable = Tuple(ntuple(j -> j <= ncodeunits(t) ? codeunit(t, j) & masktable[oi][j] : 0x00, maxtail)
+                          for (oi, t) in enumerate(tails))
         taillenst = Tuple(taillens)
-        loadbyte = if casefold
-            :(@inbounds data[pos + $minoptlen + j - 1] | 0x20)
-        else
-            :(@inbounds data[pos + $minoptlen + j - 1])
-        end
-        ExprVarLine[:(tailbytes = $tailtable[i]),
-                     :(for j in 1:$taillenst[i]
-                           if $loadbyte != @inbounds tailbytes[j]
+        ExprVarLine[:(tailbytes = $bytetable[i]),
+                     :(tailmasks = $masktable[i]),
+                     :(@inbounds(for j in 1:$taillenst[i]
+                           if data[pos + $minoptlen + j - 1] & tailmasks[j] != tailbytes[j]
                                found = false
                                break
                            end
-                       end)]
+                       end))]
     end
     cond = if has_empty
         :(found && optlen > $minoptlen)

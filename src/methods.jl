@@ -206,7 +206,7 @@ function assemble_print(::PrintExprs, state::ParserState, name::Symbol)
         :(function $(GlobalRef(Base, :write))(io::IO, val::$(esc(name)))
               buf = Memory{UInt8}(undef, $maxbytes)
               len = $(GlobalRef(M, :tobytes))(buf, val)
-              Base.unsafe_write(io, pointer(buf), len)
+              GC.@preserve buf Base.unsafe_write(io, pointer(buf), len)
           end),
         :($(GlobalRef(Base, :print))(io::IO, val::$(esc(name))) =
               ($(GlobalRef(Base, :write))(io, val); nothing)),

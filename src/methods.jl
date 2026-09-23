@@ -520,7 +520,7 @@ function rewrite_printchars(args)
     Any[:(pos = unpackchars!(buf, pos, $(args...)))]
 end
 
-function gen_swar_bufprintchars(var, nchars::Int, bpc::Int, ranges)
+function gen_swar_bufprintchars(@nospecialize(var), nchars::Int, bpc::Int, @nospecialize(ranges))
     exprs = Any[]
     remaining = nchars
     consumed = 0

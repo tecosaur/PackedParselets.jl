@@ -127,8 +127,8 @@ In optional context, wraps the extract value in a presence guard (`if true`)
 resolved later by `patch_optional_extracts!`, and wraps impart in an
 `isnothing` guard on the constructor argument.
 """
-function optional_wrap(option::Union{Nothing, Symbol}, argvar::Symbol,
-                       extract_setup::Vector{ExprVarLine}, extract_value::ExprVarLine,
+function optional_wrap(@nospecialize(option::Union{Nothing, Symbol}), argvar::Symbol,
+                       extract_setup::Vector{ExprVarLine}, @nospecialize(extract_value::ExprVarLine),
                        impart_body::Vector{Expr})
     seg_extract = if isnothing(option)
         ExprVarLine[extract_setup..., extract_value]

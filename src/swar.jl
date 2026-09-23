@@ -707,20 +707,19 @@ end
 # Groups larger than a register are split into register-sized pieces.
 function grouped_chunks_and_check(@nospecialize(groups), @nospecialize(skipbytes), chunksize::Int = sizeof(UInt))
     sep = first(skipbytes)
-    ngroups = length(groups)
-    total_bytes = sum(groups) + ngroups - 1
-    offsets = let off = 0
-        ntuple(ngroups) do i
-            o = off; off += groups[i] + (i < ngroups); o
+    chunks = Tuple{Int, Int}[]
+    sep_check = :(true)
+    offset = 0
+    for (i, gsize) in enumerate(groups)
+        for j in 0:cld(gsize, chunksize)-1
+            push!(chunks, (offset + chunksize * j, Base.min(chunksize, gsize - chunksize * j)))
         end
+        offset += gsize
+        i < length(groups) || break
+        sep_check = :($sep_check && @inbounds data[pos + $offset] == $sep)
+        offset += 1
     end
-    chunks = Tuple(
-        (offsets[i] + chunksize * j, Base.min(chunksize, groups[i] - chunksize * j))
-        for i in 1:ngroups for j in 0:cld(groups[i], chunksize)-1)
-    sep_check = foldl(1:ngroups-1; init=:(true)) do acc, i
-        :($acc && @inbounds data[pos + $(offsets[i] + groups[i])] == $sep)
-    end
-    (; chunks, sep_check, total_bytes)
+    (; chunks, sep_check, total_bytes = offset)
 end
 
 function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,

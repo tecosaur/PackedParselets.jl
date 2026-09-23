@@ -176,7 +176,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
         bytespans)
 end
 
-function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, fvalue,
+function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, @nospecialize(fvalue),
                             directvar::Bool, fnum::Symbol,
                             fixedwidth::Bool, maxdigits::Int, pad::Int, base::Int,
                             max::Integer)
@@ -208,7 +208,7 @@ function grouped_digits_print(fextract::Expr, dT::DataType, fieldvar::Symbol, fv
                               @nospecialize(groups::Tuple), sep::UInt8, base::Int)
     printvar = if directvar fnum else fieldvar end
     ngroups = length(groups)
-    gvars = ntuple(i -> gensym("g$i"), ngroups)
+    gvars = Symbol[gensym("g$i") for i in 1:ngroups]
     # Shared extraction: bit extract + value computation + divrem decomposition
     extract = ExprVarLine[fextract]
     directvar || push!(extract, :($fieldvar = $fvalue))
@@ -303,9 +303,9 @@ function parse_digit_range(args::Vector, max::Union{Nothing, Integer}, base::Int
         (lo isa Integer && hi isa Integer) ||
             throw(ArgumentError("Range bounds for digits must be integer literals"))
         lo <= hi || throw(ArgumentError("digits range min must be <= max"))
-        (lo, hi)
+        (Int(lo), Int(hi))
     elseif !isempty(args) && first(args) isa Integer
-        n = first(args)
+        n = Int(first(args))
         (n, n)
     elseif !isnothing(max)
         (1, ndigits(max, base=base))
@@ -396,13 +396,13 @@ end
 
 function parse_charseq_length(arg, kind::Symbol)
     if arg isa Integer
-        (arg, arg)
+        (Int(arg), Int(arg))
     elseif Meta.isexpr(arg, :call, 3) && first(arg.args) == :(:)
         lo, hi = arg.args[2], arg.args[3]
         (lo isa Integer && hi isa Integer) ||
             throw(ArgumentError("Range bounds for $kind must be integer literals"))
         lo <= hi || throw(ArgumentError("$kind range min must be <= max"))
-        (lo, hi)
+        (Int(lo), Int(hi))
     else
         throw(ArgumentError("Expected integer or range for $kind, got $arg"))
     end

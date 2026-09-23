@@ -183,7 +183,7 @@ function chain_guarded(entries)
     chain
 end
 
-function guard_property_extract(val::Union{Symbol, Vector{ExprVarLine}},
+function guard_property_extract(@nospecialize(val::Union{Symbol, Vector{ExprVarLine}}),
                                 guard::Expr, segs::Vector{ValueSegment},
                                 seg_range::UnitRange{Int})
     extract = resolve_extract(val, segs, seg_range)
@@ -390,7 +390,7 @@ allocates a presence bit), then emits guarded parse/print with pos rewind.
 function pattern_choice_optional!(exprs::PatternExprs,
                                   state::ParserState, nctx::NodeCtx,
                                   @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
-                                  arm)
+                                  @nospecialize(arm))
     popt = get(nctx, :optional, nothing)
     optvar = gensym("optional")
     end_label = gensym("opt_end")
@@ -473,7 +473,9 @@ function pattern_choice_multi!(exprs::PatternExprs,
     discrim_pos = state.bits + discrim_bits
     state.bits += discrim_bits
     arm_base = state.bits
-    arm_data = map(enumerate(arms)) do (k, arm)
+    # Over indices: the arms' element types would each specialise this closure
+    arm_data = map(1:narms) do k
+        arm = arms[k]
         armvar = gensym("arm$k")
         end_label = gensym("arm$(k)_end")
         arm_nctx = NodeCtx(nctx, :optional, armvar)

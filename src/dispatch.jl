@@ -286,9 +286,21 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::S
         end
         :(@inbounds $(Tuple(table))[$hx + 1])
     end
+    # Alternatives of different arms that overlap at every byte of the window share
+    # a register value, which no hash can tell apart.
+    function separable(pos::Int, bwidth::Int)
+        for (k, spans) in enumerate(arm_spans), (l, others) in enumerate(arm_spans)
+            l > k || continue
+            for a in spans, b in others
+                all(p -> !isdisjoint(a[p], b[p]), pos:pos+bwidth-1) && return false
+            end
+        end
+        true
+    end
     for iT in REGISTER_TYPES
         sizeof(iT) > min_len && break
         for pos in 1:min_len - sizeof(iT) + 1
+            separable(pos, sizeof(iT)) || continue
             for (; hash, maxval) in hash_candidates(narms, iT)
                 idx = window_index(pos, iT, hash, maxval)
                 isnothing(idx) || return (; offset = pos, iT, idx)

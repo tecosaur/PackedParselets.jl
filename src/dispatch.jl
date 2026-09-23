@@ -126,6 +126,7 @@ function pattern_field!(exprs::PatternExprs,
     else
         propprints = map(strip_segsets! ∘ copy, exprs.print.direct[initialprints+1:end])
         filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, propprints)
+        resolve_print_markers!(propprints)
         push!(exprs.properties, node.value => ExprVarLine[(
             quote
                 io = IOBuffer()

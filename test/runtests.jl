@@ -586,6 +586,14 @@ end
 eval(packed_deftype(@__MODULE__, :EmbInner, :(:x(digits(2)))))
 eval(packed_deftype(@__MODULE__, :EmbOuter,
     :(("E", :inner(embed(EmbInner)), "-", :extra(digits(2))))))
+eval(packed_deftype(@__MODULE__, :EmbField,
+    :(("F", :f(seq(embed(EmbInner), "-", digits(3)))))))
+@testset "multi-segment field with embed" begin
+    x = parse(EmbField, "F05-123")
+    @test x.f == "05-123"
+    @test string(x) == "F05-123"
+end
+
 @testset "embed" begin
     x = parse(EmbOuter, "E05-10")
     @test x.inner isa EmbInner

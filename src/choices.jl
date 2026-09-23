@@ -90,7 +90,7 @@ packed into the bit stream and extracted as a `Symbol` or `String` property.
 Handles the `allowempty` case by guarding print and extract expressions on
 a presence check, and claims a zero-encoding sentinel when available.
 """
-function compile_choice_value(state::ParserState, nctx::NodeCtx, ctx)
+function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(ctx))
     (; sopts, fieldvar, option, allowempty, cbits, cint, guarded, claims, valtype) = ctx
     bitpos = state.bits + cbits
     pmin = if allowempty 0 else minimum(ncodeunits, sopts) end
@@ -164,7 +164,7 @@ Produce a `SegmentOutput` for a fixed-output choice: the parsed option is not
 stored; the segment always prints the single `target` string. Allocates no
 bits and emits zero-width print/extract codegen.
 """
-function compile_choice_fixed(::ParserState, nctx::NodeCtx, ctx)
+function compile_choice_fixed(::ParserState, nctx::NodeCtx, @nospecialize(ctx))
     (; sopts, fieldvar, allowempty, cint, guarded, matcher, target) = ctx
     pexprs = if any(isempty, sopts)
         ExprVarLine[matcher]
@@ -204,7 +204,7 @@ for injective hashes and widened verify tables when they reduce chunk count),
 then a bucketed hash for larger option sets, and falls back to linear scan.
 May reorder options to match hash output order.
 """
-function build_choice_matcher(state::ParserState, nctx::NodeCtx, cctx)
+function build_choice_matcher(state::ParserState, nctx::NodeCtx, @nospecialize(cctx))
     (; mopts, casefold) = cctx
     ph = find_window_hash(classify_hash, mopts, casefold)
     minbucketed = if allequal(map(ncodeunits, mopts))
@@ -222,7 +222,7 @@ function build_choice_matcher(state::ParserState, nctx::NodeCtx, cctx)
     end
 end
 
-function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
+function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, @nospecialize(cctx))
     (; casefold, fieldvar, onmatch, cint) = cctx
     # Reorder options to match hash output order
     mopts = cctx.mopts[ph.perm]
@@ -231,8 +231,8 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
     phoff = ph.pos - 1
     phposexpr = if iszero(phoff); :pos else :(pos + $phoff) end
     load = gen_load(ph.iT, phposexpr)
-    foldedload = if iszero(ph.foldmask) load else :($load | $(ph.foldmask)) end
-    hashval = ph.hashexpr(foldedload)
+    foldedload = if iszero(ph.foldmask) load else :($load | $(ph.foldmask % ph.iT)) end
+    hashval = hashexpr(ph, foldedload)
     minoptlen = minimum(ncodeunits, mopts)
     maxoptlen = maximum(ncodeunits, mopts)
     variable_len = minoptlen != maxoptlen
@@ -292,8 +292,8 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
         ExprVarLine[:(i = $hashval), :(found = $boundscheck)]
     else
         ExprVarLine[:(hi = $hashval),
-                    :(i = if 1 <= hi <= $(ph.tablelen)
-                          $(ph.table)[hi]
+                    :(i = if 1 <= hi <= $(length(ph.table))
+                          $(Tuple(ph.table))[hi]
                       else
                           0
                       end),
@@ -342,8 +342,8 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
     if ph.kind === :bucketed
         # A slot holds up to two options: when the first fails to verify, try the second.
         retry = map(e -> e isa Expr ? copy(e) : e, body)
-        push!(parts, :(if !found && 1 <= hi <= $(ph.tablelen)
-                           i = $(ph.table2)[hi]
+        push!(parts, :(if !found && 1 <= hi <= $(length(ph.table2))
+                           i = $(Tuple(ph.table2))[hi]
                            found = !iszero(i)
                            if found; $(retry...) end
                        end))
@@ -351,7 +351,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
     (parts, mopts, sopts)
 end
 
-function build_linear_matcher(state::ParserState, nctx::NodeCtx, cctx)
+function build_linear_matcher(state::ParserState, nctx::NodeCtx, @nospecialize(cctx))
     (; mopts, sopts, casefold, onmatch, cint) = cctx
     # Sort longest-first for greedy matching when options share prefixes
     perm = sortperm(mopts, by=ncodeunits, rev=true)
@@ -378,69 +378,74 @@ end
 
 ## Perfect hashing
 
-"""
-    search_hash_families(try_fn, nopts, iT) -> (result, cost)
+const HASH_MULTIPLIERS = (0x9e3779b97f4a7c15, 0x517cc1b727220a95, 0x6c62272e07bb0142)
 
-Iterate hash families (identity, mod, shift-mod, multiply-shift-mod) for
-register type `iT` over `nopts` options. Calls `try_fn(fn, expr_fn, injective, maxval)`
-for each candidate, where `maxval` is the maximum value `fn` can return.
-`try_fn` returns `(result, cost::Int)` on success or `nothing` on failure.
-Returns the lowest-cost `(result, cost)` found, or `(nothing, typemax(Int))`
-if no hash worked.
 """
-function search_hash_families(try_fn::F, nopts::Int, iT::DataType) where {F <: Function}
-    best = (nothing, typemax(Int))
-    # Identity family (injective: hash hit uniquely identifies the option)
-    res = try_fn(v -> v, v -> v, true, typemax(iT) % UInt64)
-    !isnothing(res) && last(res) < last(best) && (best = res)
-    iszero(last(best)) && return best
-    # Mod, shift-mod, and multiply-shift-mod families
-    one_t = one(iT)
-    for m in nopts:2*nopts
-        iszero(last(best)) && break
-        mt = iT(m)
-        res = try_fn(v -> v % m + 1, v -> :($v % $mt + $one_t), false, UInt64(m))
-        !isnothing(res) && last(res) < last(best) && (best = res)
-        for k in 1:min(8 * sizeof(iT) - 1, 16)
-            iszero(last(best)) && break
-            res = try_fn(v -> (v >> k) % m + 1, v -> :(($v >> $k) % $mt + $one_t), false, UInt64(m))
-            !isnothing(res) && last(res) < last(best) && (best = res)
+    hash_candidates(nopts, iT) -> Vector{@NamedTuple{hash::WindowHash, injective::Bool, maxval::UInt64}}
+
+Candidate hashes of a register window of type `iT` over `nopts` options, in search
+order: identity (injective: a hit identifies the window value), then for each modulus
+in `nopts:2nopts` the mod, shift-mod and multiply-shift-mod families. `maxval` bounds
+the hash's output.
+"""
+function hash_candidates(nopts::Int, iT::DataType)
+    w = 8 * sizeof(iT)
+    cands = @NamedTuple{hash::WindowHash, injective::Bool, maxval::UInt64}[
+        (WindowHash(1, 0, 0), true, typemax(UInt64) >> (64 - w))]
+    for m in nopts:2nopts
+        push!(cands, (WindowHash(1, 0, m), false, UInt64(m)))
+        for k in 1:min(w - 1, 16)
+            push!(cands, (WindowHash(1, k, m), false, UInt64(m)))
         end
-        for c in (0x9e3779b97f4a7c15, 0x517cc1b727220a95, 0x6c62272e07bb0142)
-            iszero(last(best)) && break
-            ct = c % iT
-            for k in max(1, 8 * sizeof(iT) - 8):8 * sizeof(iT) - 1
-                iszero(last(best)) && break
-                res = try_fn(v -> (iT(v) * ct) >> k % m + 1,
-                             v -> :(($v * $ct) >> $k % $mt + $one_t), false, UInt64(m))
-                !isnothing(res) && last(res) < last(best) && (best = res)
-            end
+        for c in HASH_MULTIPLIERS, k in max(1, w - 8):w - 1
+            push!(cands, (WindowHash(c, k, m), false, UInt64(m)))
         end
     end
-    best
+    cands
+end
+
+function hashvalue(h::WindowHash, v::UInt64, iT::DataType)
+    iszero(h.modulus) && return v
+    widthmask = typemax(UInt64) >> (64 - 8 * sizeof(iT))
+    ((v * h.mul) & widthmask) >> h.shift % h.modulus + 1
+end
+
+# Expression computing `hashvalue(h, x, iT)` on a window register `x::iT`.
+function hashexpr(h::WindowHash, x, iT::DataType)
+    iszero(h.modulus) && return x
+    m, one_t = iT(h.modulus), one(iT)
+    if !isone(h.mul)
+        :(($x * $(h.mul % iT)) >> $(h.shift) % $m + $one_t)
+    elseif iszero(h.shift)
+        :($x % $m + $one_t)
+    else
+        :(($x >> $(h.shift)) % $m + $one_t)
+    end
+end
+
+function hashexpr(ph::HashPlan, x)
+    hx = hashexpr(ph.hash, x, ph.iT)
+    if iszero(ph.offset) hx else :($hx - $(ph.iT(ph.offset))) end
 end
 
 """
-    find_window_hash(classify, options::Vector{String}, casefold::Bool)
-        -> Union{NamedTuple, Nothing}
+    find_window_hash(classify, options::Vector{String}, casefold::Bool) -> Union{HashPlan, Nothing}
 
-Search register-sized byte windows over `options`, under identity (injective),
-mod, shift-mod, and multiply-shift-mod hash families, for the cheapest hash that
-`classify` accepts:
+Search register-sized byte windows over `options`, under the `hash_candidates`
+families, for the cheapest hash that `classify` accepts:
 - `classify_hash`: a minimal perfect hash, cost-ranked direct+injective (0) >
-  direct (1) > small table > large table. The `injective` flag on identity-family
-  results enables `find_best_hash_skip` to elide verification bytes the hash covers.
-- `classify_bucketed`: up to two options per slot (`kind = :bucketed`, second
-  candidates in `table2`), for sets too large for a perfect hash to be found.
+  direct (1) > small table > large table. Injective (identity-family) results let
+  `find_best_hash_skip` elide verification bytes the hash covers.
+- `classify_bucketed`: up to two options per slot (`kind = :bucketed`), for sets
+  too large for a perfect hash to be found.
 
 Returns `nothing` when no hash is accepted.
 """
-function find_window_hash(classify::F, options::Vector{String}, casefold::Bool) where {F <: Function}
+function find_window_hash(@nospecialize(classify), options::Vector{String}, casefold::Bool)
     nopts = length(options)
     iszero(nopts) && return nothing
     minlen = minimum(ncodeunits, options)
-    # Collect discriminating window candidates
-    candidates = @NamedTuple{pos::Int, iT::DataType, values::Vector{UInt64}, foldmask::UInt64}[]
+    best, bestcost = nothing, typemax(Int)
     for iT in REGISTER_TYPES
         bwidth = sizeof(iT)
         bwidth > minlen && break
@@ -453,71 +458,54 @@ function find_window_hash(classify::F, options::Vector{String}, casefold::Bool) 
                 end
                 v
             end
-            length(unique(values)) == nopts || continue
+            allunique(values) || continue
             foldmask = zero(UInt64)
             if casefold
                 for j in 0:bwidth-1
                     foldmask |= UInt64(0x20) << (8j)
                 end
             end
-            push!(candidates, (; pos, iT, values, foldmask))
+            for (; hash, injective) in hash_candidates(nopts, iT)
+                hvals = UInt64[hashvalue(hash, v, iT) for v in values]
+                any(iszero, hvals) && continue
+                classified = classify(hvals, pos, iT, foldmask, hash, injective)
+                isnothing(classified) && continue
+                cost, plan = classified
+                cost += plan.kind === :direct && !injective
+                if cost < bestcost
+                    best, bestcost = plan, cost
+                end
+                iszero(bestcost) && return best
+            end
         end
     end
-    isempty(candidates) && return nothing
-    best = (nothing, typemax(Int))
-    for (; pos, iT, values, foldmask) in candidates
-        iszero(last(best)) && break
-        result = search_hash_families(nopts, iT) do fn, expr_fn, injective, _maxval
-            hvals = map(fn, values)
-            any(h -> h < 1, hvals) && return nothing
-            classified = classify(hvals, nopts, pos, iT, foldmask % iT, expr_fn)
-            isnothing(classified) && return nothing
-            cost = classified.cost + (classified.ph.kind === :direct && !injective)
-            (merge(classified.ph, (; injective)), cost)
-        end
-        if !isnothing(first(result)) && last(result) < last(best)
-            best = result
-        end
-    end
-    first(best)
+    best
 end
 
-function classify_hash(hvals::Vector{UInt64}, nopts::Int,
-                       pos::Int, iT::DataType, foldmask, hashexpr_fn;
-                       max_tablelen::Int = 4 * nopts)
-    length(unique(hvals)) == nopts || return nothing
+function classify_hash(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask::UInt64,
+                       hash::WindowHash, injective::Bool; max_tablelen::Int = 4 * length(hvals))
+    nopts = length(hvals)
+    allunique(hvals) || return nothing
     sorted_indices = sortperm(hvals)
-    sorted_hvals = hvals[sorted_indices]
-    lo, hi = Int(sorted_hvals[1]), Int(sorted_hvals[end])
-    # Direct: consecutive values: hashexpr(v) ± offset maps to 1:n
+    lo, hi = Int(hvals[first(sorted_indices)]), Int(hvals[last(sorted_indices)])
+    # Direct: consecutive values, so the hash less an offset is the option index
     if hi - lo + 1 == nopts
-        hashexpr = if lo == 1
-            hashexpr_fn
-        else
-            offset = iT(lo - 1)
-            v -> :($(hashexpr_fn(v)) - $offset)
-        end
-        ph = (; pos, iT, foldmask, hashexpr,
-               perm = sorted_indices, kind = :direct,
-               table = (), tablelen = 0)
-        return (; cost = 0, ph)
+        return (0, HashPlan(pos, iT, foldmask, hash, lo - 1, sorted_indices, :direct,
+                            Int[], Int[], injective))
     end
     # Table lookup (original order, no permutation needed)
-    maxval = Int(maximum(hvals))
-    maxval > max_tablelen && return nothing
-    table = zeros(Int, maxval)
+    hi > max_tablelen && return nothing
+    table = zeros(Int, hi)
     for (i, h) in enumerate(hvals)
-        table[Int(h)] = i
+        table[h] = i
     end
-    ph = (; pos, iT, foldmask, hashexpr = hashexpr_fn,
-           perm = collect(1:nopts), kind = :table,
-           table = Tuple(table), tablelen = maxval)
-    (; cost = 2 * nopts + maxval, ph)
+    (2 * nopts + hi, HashPlan(pos, iT, foldmask, hash, 0, collect(1:nopts), :table,
+                              table, Int[], injective))
 end
 
-function classify_bucketed(hvals::Vector{UInt64}, nopts::Int,
-                           pos::Int, iT::DataType, foldmask, hashexpr_fn;
-                           max_tablelen::Int = 4 * nopts)
+function classify_bucketed(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask::UInt64,
+                           hash::WindowHash, injective::Bool; max_tablelen::Int = 4 * length(hvals))
+    nopts = length(hvals)
     maxval = Int(maximum(hvals))
     maxval > max_tablelen && return nothing
     table, table2 = zeros(Int, maxval), zeros(Int, maxval)
@@ -525,11 +513,9 @@ function classify_bucketed(hvals::Vector{UInt64}, nopts::Int,
         slots = if iszero(table[h]) table elseif iszero(table2[h]) table2 else return nothing end
         slots[h] = i
     end
-    ph = (; pos, iT, foldmask, hashexpr = hashexpr_fn,
-           perm = collect(1:nopts), kind = :bucketed,
-           table = Tuple(table), table2 = Tuple(table2), tablelen = maxval)
     # Each second candidate is a potential extra verify
-    (; cost = 2 * nopts + maxval + count(!iszero, table2), ph)
+    (2 * nopts + maxval + count(!iszero, table2),
+     HashPlan(pos, iT, foldmask, hash, 0, collect(1:nopts), :bucketed, table, table2, injective))
 end
 
 """
@@ -588,6 +574,9 @@ function gen_suffix_check(suffix::String, casefold::Bool, suffix_len::Int)
 end
 
 ## Verification codegen
+#
+# Tables are `Any` vectors of per-option tuples and `Unsigned` vectors of masks,
+# so their types never depend on the options; the splice converts to a tuple.
 
 """
     gen_verify_table(options, casefold; skip, nbytes) -> (; verify_table, masks, chunks)
@@ -616,30 +605,32 @@ function gen_verify_table(options::Vector{String}, casefold::Bool;
         end
         vcat(left, right)
     end
-    # Shared mask: 0xDF where any option has casefold alpha, 0xFF for valid, 0x00 for overflow
-    masks = Tuple(
-        reduce(|, (begin
+    function chunk_mask(c)
+        mask = zero(c.iT)
+        for j in 0:c.width-1
             valid = c.offset + j < minlen
-            if valid && casefold && any(opt -> codeunit(opt, c.offset + j + 1) in UInt8('a'):UInt8('z'), options)
-                c.iT(0xDF) << (8j)
+            byte = if valid && casefold && any(opt -> codeunit(opt, c.offset + j + 1) in UInt8('a'):UInt8('z'), options)
+                0xDF
             elseif valid
-                c.iT(0xFF) << (8j)
+                0xFF
             else
-                zero(c.iT)
+                0x00
             end
-        end for j in 0:c.width-1), init=zero(c.iT))
-        for c in chunks)
-    verify_table = Tuple(
-        Tuple(pack_bytes(opt, c.offset, min(c.width, max(0, minlen - c.offset)), c.iT) & m
-              for (c, m) in zip(chunks, masks))
-        for opt in options)
+            mask |= c.iT(byte) << (8j)
+        end
+        mask
+    end
+    masks = Unsigned[chunk_mask(c) for c in chunks]
+    verify_table = Any[Tuple(Unsigned[pack_bytes(opt, c.offset, min(c.width, max(0, minlen - c.offset)), c.iT) & m
+                                      for (c, m) in zip(chunks, masks)])
+                       for opt in options]
     (; verify_table, masks, chunks)
 end
 
 function gen_verify_exprs(vt, prefix::Symbol; pos_offset::Int = 0)
     nchunks = length(vt.chunks)
     cvars = [Symbol(prefix, "_expect", ci) for ci in 1:nchunks]
-    destructure = [Expr(:(=), Expr(:tuple, cvars...), :($(vt.verify_table)[i]))]
+    destructure = [Expr(:(=), Expr(:tuple, cvars...), :($(Tuple(vt.verify_table))[i]))]
     checks = foldr(1:nchunks, init = :(true)) do ci, rest
         baseoff = vt.chunks[ci].offset + pos_offset
         posexpr = if iszero(baseoff)
@@ -663,28 +654,30 @@ function gen_backward_verify(options::Vector{String}, casefold::Bool,
                              nbytes::Int, bvc, prefix::Symbol,
                              skip::Union{Nothing, Tuple{Int, Int}})
     (; iT, padding) = bvc
-    w = sizeof(iT)
-    mask = reduce(|, (begin
+    mask = zero(iT)
+    for j in 0:sizeof(iT)-1
         optj = j - padding
-        if optj < 0 || optj >= nbytes
-            zero(iT)
+        byte = if optj < 0 || optj >= nbytes
+            0x00
         elseif !isnothing(skip) && skip[1] <= optj < skip[1] + skip[2]
-            zero(iT)
+            0x00
         elseif casefold && any(opt -> UInt8('a') <= codeunit(opt, optj + 1) <= UInt8('z'), options)
-            iT(0xDF) << (8j)
+            0xDF
         else
-            iT(0xFF) << (8j)
+            0xFF
         end
-    end for j in 0:w-1), init=zero(iT))
-    verify_table = Tuple(begin
+        mask |= iT(byte) << (8j)
+    end
+    function expected(opt)
         v = zero(iT)
         for j in 0:nbytes-1
             v |= iT(codeunit(opt, j + 1)) << (8 * (j + padding))
         end
         v & mask
-    end for opt in options)
+    end
+    verify_table = Unsigned[expected(opt) for opt in options]
     evar = Symbol(prefix, "_bexpect")
-    destructure = [:($evar = $(verify_table)[i])]
+    destructure = [:($evar = $(Tuple(verify_table))[i])]
     checks = gen_masked_compare(iT, :(pos - $padding), evar, mask)
     (; destructure, checks)
 end
@@ -703,29 +696,24 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
     distinct_taillens = unique(filter(!iszero, taillens))
     body = if length(distinct_taillens) == 1
         # Single tail length: register-sized comparison via gen_verify_exprs
-        taillen = only(distinct_taillens)
-        chunks = register_chunks(taillen)
+        chunks = register_chunks(only(distinct_taillens))
         nonempty_tails = filter(!isempty, tails)
-        masks = Tuple(
-            reduce(|, (begin
-                if casefold && any(t -> codeunit(t, c.offset + j + 1) in UInt8('a'):UInt8('z'), nonempty_tails)
-                    c.iT(0xDF) << (8j)
-                else
-                    c.iT(0xFF) << (8j)
-                end
-            end for j in 0:c.width-1), init=zero(c.iT))
-            for c in chunks)
-        zerotup = Tuple(zero(c.iT) for c in chunks)
-        verify_table = Tuple(
-            if isempty(tails[oi])
-                zerotup
-            else
-                Tuple(pack_bytes(tails[oi], c.offset, c.width, c.iT) & m
-                      for (c, m) in zip(chunks, masks))
+        function chunk_mask(c)
+            mask = zero(c.iT)
+            for j in 0:c.width-1
+                folds = casefold && any(t -> codeunit(t, c.offset + j + 1) in UInt8('a'):UInt8('z'), nonempty_tails)
+                mask |= c.iT(if folds 0xDF else 0xFF end) << (8j)
             end
-            for oi in eachindex(options))
-        vt = (; verify_table, masks, chunks)
-        tve = gen_verify_exprs(vt, Symbol(prefix, "_tail"); pos_offset = minoptlen)
+            mask
+        end
+        masks = Unsigned[chunk_mask(c) for c in chunks]
+        verify_table = Any[if isempty(tail)
+                               Tuple(Unsigned[zero(c.iT) for c in chunks])
+                           else
+                               Tuple(Unsigned[pack_bytes(tail, c.offset, c.width, c.iT) & m for (c, m) in zip(chunks, masks)])
+                           end
+                           for tail in tails]
+        tve = gen_verify_exprs((; verify_table, masks, chunks), Symbol(prefix, "_tail"); pos_offset = minoptlen)
         ExprVarLine[tve.destructure..., :(found = $(tve.checks))]
     else
         # Multiple tail lengths: codeunit loop over tail bytes. Tails are padded
@@ -733,17 +721,16 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
         # differently-sized tuples by `i` is a runtime field lookup), and bytes
         # compare under a per-byte mask so casefolding spares non-letters.
         maxtail = maximum(taillens)
-        masktable = Tuple(ntuple(maxtail) do j
-                              if j > ncodeunits(t) 0x00
-                              elseif casefold && UInt8('a') <= (codeunit(t, j) | 0x20) <= UInt8('z') 0xDF
-                              else 0xFF end
-                          end for t in tails)
-        bytetable = Tuple(ntuple(j -> j <= ncodeunits(t) ? codeunit(t, j) & masktable[oi][j] : 0x00, maxtail)
-                          for (oi, t) in enumerate(tails))
-        taillenst = Tuple(taillens)
-        ExprVarLine[:(tailbytes = $bytetable[i]),
-                     :(tailmasks = $masktable[i]),
-                     :(@inbounds(for j in 1:$taillenst[i]
+        masktable = Any[Tuple(UInt8[if j > ncodeunits(t) 0x00
+                                    elseif casefold && UInt8('a') <= (codeunit(t, j) | 0x20) <= UInt8('z') 0xDF
+                                    else 0xFF end
+                                    for j in 1:maxtail])
+                        for t in tails]
+        bytetable = Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & mask[j] else 0x00 end for j in 1:maxtail])
+                        for (t, mask) in zip(tails, masktable)]
+        ExprVarLine[:(tailbytes = $(Tuple(bytetable))[i]),
+                     :(tailmasks = $(Tuple(masktable))[i]),
+                     :(@inbounds(for j in 1:$(Tuple(taillens))[i]
                            if data[pos + $minoptlen + j - 1] & tailmasks[j] != tailbytes[j]
                                found = false
                                break

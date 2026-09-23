@@ -228,66 +228,71 @@ end
 
 ## Byte profiling for structured choice dispatch
 
-function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}})
+"""
+    find_choice_dispatch(arm_spans, reg) -> Union{Nothing, @NamedTuple{offset::Int, iT::DataType, idx}}
+
+Find a register window, loaded as `iT` from byte `offset` into `reg`, whose hash
+alone selects the choice arm: `idx` is the expression computing the 1-based arm
+index from `reg` (0 when no arm can match).
+"""
+function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::Symbol)
     narms = length(arm_spans)
     narms >= 2 || return nothing
     any(isempty, arm_spans) && return nothing
     min_len = minimum(minimum(length, spans) for spans in arm_spans)
-    ph_result = try_perfect_hash_dispatch(arm_spans, narms, min_len)
+    ph_result = try_perfect_hash_dispatch(arm_spans, narms, min_len, reg)
     !isnothing(ph_result) && return ph_result
-    for iT in REGISTER_TYPES
+    function window_index(pos::Int, iT::DataType, hash::WindowHash, maxval::UInt64)
+        maxval + 1 > 512 && return nothing
         bwidth = sizeof(iT)
-        bwidth > min_len && break
-        for pos in 1:min_len - bwidth + 1
-            expr, _ = search_hash_families(narms, iT) do fn, expr_fn, _injective, maxval
-                maxval + 1 > 512 && return nothing
-                groups = Dict{UInt64, Int}()
-                for (k, spans) in enumerate(arm_spans)
-                    for alt in spans
-                        window = @view alt[pos:pos+bwidth-1]
-                        for combo in Iterators.product(window...)
-                            regval = reduce(|, UInt64(b) << (8*(j-1))
-                                            for (j, b) in enumerate(combo); init=zero(UInt64))
-                            mv = fn(regval)
-                            prev = get(groups, mv, 0)
-                            (!iszero(prev) && prev != k) && return nothing
-                            groups[mv] = k
-                        end
-                    end
+        groups = Dict{UInt64, Int}()
+        for (k, spans) in enumerate(arm_spans)
+            for alt in spans
+                window = @view alt[pos:pos+bwidth-1]
+                for combo in Iterators.product(window...)
+                    regval = reduce(|, UInt64(b) << (8*(j-1))
+                                    for (j, b) in enumerate(combo); init=zero(UInt64))
+                    mv = hashvalue(hash, regval, iT)
+                    prev = get(groups, mv, 0)
+                    (!iszero(prev) && prev != k) && return nothing
+                    groups[mv] = k
                 end
-                length(groups) < 2 && return nothing
-                arm_vals = zeros(UInt64, narms)
-                direct = true
-                for (mv, k) in groups
-                    if iszero(arm_vals[k])
-                        arm_vals[k] = mv
-                    elseif arm_vals[k] != mv
-                        direct = false
-                        break
-                    end
-                end
-                if direct
-                    sorted = sortperm(arm_vals)
-                    vals = arm_vals[sorted]
-                    if vals[end] - vals[1] + 1 == narms
-                        offset = iT(vals[1]) - one(iT)
-                        ip = invperm(sorted)
-                        return if ip == 1:narms
-                            (b -> :($(expr_fn(b)) - $offset), 0)
-                        else
-                            perm = Tuple(UInt8.(ip))
-                            (b -> :(@inbounds $perm[$(expr_fn(b)) - $offset]), 0)
-                        end
-                    end
-                end
-                table = zeros(UInt8, maxval + 1)
-                for (mv, k) in groups
-                    table[mv + 1] = k % UInt8
-                end
-                tup = Tuple(table)
-                (b -> :(@inbounds $tup[$(expr_fn(b)) + 1]), 0)
             end
-            !isnothing(expr) && return (; offset = pos, iT, expr)
+        end
+        length(groups) < 2 && return nothing
+        arm_vals = zeros(UInt64, narms)
+        direct = true
+        for (mv, k) in groups
+            if iszero(arm_vals[k])
+                arm_vals[k] = mv
+            elseif arm_vals[k] != mv
+                direct = false
+                break
+            end
+        end
+        hx = hashexpr(hash, reg, iT)
+        if direct
+            sorted = sortperm(arm_vals)
+            vals = arm_vals[sorted]
+            if vals[end] - vals[1] + 1 == narms
+                idx = :($hx - $(iT(vals[1]) - one(iT)))
+                ip = invperm(sorted)
+                return if ip == 1:narms idx else :(@inbounds $(Tuple(UInt8.(ip)))[$idx]) end
+            end
+        end
+        table = zeros(UInt8, maxval + 1)
+        for (mv, k) in groups
+            table[mv + 1] = k % UInt8
+        end
+        :(@inbounds $(Tuple(table))[$hx + 1])
+    end
+    for iT in REGISTER_TYPES
+        sizeof(iT) > min_len && break
+        for pos in 1:min_len - sizeof(iT) + 1
+            for (; hash, maxval) in hash_candidates(narms, iT)
+                idx = window_index(pos, iT, hash, maxval)
+                isnothing(idx) || return (; offset = pos, iT, idx)
+            end
         end
     end
     nothing
@@ -295,7 +300,7 @@ end
 
 # Extract canonical byte prefixes from arm bytespans and delegate to
 # find_window_hash for direct arithmetic dispatch over table lookups.
-function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int)
+function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Symbol)
     casefold = false
     prefixes = map(arm_spans) do spans
         isempty(spans) && return nothing
@@ -319,15 +324,10 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int)
     ph = find_window_hash(classify_hash, prefixes, casefold)
     isnothing(ph) && return nothing
     fm = ph.foldmask % ph.iT
-    hashfn = if iszero(fm) ph.hashexpr else b -> ph.hashexpr(:($b | $fm)) end
+    hx = hashexpr(ph, if iszero(fm) reg else :($reg | $fm) end)
     ip = invperm(ph.perm)
-    expr = if ip == 1:narms
-        hashfn
-    else
-        perm = Tuple(UInt8.(ip))
-        b -> :(@inbounds $perm[$(hashfn(b))])
-    end
-    (; offset = ph.pos, iT = ph.iT, expr)
+    idx = if ip == 1:narms hx else :(@inbounds $(Tuple(UInt8.(ip)))[$hx]) end
+    (; offset = ph.pos, iT = ph.iT, idx)
 end
 
 """
@@ -499,10 +499,11 @@ function pattern_choice_multi!(exprs::PatternExprs,
     end
     final_bits = state.bits
     arm_spans = [ad.oexprs.bytespans for ad in arm_data]
-    dispatch = find_choice_dispatch(arm_spans)
+    dispatch_reg = gensym("dispatch_reg")
+    dispatch = find_choice_dispatch(arm_spans, dispatch_reg)
     if !isnothing(dispatch)
         emit_dispatch_parse!(exprs, state, nctx, popt, savedpos, arm_data,
-                             dispatch, "" in arms)
+                             dispatch_reg, dispatch, "" in arms)
     else
         emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data,
                             "" in arms, discrim_bits)
@@ -540,10 +541,9 @@ end
 
 function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
                               popt::Union{Nothing, Symbol}, savedpos::Symbol,
-                              arm_data, dispatch::NamedTuple, has_empty::Bool)
-    reg_var = gensym("dispatch_reg")
+                              arm_data, reg_var::Symbol, @nospecialize(dispatch), has_empty::Bool)
     arm_idx_var = gensym("arm_idx")
-    (; offset, iT, expr) = dispatch
+    (; offset, iT, idx) = dispatch
     bwidth = sizeof(iT)
     load_pos = if offset == 1; :pos else :(pos + $(offset - 1)) end
     load = gen_load(iT, load_pos)
@@ -552,7 +552,7 @@ function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::Nod
                              $arm_idx_var = UInt8(0)
                          else
                              $reg_var = $load
-                             $arm_idx_var = $(expr(reg_var))
+                             $arm_idx_var = $idx
                          end))
     for (k, ad) in enumerate(arm_data)
         branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)

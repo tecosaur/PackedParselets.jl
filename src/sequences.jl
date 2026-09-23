@@ -58,7 +58,7 @@ function parse_groups_kwarg(nctx::NodeCtx, nchars::Int, skipbytes)
     groups
 end
 
-function emit_grouped(emit_group::Function, groups::Tuple, sep::UInt8)
+function emit_grouped(@nospecialize(emit_group::Function), @nospecialize(groups::Tuple), sep::UInt8)
     exprs = ExprVarLine[]
     for i in 1:length(groups)
         i > 1 && push!(exprs, :(write(io, $sep)))
@@ -205,7 +205,7 @@ end
 
 function grouped_digits_print(fextract::Expr, dT::DataType, fieldvar::Symbol, fvalue,
                               directvar::Bool, fnum::Symbol,
-                              groups::Tuple, sep::UInt8, base::Int)
+                              @nospecialize(groups::Tuple), sep::UInt8, base::Int)
     printvar = if directvar fnum else fieldvar end
     ngroups = length(groups)
     gvars = ntuple(i -> gensym("g$i"), ngroups)
@@ -247,7 +247,7 @@ end
 
 function digits_impart_exprs(state::ParserState, argvar::Symbol, fnum::Symbol,
                              parsevar::Symbol, dI::DataType, dT::DataType,
-                             dspec::NamedTuple, directval::Bool, claims::Bool,
+                             @nospecialize(dspec::NamedTuple), directval::Bool, claims::Bool,
                              bitpos::Int)
     (; vmin, vmax) = dspec
     offset = vmin - claims
@@ -314,7 +314,7 @@ function parse_digit_range(args::Vector, max::Union{Nothing, Integer}, base::Int
     end
 end
 
-function charseq_impart_exprs(state::ParserState, cspec::NamedTuple,
+function charseq_impart_exprs(state::ParserState, @nospecialize(cspec::NamedTuple),
                               argvar::Symbol, charvar::Symbol,
                               lenvar::Symbol, lenoffset::Symbol;
                               numeric::Bool=false)
@@ -481,7 +481,7 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
                               minlen::Int, maxlen::Int,
                               ranges::Vector{UnitRange{UInt8}},
                               cfold::Bool, kind::Symbol,
-                              skipbytes::Union{Nothing, NTuple{<:Any, UInt8}} = nothing)
+                              @nospecialize(skipbytes::Union{Nothing, NTuple{<:Any, UInt8}}) = nothing)
     ranges = Tuple(ranges)  # runtime functions dispatch on NTuple
     has_skip = !isnothing(skipbytes)
     variable = minlen != maxlen

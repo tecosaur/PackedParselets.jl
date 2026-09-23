@@ -224,3 +224,47 @@ mutable struct ParserState
     const errconsts::Vector{String}
     const segment_outputs::Vector{Pair{Symbol, SegmentOutput}}
 end
+
+## Choice hashing
+#
+# Hash searches run once per choice at macro-expansion time. Their data is kept to
+# pattern-independent types (no tuples sized by the options, no captured register
+# types), so the search compiles once rather than once per pattern shape.
+
+"""
+    WindowHash(mul, shift, modulus)
+
+Hash of a little-endian register window `v` of `w` bits:
+`((v * mul) mod 2^w >> shift) % modulus + 1`, or `v` itself when `modulus` is zero.
+"""
+struct WindowHash
+    mul::UInt64
+    shift::Int
+    modulus::Int
+end
+
+"""
+    HashPlan
+
+A hash of the register window at byte `pos` (loaded as `iT`, OR-ed with `foldmask`
+when casefolding) that identifies each of a choice's options, from `find_window_hash`.
+
+- `kind`: `:direct` (the hash less `offset` is the option index), `:table`
+  (index = `table[hash]`), or `:bucketed` (up to two candidates per slot, the second
+  in `table2`)
+- `perm`: option order matching the indices
+- `injective`: the hash alone distinguishes every window value (identity family),
+  so the window's bytes need no further verification
+"""
+struct HashPlan
+    pos::Int
+    iT::DataType
+    foldmask::UInt64
+    hash::WindowHash
+    offset::Int
+    perm::Vector{Int}
+    kind::Symbol
+    table::Vector{Int}
+    table2::Vector{Int}
+    injective::Bool
+end

@@ -82,19 +82,13 @@ used across string matching, choice verification, and tail checking.
 """
 function pack_chunk(str::String, chunk::@NamedTuple{offset::Int, width::Int, iT::DataType},
                     casefold::Bool, valid::Int = min(chunk.width, ncodeunits(str) - chunk.offset))
-    (; offset, width, iT) = chunk
-    mask = reduce(|, (begin
-        if j < valid
-            byte = codeunit(str, offset + j + 1)
-            if casefold && UInt8('a') <= (byte | 0x20) <= UInt8('z')
-                iT(0xDF) << (8j)
-            else
-                iT(0xFF) << (8j)
-            end
-        else
-            zero(iT)
-        end
-    end for j in 0:width-1), init=zero(iT))
+    (; offset, iT) = chunk
+    mask = zero(iT)
+    for j in 0:valid-1
+        byte = codeunit(str, offset + j + 1)
+        folds = casefold && UInt8('a') <= (byte | 0x20) <= UInt8('z')
+        mask |= iT(if folds 0xDF else 0xFF end) << (8j)
+    end
     value = pack_bytes(str, offset, valid, iT) & mask
     (; value, mask)
 end
@@ -109,7 +103,7 @@ function gen_load(iT::DataType, posexpr::Union{Symbol, Expr})
     end
 end
 
-function gen_masked_compare(iT::DataType, posexpr, value, mask)
+function gen_masked_compare(iT::DataType, @nospecialize(posexpr), @nospecialize(value), @nospecialize(mask))
     load = gen_load(iT, posexpr)
     if mask == typemax(iT)
         :($load == $value)

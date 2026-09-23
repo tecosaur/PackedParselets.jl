@@ -27,7 +27,7 @@ multiply-shift in O(log nd) steps. The final step omits the cleanup mask.
 For hex (base > 10), `alpha_mask` enables letter correction before the
 first reduction step.
 """
-function swarparse_consts(::Type{T}, base::Int, nd::Int) where {T <: Unsigned}
+function swarparse_consts(T::DataType, base::Int, nd::Int)
     nbytes = sizeof(T)
     1 <= nd <= nbytes || throw(ArgumentError(
         "ndigits=$nd must be between 1 and $nbytes for $T"))
@@ -38,31 +38,33 @@ function swarparse_consts(::Type{T}, base::Int, nd::Int) where {T <: Unsigned}
     # Digit bytes sit in the high positions (byte indices padding:nbytes-1).
     # ASCII mask: 0x0F (or 0x4F for hex) per digit byte, 0x00 per garbage byte.
     byteval = if hex; T(0x4F) else T(0x0F) end
-    ascii_mask = reduce(|, (byteval << (8 * (padding + i)) for i in 0:nd-1); init=zero(T))
-    alpha_mask = if hex
-        reduce(|, (T(0x40) << (8 * (padding + i)) for i in 0:nd-1); init=zero(T))
-    else
-        zero(T)
+    ascii_mask, alpha_mask = zero(T), zero(T)
+    for i in 0:nd-1
+        ascii_mask |= byteval << (8 * (padding + i))
+        hex && (alpha_mask |= T(0x40) << (8 * (padding + i)))
     end
     # Reduction steps: binary-tree combine of adjacent digit groups via
     # multiply-shift. At each level, groups of `g` bytes are paired; Cₖ
     # computes `even × base^g + odd` for each pair. An AND mask between
     # steps cleans up inter-lane overflow; the final step omits it.
     nsteps = if nd <= 1 0 else 8 * sizeof(nd) - leading_zeros(nd - 1) end
-    steps = map(1:nsteps) do step
+    steps = Any[]
+    for step in 1:nsteps
         g = 1 << (step - 1)
         shift = g * 8
-        scale = T(base) ^ g
-        multiplier = scale * (one(T) << shift) + one(T)
+        multiplier = T(base) ^ g * (one(T) << shift) + one(T)
         if step < nsteps
             group_mask = (one(T) << shift) - one(T)
-            mask = reduce(|, (group_mask << (2g * 8 * i) for i in 0:(nbytes ÷ (2g))); init=zero(T))
-            (; multiplier, shift, mask)
+            mask = zero(T)
+            for i in 0:(nbytes ÷ (2g))
+                mask |= group_mask << (2g * 8 * i)
+            end
+            push!(steps, (; multiplier, shift, mask))
         else
-            (; multiplier, shift)
+            push!(steps, (; multiplier, shift))
         end
     end
-    (; ascii_mask, alpha_mask, steps = Tuple(steps))
+    (; ascii_mask, alpha_mask, steps)
 end
 
 """
@@ -75,7 +77,7 @@ is zero per-byte for valid digits.
 For base 11–16 (hex): addition-based range checks on both decimal and
 alpha ranges after casefolding, using bit 7 as the per-byte indicator.
 """
-function swar_digitconsts(::Type{T}, base::Int, hexcase::Symbol = :mixed) where {T <: Unsigned}
+function swar_digitconsts(T::DataType, base::Int, hexcase::Symbol = :mixed)
     rep = T(0x01) * typemax(T) ÷ typemax(UInt8)  # 0x0101…
     if base <= 10
         (; kind = :nibble,
@@ -106,8 +108,8 @@ Emit an expression computing a non-digit indicator from `var::T` into
 For base ≤ 10, each byte of `result` is zero for valid digits and nonzero
 otherwise. For base > 10, bit 7 of each byte is set for non-digits.
 """
-function gen_swar_nondigits(::Type{T}, var::Symbol, result::Symbol,
-                            base::Int, hexcase::Symbol = :mixed) where {T <: Unsigned}
+function gen_swar_nondigits(T::DataType, var::Symbol, result::Symbol,
+                            base::Int, hexcase::Symbol = :mixed)
     c = swar_digitconsts(T, base, hexcase)
     if c.kind === :nibble
         :($result = ($var & ($var + $(c.addmask)) & $(c.nibmask)) ⊻ $(c.expected))
@@ -132,8 +134,8 @@ Check that `nd` high-aligned digit bytes in `var::T` are valid, evaluating
 `on_fail` otherwise. When `nd < sizeof(T)`, a mask restricts the check to
 the digit bytes only.
 """
-function gen_swar_digitcheck(::Type{T}, var::Symbol, base::Int, nd::Int, on_fail,
-                              hexcase::Symbol = :mixed) where {T <: Unsigned}
+function gen_swar_digitcheck(T::DataType, var::Symbol, base::Int, nd::Int, on_fail,
+                              hexcase::Symbol = :mixed)
     nondig = gensym("nondig")
     check_expr = gen_swar_nondigits(T, var, nondig, base, hexcase)
     padding = sizeof(T) - nd
@@ -163,7 +165,7 @@ Count consecutive base-`base` digit bytes from the LSB of `var::T`
 (low-aligned). Stores the count (0 to `maxdigits`) in `countvar`.
 A sentinel mask beyond `maxdigits` caps the count.
 """
-function gen_swar_digitcount(::Type{T}, var::Symbol, countvar::Symbol, base::Int, maxdigits::Int) where {T <: Unsigned}
+function gen_swar_digitcount(T::DataType, var::Symbol, countvar::Symbol, base::Int, maxdigits::Int)
     nondig = gensym("nondig")
     check_expr = gen_swar_nondigits(T, var, nondig, base)
     # Set sentinel bits beyond maxdigits to stop counting
@@ -201,7 +203,7 @@ digit bytes in `var::T` into an integer value (stored back in `var`).
 
 For hex, applies `(alpha >> 6) * 9` letter correction before reduction.
 """
-function gen_swarparse(::Type{T}, var::Symbol, base::Int, nd::Int) where {T <: Unsigned}
+function gen_swarparse(T::DataType, var::Symbol, base::Int, nd::Int)
     c = swarparse_consts(T, base, nd)
     exprs = ExprVarLine[:($var &= $(c.ascii_mask))]
     if !iszero(c.alpha_mask)
@@ -286,7 +288,7 @@ Three strategies:
 - Exact (`nd < sizeof(T)`, `backward=false`): power-of-2 sub-loads shifted
   and ORed together; reads exactly `nd` bytes.
 """
-function gen_swar_load(::Type{T}, var::Symbol, nd::Int, backward::Bool, offset::Int=0) where {T}
+function gen_swar_load(T::DataType, var::Symbol, nd::Int, backward::Bool, offset::Int=0)
     posoff(n) = if iszero(n); :pos else :(pos + $n) end
     posexpr = posoff(offset)
     padding = sizeof(T) - nd
@@ -311,7 +313,8 @@ function gen_swar_load(::Type{T}, var::Symbol, nd::Int, backward::Bool, offset::
         coff += chunk
         remaining -= chunk
     end
-    parts = map(chunks) do (chunk, off)
+    parts = Any[]
+    for (chunk, off) in chunks
         bit_shift = 8 * (padding + off)
         cT = register_type(chunk)
         cposexpr = posoff(offset + off)
@@ -320,7 +323,7 @@ function gen_swar_load(::Type{T}, var::Symbol, nd::Int, backward::Bool, offset::
         else
             :(htol(Base.unsafe_load(Ptr{$cT}(pointer(data, $cposexpr)))) % $T)
         end
-        if iszero(bit_shift) load else :($load << $bit_shift) end
+        push!(parts, if iszero(bit_shift) load else :($load << $bit_shift) end)
     end
     rhs = parts[1]
     for i in 2:length(parts)
@@ -340,8 +343,8 @@ loaded and digit-checked. After execution, `var` holds digit bytes low-aligned
 and `countvar` holds the count (0 to `maxdigits`). References `data`, `pos`,
 and `availvar` from the enclosing parse context.
 """
-function gen_swar_varload(::Type{sT}, var::Symbol, countvar::Symbol,
-                          availvar::Symbol, base::Int, maxdigits::Int) where {sT <: Unsigned}
+function gen_swar_varload(sT::DataType, var::Symbol, countvar::Symbol,
+                          availvar::Symbol, base::Int, maxdigits::Int)
     @assert sizeof(sT) >= maxdigits "gen_swar_varload requires sizeof(sT) >= maxdigits"
     chunks = Int[]
     c = 1 << (8 * sizeof(maxdigits) - 1 - leading_zeros(maxdigits))
@@ -361,10 +364,10 @@ end
 # Generate cascading load-check-accumulate blocks for the given chunk sequence.
 # When `done_label` is provided, the full-register success path jumps to it
 # instead of duplicating the sub-chunk code in both if/else branches.
-function gen_varload_chunks(::Type{sT}, var::Symbol, countvar::Symbol,
+function gen_varload_chunks(sT::DataType, var::Symbol, countvar::Symbol,
                              availvar::Symbol, base::Int, maxdigits::Int,
                              chunks::AbstractVector{Int},
-                             done_label::Union{Symbol,Nothing}) where {sT <: Unsigned}
+                             done_label::Union{Symbol,Nothing})
     isempty(chunks) && return ExprVarLine[]
     chunk = first(chunks)
     rest = @view chunks[2:end]
@@ -417,7 +420,7 @@ end
 # Shared vocabulary for all digit-parse strategies: symbols, encoding
 # expressions, range checks, and error messages. Used by the three
 # strategy functions below.
-function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, dspec::NamedTuple)
+function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, @nospecialize(dspec::NamedTuple))
     (; base, maxdigits, vmin, vmax, pad, exclude) = dspec
     checks = Expr[]
     if vmin > 0
@@ -449,7 +452,7 @@ function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, dspec::N
 end
 
 function compute_digit_vocab(state::ParserState, nctx::NodeCtx,
-                             fieldvar::Symbol, option, dspec::NamedTuple)
+                             fieldvar::Symbol, @nospecialize(option), @nospecialize(dspec::NamedTuple))
     (; base, mindigits, maxdigits, vmin, vmax, dI, dT, claims_sentinel) = dspec
     fixedwidth = mindigits == maxdigits
     fnum = Symbol("$(fieldvar)_num")
@@ -481,7 +484,7 @@ end
 
 # Scalar `parseint` fallback for digit fields where SWAR isn't applicable.
 function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
-                            vocab, dspec::NamedTuple)
+                            @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
     (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
     (; base, mindigits, maxdigits, skipbytes) = dspec
     fixedwidth = mindigits == maxdigits
@@ -513,7 +516,7 @@ end
 Fixed-width SWAR for 1–16 digit fields.
 """
 function gen_digit_swar_fixed(state::ParserState, nctx::NodeCtx,
-                              vocab, dspec::NamedTuple)
+                              @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
     (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
     (; base, maxdigits, dI) = dspec
     chunksize = sizeof(UInt)
@@ -542,7 +545,7 @@ Both runtime and compile-time paths are emitted; `fold_static_branches!`
 selects the winner based on resolved length guarantees.
 """
 function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
-                                 vocab, dspec::NamedTuple)
+                                 @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
     (; fnum, fail_expr, fieldvar) = vocab
     (; base, mindigits, maxdigits, dI) = dspec
     sT = register_type(Base.min(maxdigits, sizeof(UInt)))
@@ -587,7 +590,7 @@ end
 # Backward strategy for variable-width: single wide load ending at
 # pos + avail - 1, then right-shift to low-align. Branchless digit count.
 function gen_vardigit_backward(::ParserState, nctx::NodeCtx,
-                                vocab, dspec::NamedTuple, vdjob, b::ParseBranch)
+                                @nospecialize(vocab), @nospecialize(dspec::NamedTuple), @nospecialize(vdjob), b::ParseBranch)
     (; sT, swar_var, countvar, availvar, avail_bound) = vdjob
     (; base, mindigits, maxdigits) = dspec
     backload = ExprVarLine[
@@ -605,7 +608,7 @@ end
 # Forward-overread + cascading fallback for variable-width.
 # Emits both paths gated by __static_length_check; fold_static_branches! picks the winner.
 function gen_vardigit_forward(state::ParserState, nctx::NodeCtx,
-                               vocab, dspec::NamedTuple, vdjob, b::ParseBranch)
+                               @nospecialize(vocab), @nospecialize(dspec::NamedTuple), @nospecialize(vdjob), b::ParseBranch)
     (; sT, swar_var, countvar, availvar, avail_bound) = vdjob
     (; base, mindigits, maxdigits) = dspec
     # Forward overread: single full-width load at pos, digits at LSB
@@ -634,8 +637,8 @@ Dispatch digit parsing: SWAR fixed/variable when base ≤ 16 and digit count
 is within register limits, scalar `parseint` otherwise.
 """
 function gen_digit_parse(state::ParserState, nctx::NodeCtx,
-                         fieldvar::Symbol, option,
-                         dspec::NamedTuple)
+                         fieldvar::Symbol, @nospecialize(option),
+                         @nospecialize(dspec::NamedTuple))
     vocab = compute_digit_vocab(state, nctx, fieldvar, option, dspec)
     (; mindigits, maxdigits, base, skipbytes, groups) = dspec
     fixedwidth = mindigits == maxdigits
@@ -665,8 +668,8 @@ into `resultvar::resultT`. `accum` is `:shift_or` (charseq bit-packing)
 or `:mul_add` (positional integer value).
 """
 function gen_swar_chunks(state::ParserState, nctx::NodeCtx,
-                         chunks, base::Int, resultvar::Symbol, resultT::DataType,
-                         on_fail, accum::Symbol, hexcase::Symbol = :mixed)
+                         @nospecialize(chunks), base::Int, resultvar::Symbol, resultT::DataType,
+                         @nospecialize(on_fail), accum::Symbol, hexcase::Symbol = :mixed)
     bpc = cardbits(base)
     exprs = ExprVarLine[]
     digits_remaining = sum(last, chunks)
@@ -702,7 +705,7 @@ end
 
 # Compute sub-chunked offsets and separator check expression for grouped fields.
 # Groups larger than a register are split into register-sized pieces.
-function grouped_chunks_and_check(groups, skipbytes, chunksize::Int = sizeof(UInt))
+function grouped_chunks_and_check(@nospecialize(groups), @nospecialize(skipbytes), chunksize::Int = sizeof(UInt))
     sep = first(skipbytes)
     ngroups = length(groups)
     total_bytes = sum(groups) + ngroups - 1
@@ -721,7 +724,7 @@ function grouped_chunks_and_check(groups, skipbytes, chunksize::Int = sizeof(UIn
 end
 
 function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
-                                vocab, dspec::NamedTuple)
+                                @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
     (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
     (; base, maxdigits, dI, groups, skipbytes) = dspec
     (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(groups, skipbytes)
@@ -756,8 +759,8 @@ Spread `nfields` packed `bpc`-bit fields (MSB-aligned in `var::T`) into
 individual bytes with ASCII offsets from `ranges`, `hton`-ed for storage.
 Supports 1 or 2 contiguous ranges; 2-range uses branchless SWAR comparison.
 """
-function gen_reverse_swar(::Type{T}, var::Symbol, bpc::Int, nfields::Int,
-                          ranges::NTuple{N, UnitRange{UInt8}}) where {T <: Unsigned, N}
+function gen_reverse_swar(T::DataType, var::Symbol, bpc::Int, nfields::Int,
+                          @nospecialize(ranges::Tuple{Vararg{UnitRange{UInt8}}}))
     rep = T(0x01) * typemax(T) ÷ typemax(UInt8)
     nbits = 8 * sizeof(T)
     exprs = ExprVarLine[]
@@ -766,15 +769,17 @@ function gen_reverse_swar(::Type{T}, var::Symbol, bpc::Int, nfields::Int,
         half = groupsize >> 1
         gap = half * (8 - bpc)
         lomask = (one(T) << (half * bpc)) - one(T)
-        mask = reduce(|, lomask << (nbits - i * groupwidth - groupsize * bpc)
-                      for i in 0:nfields ÷ groupsize - 1; init=zero(T))
+        mask = zero(T)
+        for i in 0:nfields ÷ groupsize - 1
+            mask |= lomask << (nbits - i * groupwidth - groupsize * bpc)
+        end
         push!(exprs, Expr(:(=), var, :($var & $(~mask) | ($var & $mask) >> $gap)))
         groupwidth = half * 8
         groupsize = half
     end
     push!(exprs, Expr(:(=), var, :($var >> $(8 - bpc) & $(T((1 << bpc) - 1) * rep))))
     base1 = T(first(ranges[1]))
-    if N == 1
+    if length(ranges) == 1
         push!(exprs, Expr(:(=), var, :(hton($var + $(base1 * rep)))))
     else
         len1 = T(length(ranges[1]))

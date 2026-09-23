@@ -117,9 +117,10 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
                               state::ParserState, name::Symbol)
     parsed_min = state.branches[1].parsed_min
     M = PackedParselets
-    # Primary pass: optimal length-check insertion with sentinel resolution
     resolved = implement_casting!(state, pexprs)
-    insert_length_checks!(state, resolved, state.branches)
+    for expr in resolved
+        expr isa Expr && resolve_sentinel_in_expr!(expr, state.branches)
+    end
     while fold_branches!(resolved) end
     # Resolve __checksum_gate sentinel
     gate_idx = findfirst(resolved) do e

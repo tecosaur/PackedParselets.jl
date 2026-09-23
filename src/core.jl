@@ -303,15 +303,7 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
                                  nctx::NodeCtx, kind::Symbol, output::SegmentOutput)
     (; bounds, codegen, meta) = output
     option = get(nctx, :optional, nothing)
-    # Defer error message registration to avoid shifting indices
-    seg_id = length(state.segment_outputs) + 1
-    b = nctx[:current_branch]
-    opt_label = get(nctx, :opt_label, nothing)
-    push!(exprs.parse, Expr(:call, :__segment_begin, seg_id, b.id,
-                            first(bounds.parsed), last(bounds.parsed),
-                            option, opt_label, meta.desc))
     append!(exprs.parse, codegen.parse)
-    push!(exprs.parse, Expr(:call, :__segment_end, seg_id))
     bounds.nbits > 0 && (state.bits += bounds.nbits)
     # Claim sentinel from this segment if the enclosing optional needs one
     if !isnothing(bounds.sentinel) && is_sentinel_unclaimed(nctx)

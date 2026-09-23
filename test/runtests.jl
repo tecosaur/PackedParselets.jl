@@ -266,6 +266,15 @@ function check_roundtrips(T, inputs)
 end
 
 """
+    parses_within(T, input, n) -> Bool
+
+Whether the first `n` bytes of `input` parse as `T`, with the remaining bytes
+present just past the end. Register loads escape `--check-bounds`, so this is
+how an out-of-bounds read shows up: as a parse that succeeds by reading them.
+"""
+parses_within(T, input, n) = PP.parsebytes(T, view(Vector{UInt8}(input), 1:n))[1] isa T
+
+"""
     parse_allocations(T, input) -> Int
 
 Bytes allocated by a warmed-up `parsebytes(T, codeunits(input))`.
@@ -3782,7 +3791,7 @@ end
         iddef = :(@defpacked RangeCascade ("Y",
             :year(choice(digits(2, min=91, max=99, pad=2), digits(2, min=0, max=7, pad=2))),
             :month(digits(2, min=1, max=12, pad=2))))
-        @test parsebytes_complexity(iddef) == (branches=7:13, branch_total=13, ops=13:67)
+        @test parsebytes_complexity(iddef) == (branches=7:14, branch_total=14, ops=13:69)
         eval(:(@defpacked RangeCascade ("Y",
             :year(choice(digits(2, min=91, max=99, pad=2), digits(2, min=0, max=7, pad=2))),
             :month(digits(2, min=1, max=12, pad=2)))))
@@ -3794,6 +3803,25 @@ end
         @test tryparse(RangeCascade, "Y8901") === nothing  # year 89 out of range
         check_roundtrips(RangeCascade, ("Y9101", "Y9912", "Y0001", "Y0712"))
         @test_neverthrow PP.parsebytes(RangeCascade, ::Vector{UInt8})
+    end
+    @testset "no reads past the input after a nested branch" begin
+        # Segments after a choice or optional must not borrow the up-front length
+        # check: the nested branch has already consumed some of it.
+        iddef = :(@defpacked TruncDispatch (choice(("A", :a(digits(2))), ("B", :b(digits(3)))),
+                   "x", :c(digits(2))))
+        @test parsebytes_complexity(iddef) == (branches=6:18, branch_total=18, ops=3:81)
+        eval(iddef)
+        @test parses_within(TruncDispatch, "B123x45", 7)
+        @test !parses_within(TruncDispatch, "B123x45", 5)
+        @test_neverthrow PP.parsebytes(TruncDispatch, ::Vector{UInt8})
+        iddef = :(@defpacked TruncOptional (optional("v", :v(digits(2))), "x", :c(digits(2))))
+        @test parsebytes_complexity(iddef) == (branches=6:9, branch_total=9, ops=20:42)
+        eval(iddef)
+        @test parses_within(TruncOptional, "v12x45", 6)
+        @test !parses_within(TruncOptional, "v12x45", 5)
+        @test_neverthrow PP.parsebytes(TruncOptional, ::Vector{UInt8})
+        @test parses_within(RangeCascade, "Y9901", 5)
+        @test !parses_within(RangeCascade, "Y9901", 3)
     end
     @testset "nested choice dispatch propagation" begin
         iddef = :(@defpacked NestedDispatch (choice(

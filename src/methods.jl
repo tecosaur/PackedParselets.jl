@@ -619,6 +619,9 @@ const RUNTIME_SYMS = Set{Symbol}([
 Walk `expr` and replace bare calls to known PackedParselets runtime
 functions with `GlobalRef(mod, name)`. This ensures generated code
 works when eval'd in any module, not just one that imports these symbols.
+Paths into `Base` and `Core` (`Core.Intrinsics.shl_int`) become `GlobalRef`s
+too, so lowering and inference see one constant instead of `getproperty`
+chains. Escaped (user) expressions are left alone.
 """
 function qualify_runtime_refs!(expr::Expr, mod::Module)
     for (i, arg) in enumerate(expr.args)
@@ -629,9 +632,31 @@ function qualify_runtime_refs!(expr::Expr, mod::Module)
                (Meta.isexpr(expr, :., 2) && i == 2)
                 expr.args[i] = GlobalRef(mod, arg)
             end
-        elseif arg isa Expr
-            qualify_runtime_refs!(arg, mod)
+        elseif arg isa Expr && !Meta.isexpr(arg, :escape)
+            ref = module_path_ref(arg)
+            if isnothing(ref)
+                qualify_runtime_refs!(arg, mod)
+            else
+                expr.args[i] = ref
+            end
         end
     end
     expr
+end
+
+# The `GlobalRef` a dotted path rooted at `Base` or `Core` names, if it resolves.
+function module_path_ref(ex::Expr)
+    Meta.isexpr(ex, :., 2) && ex.args[2] isa QuoteNode || return nothing
+    root = ex.args[1]
+    parent = if root === :Base
+        Base
+    elseif root === :Core
+        Core
+    elseif root isa Expr
+        ref = module_path_ref(root)
+        if !isnothing(ref) && isconst(ref.mod, ref.name) getglobal(ref.mod, ref.name) end
+    end
+    name = ex.args[2].value
+    parent isa Module && name isa Symbol && isdefined(parent, name) || return nothing
+    GlobalRef(parent, name)
 end

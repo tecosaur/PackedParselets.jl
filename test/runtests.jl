@@ -1975,6 +1975,30 @@ end
             @test_neverthrow PP.parsebytes(LinearChoice, ::Vector{UInt8})
         end
 
+        @testset "BucketedChoice (no perfect hash, up to two per slot)" begin
+            # arXiv cs.* classes: distinct 2-byte windows, but too many for the
+            # perfect-hash search, so the second-candidate table is exercised.
+            classes = ["AI", "AR", "CC", "CE", "CG", "CL", "CR", "CV", "CY", "DB", "DC",
+                       "DL", "DM", "DS", "ET", "FL", "GL", "GR", "GT", "HC", "IR", "IT",
+                       "LG", "LO", "MA", "MM", "MS", "NA", "NI", "OH", "OS", "PF", "PL",
+                       "RO", "SC", "SD", "SE", "SI", "SY"]
+            @test isnothing(PP.find_window_hash(PP.classify_hash, lowercase.(classes), true))
+            @test PP.find_window_hash(PP.classify_bucketed, lowercase.(classes), true).kind === :bucketed
+            iddef = :(@defpacked BucketedChoice (:cls(choice($(classes...))), :id(digits(max=99))))
+            @test parsebytes_complexity(iddef) == (branches=7:10, branch_total=10, ops=40:46)
+            eval(iddef)
+            # Every two-letter input parses exactly when it is a member
+            @test all(Iterators.product('A':'Z', 'A':'Z')) do (a, b)
+                cls = string(a, b)
+                id = tryparse(BucketedChoice, cls * "42")
+                if cls in classes; !isnothing(id) && id.cls === Symbol(cls) else isnothing(id) end
+            end
+            @test parse(BucketedChoice, "sy07").cls === :SY
+            check_roundtrips(BucketedChoice, ("AI00", "SY99", "DS42"))
+            @test_neverthrow PP.parsebytes(BucketedChoice, ::Vector{UInt8})
+            @test parse_allocations(BucketedChoice, "SY42") == 0
+        end
+
         @testset "ManyChoiceOpt (many options in optional)" begin
             iddef = :(@defpacked ManyChoiceOpt (:id(digits(max=999)),
                        optional("-", :tag(choice("draft", "final", "void",

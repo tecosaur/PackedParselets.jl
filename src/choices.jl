@@ -4,6 +4,12 @@
 # Choice pattern handler and its codegen: perfect hashing, matcher assembly,
 # and register-sized verification.
 
+# Below these option counts the unrolled linear matcher, which LLVM often turns into
+# a switch, measured as fast or faster than a bucketed hash on varied input. Mixed
+# lengths cost the hash path a length lookup and a bytewise tail check.
+const BUCKETED_MIN_FIXED_OPTIONS = 8
+const BUCKETED_MIN_VARIABLE_OPTIONS = 16
+
 ## Choice pattern handler
 
 """
@@ -195,10 +201,20 @@ Build parse-time matcher expressions for a choice node.
 
 Uses perfect hashing when available (with optional hash-skip optimisation
 for injective hashes and widened verify tables when they reduce chunk count),
-falls back to linear scan. May reorder options to match hash output order.
+then a bucketed hash for larger option sets, and falls back to linear scan.
+May reorder options to match hash output order.
 """
 function build_choice_matcher(state::ParserState, nctx::NodeCtx, cctx)
-    ph = find_perfect_hash(cctx.mopts, cctx.casefold)
+    (; mopts, casefold) = cctx
+    ph = find_window_hash(classify_hash, mopts, casefold)
+    minbucketed = if allequal(map(ncodeunits, mopts))
+        BUCKETED_MIN_FIXED_OPTIONS
+    else
+        BUCKETED_MIN_VARIABLE_OPTIONS
+    end
+    if isnothing(ph) && length(mopts) >= minbucketed
+        ph = find_window_hash(classify_bucketed, mopts, casefold)
+    end
     if !isnothing(ph)
         build_hash_matcher(state, nctx, ph, cctx)
     else
@@ -323,6 +339,15 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph, cctx)
                          onmatch(coerced_i)]
     guard_append!(action)
     push!(parts, :(if found; $(body...) end))
+    if ph.kind === :bucketed
+        # A slot holds up to two options: when the first fails to verify, try the second.
+        retry = map(e -> e isa Expr ? copy(e) : e, body)
+        push!(parts, :(if !found && 1 <= hi <= $(ph.tablelen)
+                           i = $(ph.table2)[hi]
+                           found = !iszero(i)
+                           if found; $(retry...) end
+                       end))
+    end
     (parts, mopts, sopts)
 end
 
@@ -396,21 +421,21 @@ function search_hash_families(try_fn::F, nopts::Int, iT::DataType) where {F <: F
 end
 
 """
-    find_perfect_hash(options::Vector{String}, casefold::Bool)
+    find_window_hash(classify, options::Vector{String}, casefold::Bool)
         -> Union{NamedTuple, Nothing}
 
-Search for a minimal perfect hash over `options` using register-sized byte
-windows and multiple hash families.
+Search register-sized byte windows over `options`, under identity (injective),
+mod, shift-mod, and multiply-shift-mod hash families, for the cheapest hash that
+`classify` accepts:
+- `classify_hash`: a minimal perfect hash, cost-ranked direct+injective (0) >
+  direct (1) > small table > large table. The `injective` flag on identity-family
+  results enables `find_best_hash_skip` to elide verification bytes the hash covers.
+- `classify_bucketed`: up to two options per slot (`kind = :bucketed`, second
+  candidates in `table2`), for sets too large for a perfect hash to be found.
 
-Tries identity (injective), mod, shift-mod, and multiply-shift-mod families
-across all discriminating byte windows. The `injective` flag on identity-family
-results enables `find_best_hash_skip` to elide verification bytes that the hash
-already covers.
-
-Cost-ranked: direct+injective (0) > direct (1) > small table > large table.
-Returns `nothing` when no perfect hash is found.
+Returns `nothing` when no hash is accepted.
 """
-function find_perfect_hash(options::Vector{String}, casefold::Bool)
+function find_window_hash(classify::F, options::Vector{String}, casefold::Bool) where {F <: Function}
     nopts = length(options)
     iszero(nopts) && return nothing
     minlen = minimum(ncodeunits, options)
@@ -445,8 +470,7 @@ function find_perfect_hash(options::Vector{String}, casefold::Bool)
         result = search_hash_families(nopts, iT) do fn, expr_fn, injective, _maxval
             hvals = map(fn, values)
             any(h -> h < 1, hvals) && return nothing
-            length(unique(hvals)) == nopts || return nothing
-            classified = classify_hash(hvals, nopts, pos, iT, foldmask % iT, expr_fn)
+            classified = classify(hvals, nopts, pos, iT, foldmask % iT, expr_fn)
             isnothing(classified) && return nothing
             cost = classified.cost + (classified.ph.kind === :direct && !injective)
             (merge(classified.ph, (; injective)), cost)
@@ -461,6 +485,7 @@ end
 function classify_hash(hvals::Vector{UInt64}, nopts::Int,
                        pos::Int, iT::DataType, foldmask, hashexpr_fn;
                        max_tablelen::Int = 4 * nopts)
+    length(unique(hvals)) == nopts || return nothing
     sorted_indices = sortperm(hvals)
     sorted_hvals = hvals[sorted_indices]
     lo, hi = Int(sorted_hvals[1]), Int(sorted_hvals[end])
@@ -488,6 +513,23 @@ function classify_hash(hvals::Vector{UInt64}, nopts::Int,
            perm = collect(1:nopts), kind = :table,
            table = Tuple(table), tablelen = maxval)
     (; cost = 2 * nopts + maxval, ph)
+end
+
+function classify_bucketed(hvals::Vector{UInt64}, nopts::Int,
+                           pos::Int, iT::DataType, foldmask, hashexpr_fn;
+                           max_tablelen::Int = 4 * nopts)
+    maxval = Int(maximum(hvals))
+    maxval > max_tablelen && return nothing
+    table, table2 = zeros(Int, maxval), zeros(Int, maxval)
+    for (i, h) in enumerate(hvals)
+        slots = if iszero(table[h]) table elseif iszero(table2[h]) table2 else return nothing end
+        slots[h] = i
+    end
+    ph = (; pos, iT, foldmask, hashexpr = hashexpr_fn,
+           perm = collect(1:nopts), kind = :bucketed,
+           table = Tuple(table), table2 = Tuple(table2), tablelen = maxval)
+    # Each second candidate is a potential extra verify
+    (; cost = 2 * nopts + maxval + count(!iszero, table2), ph)
 end
 
 """

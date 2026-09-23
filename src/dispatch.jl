@@ -294,7 +294,7 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}})
 end
 
 # Extract canonical byte prefixes from arm bytespans and delegate to
-# find_perfect_hash for direct arithmetic dispatch over table lookups.
+# find_window_hash for direct arithmetic dispatch over table lookups.
 function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int)
     casefold = false
     prefixes = map(arm_spans) do spans
@@ -316,7 +316,7 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int)
     end
     any(isnothing, prefixes) && return nothing
     allunique(prefixes) || return nothing
-    ph = find_perfect_hash(prefixes, casefold)
+    ph = find_window_hash(classify_hash, prefixes, casefold)
     isnothing(ph) && return nothing
     fm = ph.foldmask % ph.iT
     hashfn = if iszero(fm) ph.hashexpr else b -> ph.hashexpr(:($b | $fm)) end

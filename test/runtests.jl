@@ -536,6 +536,35 @@ end
     @test_neverthrow PP.parsebytes(PadBig, ::Vector{UInt8})
 end
 
+@testset "decimal buffer printing" begin
+    # Generated code passes `pad` and `maxdigits` as constants, so each combination is
+    # compiled with them folded. Values beyond `maxdigits` only arise from reinterpreted
+    # bits, but must still print correctly.
+    buf = Memory{UInt8}(undef, 32)
+    for maxdigits in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 16, 19, 20),
+            pad in unique((0, 1, maxdigits - 1, maxdigits, maxdigits + 2))
+        pad >= 0 || continue
+        printer = @eval (buf, n) -> PP.bufprint(buf, 0, n, 10, $pad, $maxdigits)
+        lim = if maxdigits < 20 UInt64(10)^maxdigits - 1 else typemax(UInt64) end
+        edges = UInt64[UInt64(10)^k + d for k in 0:min(maxdigits, 19) - 1 for d in (-1, 0, 1)]
+        values = [filter(<=(lim), edges); rand(UInt64(0):lim, 200)]
+        maxdigits < 20 && append!(values, (lim + 1, rand(lim + 1:typemax(UInt64)), typemax(UInt64)))
+        misprinted = filter(values) do v
+            String(buf[1:Base.invokelatest(printer, buf, v)]) != string(v, pad = max(pad, 1))
+        end
+        @test isempty(misprinted)
+    end
+    # Padded but not exact: values both within and wider than their padding
+    @defpacked PadWide (:n(digits(4:5, pad=4)))
+    for (v, s) in ((7, "0007"), (1234, "1234"), (12345, "12345"))
+        @test string(PadWide(v)) == s
+    end
+    @defpacked PadU32 (:n(digits(UInt32, pad=9)))
+    for (v, s) in ((5, "000000005"), (123456789, "123456789"), (typemax(UInt32), "4294967295"))
+        @test string(PadU32(v)) == s
+    end
+end
+
 @testset "show forms" begin
     @defpacked ShowTest (:id(digits(3)))
     x = ShowTest(42)

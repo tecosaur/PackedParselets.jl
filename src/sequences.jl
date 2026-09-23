@@ -184,11 +184,7 @@ function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, @nos
     printpad = if fixedwidth && maxdigits > 1; maxdigits
     elseif pad > 0; pad
     else 0 end
-    printex = if printpad > 0
-        :(print(io, string($printvar, base=$base, pad=$printpad)))
-    else
-        :(print(io, string($printvar, base=$base, pad=0)))
-    end
+    printex = :(printdigits(io, $printvar, $base, $printpad, $(ndigits(max; base))))
     # getval: extract bits → variable
     getval = ExprVarLine[fextract]
     directvar || push!(getval, :($fieldvar = $fvalue))
@@ -219,7 +215,7 @@ function grouped_digits_print(fextract::Expr, dT::DataType, fieldvar::Symbol, fv
     push!(extract, :($(gvars[1]) = $remainder))
     # Output: grouped print calls with separators
     writes = emit_grouped(groups, sep) do gi, gsize
-        ExprVarLine[:(print(io, string($(gvars[gi]), base=$base, pad=$gsize)))]
+        ExprVarLine[:(printdigits(io, $(gvars[gi]), $base, $gsize, $gsize))]
     end
     # Length: each group is exactly `gsize` digits (groups require fixedwidth) + separators
     totallen = sum(groups) + ngroups - 1

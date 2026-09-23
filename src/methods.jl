@@ -469,8 +469,8 @@ end
 """
     rewrite_bufprint!(pexprs)
 
-Rewrite `print(io, ...)` and `printchars(io, ...)` calls in `pexprs`
-into direct `Memory{UInt8}` buffer operations (`bufprint`, `unpackchars!`,
+Rewrite `print(io, ...)`, `printchars(io, ...)` and `printdigits(io, ...)` calls in
+`pexprs` into direct `Memory{UInt8}` buffer operations (`bufprint`, `unpackchars!`,
 `bufprint_static`), avoiding IO overhead in the generated `tobytes` method.
 
 Recurses into nested expressions. Modifies `pexprs` in place.
@@ -489,6 +489,8 @@ function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
                 Any[:(@inbounds buf[pos += 1] = $(args[1]))]
             elseif fname == :printchars
                 rewrite_printchars(args)
+            elseif fname == :printdigits
+                Any[:(pos = bufprint(buf, pos, $(args...)))]
             elseif fname == :__tobytes_print
                 tobytes_ref = GlobalRef(PackedParselets, :tobytes)
                 ebuf = gensym("ebuf")
@@ -609,7 +611,7 @@ end
 # method definitions already use GlobalRef(PackedParselets, ...).
 # Bare references in finalize hooks are the hook author's responsibility.
 const RUNTIME_SYMS = Set{Symbol}([
-    :parsechars, :parseint, :printchars, :chars2string,
+    :parsechars, :parseint, :printchars, :printdigits, :chars2string,
     :bufprint, :radix100_store, :unpackchars!, :takestring!,
 ])
 

@@ -181,6 +181,15 @@ function printchars(io::IO, packed::P, nchars::Int,
 end
 
 """
+    printdigits(io::IO, num::Integer, base, pad, maxdigits)
+
+Write `num` in `base`, zero-padded to `pad` digits. `maxdigits` bounds the digit
+count of the field's values; only the buffer form (`bufprint`) uses it, to drop
+the widths no value can have.
+"""
+printdigits(io::IO, num::Integer, base::Int, pad::Int, ::Int) = print(io, string(num; base, pad))
+
+"""
     chars2string(packed::Unsigned, nchars, ranges[, oneindexed]) -> String
 
 Unpack `nchars` characters from `packed` into a `String`.
@@ -209,8 +218,11 @@ const RADIX100 = Tuple(UInt16(UInt8('0') + i % 10) << 8 | UInt16(UInt8('0') + i 
     Base.unsafe_store!(Ptr{UInt16}(pointer(buf, pos)), @inbounds RADIX100[pair + 1])
 end
 
-Base.@constprop :aggressive @inline function bufprint(buf::Memory{UInt8}, pos::Int, num::Integer, base::Int = 10, pad::Int = 0)
-    base == 10 && return bufprint_decimal(buf, pos, num % UInt64, pad)
+const POW10 = ntuple(i -> UInt64(10)^(i - 1), 20)
+
+Base.@constprop :aggressive @inline function bufprint(buf::Memory{UInt8}, pos::Int, num::Integer, base::Int = 10,
+                                                      pad::Int = 0, maxdigits::Int = length(POW10))
+    base == 10 && return bufprint_decimal(buf, pos, num % UInt64, pad, maxdigits)
     nd = ndigits(num; base)
     endpos = pos + Base.max(nd, pad)
     i = endpos
@@ -238,12 +250,64 @@ end
 # Ref: Jeon, "Faster integer formatting: jeaiii's algorithm", 2022.
 # Each digit field inlines only the UInt32 printer; wider values call out, since
 # inlining the UInt64 path copies the UInt32 printer into every field up to four times.
-Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}, pos::Int, num::UInt64, pad::Int)
-    if num <= typemax(UInt32)
-        bufprint_decimal32(buf, pos, num % UInt32, pad)
+# With a constant `pad` and `maxdigits` only the widths a field's values can have
+# remain: values its padding covers print as fixed digit pairs, and wider ones keep
+# just the jeaiii ranges from `pad + 1` to `maxdigits` digits. Values beyond
+# `maxdigits`, which only reinterpreted bits can hold, take the general path out of line.
+Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}, pos::Int, num::UInt64,
+                                                              pad::Int, maxdigits::Int = length(POW10))
+    maxdigits < length(POW10) && num >= @inbounds(POW10[maxdigits + 1]) &&
+        return @noinline bufprint_decimal(buf, pos, num, pad)
+    if pad > 0
+        (pad >= maxdigits || num < @inbounds(POW10[pad + 1])) &&
+            return bufprint_fixed(buf, pos, num, pad)
+    end
+    mindigits = Base.max(pad + 1, 1)
+    if maxdigits <= 9 || num <= typemax(UInt32)
+        bufprint_decimal32(buf, pos, num % UInt32, 0, mindigits, Base.min(maxdigits, 10))
     else
         bufprint_decimal64(buf, pos, num, pad)
     end
+end
+
+# Exactly `width` digits of `num < 10^width`. The jeaiii constants below are exact
+# over the whole of 0:10^6-1 (the wider ones only near the top of their ranges), so
+# 4-digit chunks are peeled off the right until at most six digits remain. With a
+# constant `width` the split folds away, leaving about one multiply per digit pair.
+Base.@constprop :aggressive @inline function bufprint_fixed(buf::Memory{UInt8}, pos::Int, num::UInt64, width::Int)
+    nchunks = cld(Base.max(width - 6, 0), 4)
+    i = pos + width
+    for _ in 1:nchunks
+        num, chunk = divrem(num, UInt64(10_000))
+        bufprint_fixed6(buf, i - 4, chunk % UInt32, 4)
+        i -= 4
+    end
+    bufprint_fixed6(buf, pos, num % UInt32, width - 4 * nchunks)
+    pos + width
+end
+
+# Exactly `width ≤ 6` digits; an odd `width` leaves a single digit in the leading pair.
+Base.@constprop :aggressive @inline function bufprint_fixed6(buf::Memory{UInt8}, pos::Int, num::UInt32, width::Int)
+    prod, npairs = if width <= 2
+        (UInt64(num) << 32, 0)
+    elseif width <= 4
+        (UInt64(num) * 42949673, 1)
+    else
+        (UInt64(num) * 429497, 2)
+    end
+    pair = Int(prod >> 32)
+    if isodd(width)
+        @inbounds buf[pos += 1] = UInt8('0') + pair % UInt8
+    else
+        radix100_store(buf, pos + 1, pair)
+        pos += 2
+    end
+    for _ in 1:npairs
+        prod = UInt64(prod % UInt32) * UInt64(100)
+        radix100_store(buf, pos + 1, Int(prod >> 32))
+        pos += 2
+    end
+    pos
 end
 
 @noinline function bufprint_decimal64(buf::Memory{UInt8}, pos::Int, num::UInt64, pad::Int)
@@ -270,9 +334,13 @@ end
     pos
 end
 
-Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt8}, pos::Int, num::UInt32, pad::Int)
+# A range `num` must lie in, by `mindigits:maxdigits`, is taken without a test, and
+# one it can't lie in is skipped: the ranges above 10^6, whose constants are only exact
+# near their tops, are still only reached by values the ranges below them exclude.
+Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt8}, pos::Int, num::UInt32, pad::Int,
+                                                                mindigits::Int = 1, maxdigits::Int = 10)
     startpos = pos
-    if num < 100
+    if maxdigits <= 2 || (mindigits <= 2 && num < 100)
         if num < 10
             @inbounds buf[pos += 1] = UInt8('0') + num % UInt8
         else
@@ -282,13 +350,13 @@ Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt
     else
         # Select the range's constant, then emit once: every field inlines this
         # printer, so one emission loop keeps each inlined copy small.
-        prod, npairs = if num < 10_000
+        prod, npairs = if maxdigits <= 4 || (mindigits <= 4 && num < 10_000)
             (UInt64(num) * 42949673, 1)
-        elseif num < 1_000_000
+        elseif maxdigits <= 6 || (mindigits <= 6 && num < 1_000_000)
             (UInt64(num) * 429497, 2)
-        elseif num < 100_000_000
+        elseif maxdigits <= 8 || (mindigits <= 8 && num < 100_000_000)
             ((UInt64(num) * 281474978) >> 16, 3)
-        elseif num < 1_000_000_000
+        elseif maxdigits <= 9 || (mindigits <= 9 && num < 1_000_000_000)
             ((UInt64(num) * 1441151882) >> 25, 4)
         else
             ((UInt64(num) * 1441151881) >> 25, 4)

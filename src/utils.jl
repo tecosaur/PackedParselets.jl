@@ -236,8 +236,17 @@ end
 # (UInt32(prod) * 100) advances to the next pair. The first pair's
 # value (< 10 or ≥ 10) determines odd/even digit count implicitly.
 # Ref: Jeon, "Faster integer formatting: jeaiii's algorithm", 2022.
+# Each digit field inlines only the UInt32 printer; wider values call out, since
+# inlining the UInt64 path copies the UInt32 printer into every field up to four times.
 Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}, pos::Int, num::UInt64, pad::Int)
-    num <= typemax(UInt32) && return bufprint_decimal32(buf, pos, num % UInt32, pad)
+    if num <= typemax(UInt32)
+        bufprint_decimal32(buf, pos, num % UInt32, pad)
+    else
+        bufprint_decimal64(buf, pos, num, pad)
+    end
+end
+
+@noinline function bufprint_decimal64(buf::Memory{UInt8}, pos::Int, num::UInt64, pad::Int)
     startpos = pos
     # Split into ≤8-digit UInt32 chunks via divrem by 10^8.
     # UInt64 max ≈ 1.8×10^19 → at most three chunks (4+8+8 digits).
@@ -262,7 +271,28 @@ Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}
 end
 
 Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt8}, pos::Int, num::UInt32, pad::Int)
-    @inline function jeaiii_emit(buf, pos, prod, npairs)
+    startpos = pos
+    if num < 100
+        if num < 10
+            @inbounds buf[pos += 1] = UInt8('0') + num % UInt8
+        else
+            radix100_store(buf, pos + 1, num)
+            pos += 2
+        end
+    else
+        # Select the range's constant, then emit once: every field inlines this
+        # printer, so one emission loop keeps each inlined copy small.
+        prod, npairs = if num < 10_000
+            (UInt64(num) * 42949673, 1)
+        elseif num < 1_000_000
+            (UInt64(num) * 429497, 2)
+        elseif num < 100_000_000
+            ((UInt64(num) * 281474978) >> 16, 3)
+        elseif num < 1_000_000_000
+            ((UInt64(num) * 1441151882) >> 25, 4)
+        else
+            ((UInt64(num) * 1441151881) >> 25, 4)
+        end
         pair = Int(prod >> 32)
         if pair < 10
             @inbounds buf[pos += 1] = UInt8('0') + pair % UInt8
@@ -275,21 +305,6 @@ Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt
             radix100_store(buf, pos + 1, Int(prod >> 32))
             pos += 2
         end
-        pos
-    end
-    startpos = pos
-    pos = if num < 100
-        if num < 10; @inbounds buf[pos + 1] = UInt8('0') + num % UInt8; pos + 1
-        else radix100_store(buf, pos + 1, num); pos + 2 end
-    elseif num < 1_000_000
-        if num < 10_000; jeaiii_emit(buf, pos, UInt64(num) * 42949673, 1)
-        else jeaiii_emit(buf, pos, UInt64(num) * 429497, 2) end
-    elseif num < 100_000_000
-        jeaiii_emit(buf, pos, (UInt64(num) * 281474978) >> 16, 3)
-    elseif num < 1_000_000_000
-        jeaiii_emit(buf, pos, (UInt64(num) * 1441151882) >> 25, 4)
-    else
-        jeaiii_emit(buf, pos, (UInt64(num) * 1441151881) >> 25, 4)
     end
     nd = pos - startpos
     if nd < pad

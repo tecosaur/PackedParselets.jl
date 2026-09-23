@@ -314,14 +314,18 @@ function constructor_scope_checks(args::Vector{Tuple{Symbol, Int}},
         b.scope === :root && continue
         scope_parents[b.scope] = b.parent.scope
     end
+    # Scopes in order of first appearance, so the checks don't follow gensym hashing
+    scopes = Symbol[]
     scope_args = Dict{Symbol, Vector{Int}}()
     for (idx, (_, si)) in enumerate(args)
         scope = segs[si].condition
         isnothing(scope) && continue
+        haskey(scope_args, scope) || push!(scopes, scope)
         push!(get!(Vector{Int}, scope_args, scope), idx)
     end
     checks = Expr[]
-    for (scope, cidxs) in scope_args
+    for scope in scopes
+        cidxs = scope_args[scope]
         parent_scope = get(scope_parents, scope, nothing)
         isnothing(parent_scope) && continue
         pidxs = get(scope_args, parent_scope, nothing)

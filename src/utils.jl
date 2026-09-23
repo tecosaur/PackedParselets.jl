@@ -187,7 +187,7 @@ Write `num` in `base`, zero-padded to `pad` digits. `maxdigits` bounds the digit
 count of the field's values; only the buffer form (`bufprint`) uses it, to drop
 the widths no value can have.
 """
-printdigits(io::IO, num::Integer, base::Int, pad::Int, ::Int) = print(io, string(num; base, pad))
+printdigits(io::IO, num::Integer, base::Int, pad::Int, ::Int) = print(io, string(num; base, pad = Base.max(pad, 1)))
 
 """
     chars2string(packed::Unsigned, nchars, ranges[, oneindexed]) -> String

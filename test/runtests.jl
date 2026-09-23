@@ -594,6 +594,13 @@ eval(packed_deftype(@__MODULE__, :EmbField,
     @test string(x) == "F05-123"
 end
 
+@testset "zero digit values" begin
+    @defpacked ZeroDigits ("Z", :n(digits(max=99)))
+    x = parse(ZeroDigits, "Z0")
+    @test string(x) == "Z0"
+    @test PP.segments(x) == ((0, "Z"), (1, "0"))
+end
+
 @testset "embed" begin
     x = parse(EmbOuter, "E05-10")
     @test x.inner isa EmbInner

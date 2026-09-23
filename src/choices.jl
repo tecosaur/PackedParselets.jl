@@ -100,6 +100,8 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
           emit_pack(state, cint, fieldvar, bitpos)]
     fextract = :($fieldvar = $(emit_extract(state, bitpos, cbits)))
     present = :(!iszero($fieldvar))
+    # Once present, the index selects from the options tuple
+    valid = emit_validity_check(state, fieldvar, fieldvar, 1:length(sopts))
     opttuple = Tuple(sopts)
     printexpr = :(print(io, @inbounds $opttuple[$fieldvar]))
     optlens = ncodeunits.(sopts)
@@ -111,11 +113,17 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
     # When allowempty without an enclosing optional, guard on presence
     emptyguard = allowempty && isnothing(option)
     guard(ex) = if emptyguard; :(if $present; $ex end) else ex end
+    # Index checked, as statements rewrite_bufprint! can still reach the print in
+    checked(ex) = if emptyguard
+        ExprVarLine[Expr(:if, present, Expr(:block, copy(valid), ex))]
+    else
+        ExprVarLine[copy(valid), ex]
+    end
     vars = Pair{Symbol,Any}[fieldvar => :(zero($cint))]
     argvar = gensym("arg_choice")
     extract_value, impart_core, argtype = choice_value_codegen(
         state, valtype, sopts, fieldvar, argvar, cint, bitpos)
-    emptyguard && (extract_value = guard(extract_value))
+    extract_value = guard(Expr(:block, copy(valid), extract_value))
     eopt = if emptyguard gensym("emptyopt") else option end
     sentinel = if claims SentinelSpec((0, cbits)) end
     pmax = maximum(ncodeunits, sopts)
@@ -129,11 +137,11 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
     SegmentOutput(
         SegmentBounds(pmin:pmax, pmin:pmax, cbits, sentinel),
         SegmentCodegen(pexprs, seg_extract,
-            PrintExprs(direct = ExprVarLine[fextract, guard(copy(printexpr))],
+            PrintExprs(direct = ExprVarLine[fextract, checked(copy(printexpr))...],
                        vars = vars,
                        getval = ExprVarLine[fextract],
-                       getlen = ExprVarLine[guard(lenexpr)],
-                       putval = ExprVarLine[guard(copy(printexpr))]),
+                       getlen = checked(lenexpr),
+                       putval = checked(copy(printexpr))),
             seg_impart),
         SegmentMeta(label, desc, desc, argtype, argvar),
         arrangements)

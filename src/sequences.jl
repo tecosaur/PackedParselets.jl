@@ -136,12 +136,13 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     else
         fvalue
     end
+    valid = emit_validity_check(state, fieldvar, if directvar fnum else fieldvar end, vmin:vmax)
     pinfo = if isnothing(groups)
         digits_print_exprs(fextract, dT, fieldvar, fvalue, directvar, fnum,
-                           fixedwidth, maxdigits, pad, base, vmax)
+                           fixedwidth, maxdigits, pad, base, vmax, valid)
     else
         grouped_digits_print(fextract, dT, fieldvar, fvalue, directvar, fnum,
-                             groups, first(skipbytes), base)
+                             groups, first(skipbytes), base, valid)
     end
     # Constructor (impart) codegen
     argvar = gensym("arg_digit")
@@ -179,7 +180,7 @@ end
 function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, @nospecialize(fvalue),
                             directvar::Bool, fnum::Symbol,
                             fixedwidth::Bool, maxdigits::Int, pad::Int, base::Int,
-                            max::Integer)
+                            max::Integer, valid::Expr)
     printvar = if directvar fnum else fieldvar end
     printpad = if fixedwidth && maxdigits > 1; maxdigits
     elseif pad > 0; pad
@@ -193,7 +194,7 @@ function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, @nos
     else gen_digit_count(printvar, maxdigits, base, Base.max(printpad, 1), max) end
     vars = Pair{Symbol,Any}[fnum => zero(dT)]
     directvar || push!(vars, fieldvar => zero(dT))
-    PrintExprs(direct = ExprVarLine[getval..., printex],
+    PrintExprs(direct = ExprVarLine[getval..., valid, printex],
                vars = vars, getval = getval,
                getlen = ExprVarLine[:(pos += $lenex)],
                putval = ExprVarLine[copy(printex)])
@@ -201,13 +202,14 @@ end
 
 function grouped_digits_print(fextract::Expr, dT::DataType, fieldvar::Symbol, fvalue,
                               directvar::Bool, fnum::Symbol,
-                              @nospecialize(groups::Tuple), sep::UInt8, base::Int)
+                              @nospecialize(groups::Tuple), sep::UInt8, base::Int, valid::Expr)
     printvar = if directvar fnum else fieldvar end
     ngroups = length(groups)
     gvars = Symbol[gensym("g$i") for i in 1:ngroups]
     # Shared extraction: bit extract + value computation + divrem decomposition
     extract = ExprVarLine[fextract]
     directvar || push!(extract, :($fieldvar = $fvalue))
+    push!(extract, valid)
     remainder = printvar
     for i in ngroups:-1:2
         push!(extract, :(($remainder, $(gvars[i])) = divrem($remainder, $(base^groups[i]))))
@@ -645,7 +647,9 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     lenexpr = if iszero(nseps); :(pos += $nchars_expr) else :(pos += $nchars_expr + $nseps) end
     pvars = Pair{Symbol,Any}[charvar => :(zero($cT))]
     variable && push!(pvars, lenvar => 0)
-    pinfo = PrintExprs(direct = ExprVarLine[extracts..., printexprs...],
+    lencheck = ExprVarLine[]
+    variable && push!(lencheck, emit_validity_check(state, fieldvar, lenvar, minlen:maxlen))
+    pinfo = PrintExprs(direct = ExprVarLine[extracts..., lencheck..., printexprs...],
                        vars = pvars,
                        getval = copy(extracts),
                        getlen = ExprVarLine[lenexpr],

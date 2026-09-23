@@ -121,6 +121,29 @@ struct SegmentOutput
     bytespans::Vector{Vector{ByteSet}}
 end
 
+## Errors
+
+"""
+    InvalidPacking(type, field, value)
+
+A value of the packed `type` whose `field` (`nothing` when unnamed) holds `value`,
+which parsing and constructors never produce: its bits came from elsewhere, such as
+`reinterpret` of raw data. Printing or reading such a field throws this rather than
+going out of bounds.
+"""
+struct InvalidPacking <: Exception
+    type::Type
+    field::Union{Symbol, Nothing}
+    value::Integer
+end
+
+function Base.showerror(io::IO, e::InvalidPacking)
+    print(io, "InvalidPacking: a ", e.type, " value holds ", e.value, " in ",
+          if isnothing(e.field) "an unnamed field" else "field `$(e.field)`" end,
+          ", which parsing and constructors never produce. Its bits must have come ",
+          "from elsewhere (e.g. `reinterpret` of raw data); check that source.")
+end
+
 ## SegmentDef: segment registry entry
 
 """

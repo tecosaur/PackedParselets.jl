@@ -601,6 +601,39 @@ end
     @test PP.segments(x) == ((0, "Z"), (1, "0"))
 end
 
+# Packed values built from arbitrary bits (reinterpreted data, say) hold field values
+# parsing and constructors never produce. Printing or reading them must either throw
+# InvalidPacking or stay in bounds: within the print bounds, every byte written.
+@defpacked BitsDigits ("D", :a(digits(7, pad=7)), "-", :b(digits(1:5)))
+@defpacked BitsGrouped ("G", :g(digits(8, pad=8, skip="-", groups=4)))
+@defpacked BitsChoice (:c(choice("AA", "BBB", "C")), :d(digits(2)))
+@defpacked BitsTagged choice(:k, :a => "AA", :b => "BB", :c => "CC")
+@defpacked BitsChars (:l(letters(1:3)), "-", :x(charset(2, 'a':'c', 'x':'z', '0':'2')))
+@defpacked BitsOptional ("O", :n(digits(3)), optional(".", :v(digits(max=999))))
+@testset "values from arbitrary bits" begin
+    buf = Memory{UInt8}(undef, 64)
+    allowed(f) = try f(); true catch e; e isa PP.InvalidPacking end
+    for T in (BitsDigits, BitsGrouped, BitsChoice, BitsTagged, BitsChars, BitsOptional, EmbOuter)
+        lo, hi = PP.printbounds(T)
+        mishandled = filter(1:2000) do _
+            x = only(reinterpret(T, rand(UInt8, sizeof(T))))
+            fill!(buf, 0xff)
+            n = try PP.tobytes(buf, x) catch e; e isa PP.InvalidPacking || rethrow(); nothing end
+            printed_ok = isnothing(n) ||
+                (lo <= n <= hi && (lo < hi || n == hi) && all(!=(0xff), buf[1:n]))
+            !(printed_ok && allowed(() -> string(x)) && allowed(() -> PP.segments(x)) &&
+              all(p -> allowed(() -> getproperty(x, p)), propertynames(x)))
+        end
+        @test isempty(mishandled)
+    end
+    # An out-of-range field names the type, field and value
+    wide = only(reinterpret(BitsDigits, fill(0xff, sizeof(BitsDigits))))
+    err = try string(wide); nothing catch e; e end
+    @test err isa PP.InvalidPacking
+    @test err.type === BitsDigits && err.field === :a && err.value > 9_999_999
+    @test occursin("BitsDigits", sprint(showerror, err))
+end
+
 @testset "embed" begin
     x = parse(EmbOuter, "E05-10")
     @test x.inner isa EmbInner

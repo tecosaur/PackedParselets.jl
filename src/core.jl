@@ -200,6 +200,24 @@ function emit_extract(state::ParserState, position::Int, width::Int,
     end
 end
 
+"""
+    emit_validity_check(state, fieldvar, var, valid) -> Expr
+
+Throw `InvalidPacking` unless `var` lies in `valid`, naming the field when `fieldvar`
+is a named field's `attr_<name>`. Where a field's value bounds a
+print buffer or indexes a table, parsing and constructors only ever store values in
+`valid`; this stops a value built from other bits before it is used.
+"""
+function emit_validity_check(state::ParserState, fieldvar::Symbol, @nospecialize(var),
+                             valid::AbstractUnitRange{<:Integer})
+    lo, hi = first(valid), last(valid)
+    hi = if hi <= typemax(Int) Int(hi) else hi end
+    inrange = if iszero(lo); :($var <= $hi) else :($(Int(lo)) <= $var <= $hi) end
+    name = String(fieldvar)
+    field = if startswith(name, "attr_") QuoteNode(Symbol(chopprefix(name, "attr_"))) end
+    :($inrange || $(GlobalRef(PackedParselets, :throw_invalidpacking))($(esc(state.name)), $field, $var))
+end
+
 ## Form string assembly
 
 """

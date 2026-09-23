@@ -530,6 +530,11 @@ function pattern_choice_multi!(exprs::PatternExprs,
     # Emit per-arm print blocks. Separate `if` blocks (not if/elseif) so
     # rewrite_bufprint! can reach print calls inside each arm.
     discrim_extract = emit_extract(state, discrim_pos, discrim_bits)
+    # An arm prints only on its own discriminant, so any other would print nothing
+    tagvar = if isnothing(tag_field); :discriminant else Symbol(:attr_, tag_field) end
+    discrim_valid = emit_validity_check(state, tagvar, discrim_extract, 1:length(arm_data))
+    push!(exprs.print.direct, discrim_valid)
+    push!(exprs.print.getval, copy(discrim_valid))
     for (k, ad) in enumerate(arm_data)
         odetect = ad.arm_nctx[:oprint_detect]
         cond = :($discrim_extract == $(discrim_type(k)))

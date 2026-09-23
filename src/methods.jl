@@ -180,7 +180,7 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
         # a second copy of the print code.
         localdecls = [Expr(:(=), v, d) for (v, d) in print.vars]
         :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
-              $(Expr(:local, localdecls...))
+              $(if !isempty(localdecls) Expr(:local, localdecls...) end)
               pos = 0
               $(print.getval...)
               $(print.getlen...)

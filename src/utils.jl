@@ -8,6 +8,11 @@
 # - IO printing: printchars, chars2string (character unpacking to IO/String)
 # - Buffer printing: bufprint (direct Memory{UInt8} output)
 
+## Invalid values
+
+@noinline throw_invalidpacking(@nospecialize(T), field::Union{Symbol, Nothing}, value::Integer) =
+    throw(InvalidPacking(T, field, value))
+
 ## Compat
 
 @static if VERSION < v"1.13-"
@@ -129,6 +134,8 @@ end
 
 Unpack `nchars` characters from `packed` (MSB-first, same encoding as
 `parsechars`) into `buf` starting at `pos+1`. Returns the updated position.
+An index past the last range (only held by bits no parse produced) continues past
+its end, as the SWAR printers do, so exactly `nchars` bytes are always written.
 """
 function unpackchars!(buf, pos::Int, packed::P, nchars::Int,
                       ranges::NTuple{N, UnitRange{UInt8}},
@@ -139,18 +146,20 @@ function unpackchars!(buf, pos::Int, packed::P, nchars::Int,
     packed <<= 8 * sizeof(P) - nchars * bpc
     offset = UInt8(oneindexed)
     @inbounds for _ in 1:nchars
-        idx = UInt8(packed >> topshift) - offset
-        for r in ranges
-            rlen = length(r) % UInt8
-            if idx < rlen
-                buf[pos += 1] = first(r) + idx
-                break
-            end
-            idx -= rlen
-        end
+        buf[pos += 1] = charbyte(ranges, UInt8(packed >> topshift) - offset)
         packed <<= bpc
     end
     pos
+end
+
+# The byte for character index `idx` over `ranges`, continuing past the last range
+@inline function charbyte(ranges::NTuple{N, UnitRange{UInt8}}, idx::UInt8) where {N}
+    for r in ranges
+        rlen = length(r) % UInt8
+        idx < rlen && return first(r) + idx
+        idx -= rlen
+    end
+    last(last(ranges)) + 0x01 + idx
 end
 
 """
@@ -166,16 +175,8 @@ function printchars(io::IO, packed::P, nchars::Int,
     topshift = 8 * sizeof(P) - bpc
     packed <<= 8 * sizeof(P) - nchars * bpc
     offset = UInt8(oneindexed)
-    @inbounds for _ in 1:nchars
-        idx = UInt8(packed >> topshift) - offset
-        for r in ranges
-            rlen = length(r) % UInt8
-            if idx < rlen
-                write(io, first(r) + idx)
-                break
-            end
-            idx -= rlen
-        end
+    for _ in 1:nchars
+        write(io, charbyte(ranges, UInt8(packed >> topshift) - offset))
         packed <<= bpc
     end
 end

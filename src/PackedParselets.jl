@@ -24,6 +24,8 @@ include("methods.jl")
 export parsebytes, tobytes, segments, nbits, parsebounds, printbounds,
     maketype, CORE_SEGMENTS
 
+public InvalidPacking
+
 # Extension API for custom segment handlers
 public ExprVarLine, NodeCtx, PatternExprs, ParserState, ByteSet, PrintExprs,
     SegmentDef, SegmentOutput, SegmentBounds, SegmentCodegen, SegmentMeta,

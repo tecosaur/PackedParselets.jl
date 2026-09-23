@@ -3565,6 +3565,69 @@ end
         @test tryparse(CascadeChoice, "42Z") === nothing
         check_roundtrips(CascadeChoice, ("00X", "99X", "00Y", "99Y"))
     end
+    @testset "cascade selects the longest arm match" begin
+        @testset "commit plan" begin
+            # Widest-first; a success is final once no later arm can beat it,
+            # strictly beating later arms that precede it in source order.
+            plan = PP.cascade_commit_plan([6:6, 9:9])
+            @test [p.src for p in plan] == [2, 1]
+            @test [p.threshold for p in plan] == [7, 0]
+            @test all(p -> p.static_commit, plan)
+            plan = PP.cascade_commit_plan([0:6, 2:5])
+            @test [p.threshold for p in plan] == [5, 0]
+            @test [p.clears_threshold for p in plan] == [false, true]
+            # Once an arm may defer, later arms must compare against its match.
+            @test !any(p -> p.static_commit, plan)
+            # Equal widths keep source order, and need only match later arms.
+            plan = PP.cascade_commit_plan([1:3, 3:3])
+            @test [(p.src, p.threshold) for p in plan] == [(1, 3), (2, 0)]
+        end
+        @testset "statically decided (shorter arm first in source)" begin
+            iddef = :(@defpacked CascadeWidth (choice(digits(6:6, pad=6), digits(9:9, pad=9))))
+            @test parsebytes_complexity(iddef) == (branches=2:7, branch_total=7, ops=3:76)
+            eval(iddef)
+            @test string(parse(CascadeWidth, "001249")) == "001249"
+            @test string(parse(CascadeWidth, "000657245")) == "000657245"
+            @test tryparse(CascadeWidth, "0012490") === nothing
+            @test_neverthrow PP.parsebytes(CascadeWidth, ::Vector{UInt8})
+        end
+        @testset "deferred: widest arm beaten by a later one" begin
+            iddef = :(@defpacked CascadeDefer (choice(:a(digits(1:6)),
+                       (:b(digits(1:2)), "q", :c(digits(1:2))))))
+            @test parsebytes_complexity(iddef) == (branches=3:27, branch_total=27, ops=3:135)
+            eval(iddef)
+            @test parse(CascadeDefer, "12345").a == 12345
+            @test parse(CascadeDefer, "12q34").b == 12
+            @test parse(CascadeDefer, "12q34").a === nothing
+            @test parse(CascadeDefer, "1q2").c == 2
+            check_roundtrips(CascadeDefer, ("1", "123456", "1q2", "12q34"))
+            @test_neverthrow PP.parsebytes(CascadeDefer, ::Vector{UInt8})
+            @test parse_allocations(CascadeDefer, "12q34") == 0
+        end
+        @testset "equal-length matches go to source order" begin
+            iddef = :(@defpacked CascadeTie (choice(:y(letters(3, lower=true)),
+                       :x(letters(1:4, lower=true)))))
+            @test parsebytes_complexity(iddef) == (branches=3:18, branch_total=18, ops=3:47)
+            eval(iddef)
+            @test parse(CascadeTie, "abc").y == "abc"
+            @test parse(CascadeTie, "abc").x === nothing
+            @test parse(CascadeTie, "abcd").x == "abcd"
+            @test parse(CascadeTie, "ab").x == "ab"
+            @test_neverthrow PP.parsebytes(CascadeTie, ::Vector{UInt8})
+        end
+        @testset "longest arm, not the widest-bounded" begin
+            # b could take 6 digits, but a's "12x" is the longer match here.
+            iddef = :(@defpacked CascadeLongest (choice((:a(digits(2)), "x"), :b(digits(1:6))),
+                       "x", :c(digits(1))))
+            @test parsebytes_complexity(iddef) == (branches=7:30, branch_total=30, ops=13:110)
+            eval(iddef)
+            @test parse(CascadeLongest, "12xx3").a == 12
+            @test parse(CascadeLongest, "12xx3").c == 3
+            @test parse(CascadeLongest, "123x4").b == 123
+            @test tryparse(CascadeLongest, "12x") === nothing
+            @test_neverthrow PP.parsebytes(CascadeLongest, ::Vector{UInt8})
+        end
+    end
     @testset "multi-byte window dispatch" begin
         iddef = :(@defpacked MultiByteChoice (choice(("AX", :x(digits(2))), ("AY", :y(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:59)
@@ -3822,6 +3885,8 @@ end
         @test_neverthrow PP.parsebytes(TruncOptional, ::Vector{UInt8})
         @test parses_within(RangeCascade, "Y9901", 5)
         @test !parses_within(RangeCascade, "Y9901", 3)
+        @test parses_within(CascadeLongest, "12xx3", 5)
+        @test !parses_within(CascadeLongest, "12xx3", 4)
     end
     @testset "nested choice dispatch propagation" begin
         iddef = :(@defpacked NestedDispatch (choice(

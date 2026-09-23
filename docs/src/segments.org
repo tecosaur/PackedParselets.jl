@@ -164,9 +164,13 @@ choice(
   seq(charset(1, 'A':'N', 'R':'Z'), digits(1), alphnum(8)))
 #+end_src
 
-Each arm is tried in order. A discriminant records which arm matched.
+The arm that matches the most input wins, with ties going to the arm
+written first, so arm order only matters between equal-length matches.
+This is a local decision: the chosen arm is not revisited if the rest of
+the pattern then fails. A discriminant records which arm matched.
 Fields from non-active arms return ~nothing~. An empty string ~""~ as
-an arm matches zero bytes (equivalent to the absent case in ~optional~).
+an arm matches zero bytes (equivalent to the absent case in ~optional~),
+so it only wins when no other arm matches.
 
 #+begin_src julia
 choice(("A", :x(digits(2))), ("B", :y(digits(3))), "")
@@ -175,7 +179,11 @@ choice(("A", :x(digits(2))), ("B", :y(digits(3))), "")
 When the arms have a byte position where their possible values are
 disjoint (e.g. the first byte is ~"A"~ in one arm and ~"B"~ in another),
 the compiler emits a dispatch table for O(1) arm selection instead of
-sequential try-and-rewind.
+sequential try-and-rewind. Otherwise arms are tried widest-first, and a
+match commits as soon as no remaining arm could beat it; when arm
+lengths don't settle this at compile time (e.g. ~digits(9)~ against
+~digits(6)~ does), the best match so far is recorded and restored after
+the remaining arms have been tried.
 
 Arms that share the same field name produce a single property that
 dispatches on the discriminant:

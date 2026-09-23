@@ -505,7 +505,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
                              dispatch, "" in arms)
     else
         emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data,
-                            "" in arms)
+                            "" in arms, discrim_bits)
     end
     state.bits = final_bits
     # Emit per-arm print blocks. Separate `if` blocks (not if/elseif) so
@@ -575,26 +575,95 @@ function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::Nod
     end
 end
 
+"""
+    emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data, has_empty, discrim_bits)
+
+Emit try-and-rewind parsing for choice arms without a dispatch window, selecting
+the arm that consumes the most input (ties to the earliest in source order).
+
+Arms are tried widest-first. A success commits in place once no remaining arm
+could beat it, decided statically where arm bounds allow, so a choice whose
+widest arms are also unambiguous costs nothing extra. Otherwise the best success
+so far is snapshotted and rewound, and restored once every arm has been tried.
+"""
 function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
                              popt::Union{Nothing, Symbol}, savedpos::Symbol,
-                             arm_data, has_empty::Bool)
+                             arm_data, has_empty::Bool, discrim_bits::Int)
     innermost = if has_empty && isnothing(popt)
         ExprVarLine[]
     else
         ExprVarLine[build_fail_expr!(state, nctx, "No choice arm matched")]
     end
-    cascade = foldr(enumerate(collect(arm_data)), init=innermost) do (_, ad), fallback
+    plan = cascade_commit_plan(
+        [(ad.child.parsed_min:ad.child.parsed_max) .- ad.child.start_min for ad in arm_data])
+    deferring = !all(p -> p.static_commit, plan)
+    bestparsed, bestlen, bestsrc, len, isbest =
+        gensym.(("bestparsed", "bestlen", "bestsrc", "len", "isbest"))
+    if deferring
+        innermost = ExprVarLine[:(if $bestlen >= 0
+                                      parsed = $bestparsed
+                                      pos = $savedpos + $bestlen
+                                  else
+                                      $(innermost...)
+                                  end)]
+    end
+    cascade = foldr(plan, init=innermost) do p, fallback
+        ad = arm_data[p.src]
         branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
         guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
         state.bits = ad.bits_after
-        clear = arm_clear_bits(state, ad.bits_before)
-        ExprVarLine[
+        attempt = ExprVarLine[
             :($(ad.armvar) = $guard),
             :(if $(ad.armvar); $(ad.oexprs.parse...) end),
-            :(@label $(ad.end_label)),
+            :(@label $(ad.end_label))]
+        clear = if p.static_commit
+            arm_clear_bits(state, ad.bits_before)
+        else
+            final = if p.clears_threshold isbest else :($isbest && $len >= $(p.threshold)) end
+            push!(attempt, :(if $(ad.armvar)
+                                 $len = pos - $savedpos
+                                 $isbest = $len > $bestlen || ($len == $bestlen && $(p.src) < $bestsrc)
+                                 if !($final)
+                                     if $isbest
+                                         $bestparsed, $bestlen, $bestsrc = parsed, $len, $(p.src)
+                                     end
+                                     $(ad.armvar) = false
+                                 end
+                             end))
+            # A rewound success has packed its discriminant, just below the arm's bits.
+            arm_clear_bits(state, ad.bits_before - discrim_bits)
+        end
+        ExprVarLine[attempt...,
             :(if !$(ad.armvar); pos = $savedpos; $(clear...); $(fallback...) end)]
     end
+    if deferring
+        append!(exprs.parse, ExprVarLine[
+            :($bestparsed = parsed), :($bestlen = -1), :($bestsrc = 0)])
+    end
     append!(exprs.parse, cascade)
+end
+
+"""
+    cascade_commit_plan(consumed) -> Vector{NamedTuple}
+
+Order cascade arms widest-first given each arm's `consumed` byte range. For each
+arm (by rank) gives its source index `src`; the `threshold` length at which its
+success beats every later arm (strictly, for those earlier in source order);
+whether every success `clears_threshold`; and whether it may `static_commit`:
+clearing the threshold with no earlier arm able to have deferred a better match.
+"""
+function cascade_commit_plan(consumed::Vector{UnitRange{Int}})
+    order = sortperm(consumed, by=last, rev=true)
+    plan = map(eachindex(order)) do rank
+        src = order[rank]
+        later = order[rank+1:end]
+        beat = maximum((last(consumed[j]) + 1 for j in later if j < src), init=0)
+        tie = maximum((last(consumed[j]) for j in later if j > src), init=0)
+        threshold = max(beat, tie)
+        (; src, threshold, clears_threshold = first(consumed[src]) >= threshold)
+    end
+    ndirect = something(findfirst(p -> !p.clears_threshold, plan), length(plan) + 1) - 1
+    [merge(p, (; static_commit = rank <= ndirect)) for (rank, p) in enumerate(plan)]
 end
 
 function pattern_optional!(exprs::PatternExprs,

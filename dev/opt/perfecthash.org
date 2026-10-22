@@ -62,9 +62,22 @@ value. A successful bounds check already guarantees they match a known option.
 The optimiser determines which verification bytes overlap with the hash window
 and skips them, reducing or eliminating verification loads.
 
+* Bucketed fallback
+
+With many options, a collision-free hash into a small table becomes unlikely
+even when every option has a distinct window value (e.g. the 39 two-letter
+arXiv =cs.*= classes). For enough options, the search is then repeated
+accepting hashes that send up to two options to a slot, with second candidates
+in a parallel table. Matching verifies the first candidate and, only if that
+fails, the second: one hash and at most two verifications, instead of a scan.
+With fewer options the unrolled linear matcher (which LLVM often compiles to a
+switch) measured as fast or faster on varied input, so bucketing needs 8 options
+of equal length, or 16 of mixed lengths: the hash path must then also look up
+the matched option's length and check its tail bytewise.
+Window values stay distinct, so at most one option in a slot can match.
+
 * Linear scan fallback
 
-When no perfect hash exists, we fall back to a byte-by-byte loop over all
-options, sorted longest-first for greedy matching when options share prefixes.
-Both length-guarded and unguarded paths are emitted, with static branch folding
-selecting based on available byte guarantees.
+When no hash applies, options are tried longest-first (so a failed longer
+option falls through to one of its prefixes) as an unrolled chain of length
+checks and register-sized comparisons.

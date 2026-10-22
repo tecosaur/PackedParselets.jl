@@ -40,10 +40,14 @@ function parsebytes end
 
 """
     tobytes(val) -> Memory{UInt8}
+    tobytes(buf::Memory{UInt8}, val[, pos::Int]) -> Int
 
-Buffer-based output. Returns a `StringMemory` of exact length.
+Buffer-based output. The first form returns a `StringMemory` of exact length; the
+second writes into `buf` after byte `pos` (default 0) and returns the new end position.
 """
 function tobytes end
+
+tobytes(buf::Memory{UInt8}, val) = tobytes(buf, val, 0)
 
 function segments end
 

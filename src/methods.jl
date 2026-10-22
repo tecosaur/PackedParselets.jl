@@ -193,7 +193,7 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
           end)
     end
     Expr(:block,
-        :(function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, val::$(esc(name)), pos::Int=0)
+        :(Base.@constprop :none function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, val::$(esc(name)), pos::Int)
               $(directexprs...)
               pos
           end),

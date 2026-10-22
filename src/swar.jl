@@ -609,8 +609,10 @@ function gen_vardigit_forward(state::ParserState, nctx::NodeCtx,
     cascade = ExprVarLine[:($countvar = 0), :($swar_var = zero($sT)),
                           :($availvar = $avail_bound), varload...]
     wide = Expr(:block, fwd_guarded...)
-    narrow = Expr(:block, cascade...)
-    ExprVarLine[Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)), wide, narrow)]
+    narrow = Expr(:if, :(pos > $(sizeof(sT) - 1)),
+                  Expr(:block, gen_vardigit_backward(state, nctx, vocab, dspec, vdjob, b)...),
+                  Expr(:block, cascade...))
+    ExprVarLine[Expr(:if, emit_lengthcheck(state, nctx, sizeof(sT)), wide, narrow)]
 end
 
 ## Top-level digit parse dispatch

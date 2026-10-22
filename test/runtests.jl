@@ -67,6 +67,10 @@ function exprclean!(expr::Expr)
         return exprclean!(Expr(:block, expr.args...))
     elseif expr.head == Symbol("hygienic-scope")
         return exprclean!(first(expr.args))
+    elseif expr.head in (:symbolicgoto, :symboliclabel)
+        # Julia <1.12 expands these macros along with the rest
+        mac = Symbol(expr.head === :symbolicgoto ? "@goto" : "@label")
+        return Expr(:macrocall, mac, LineNumberNode(0, Symbol("")), expr.args[1])
     elseif expr.head == :escape
         return if first(expr.args) isa Expr
             exprclean!(first(expr.args))
@@ -87,6 +91,11 @@ function exprclean!(expr::Expr)
             expr.args[i] = exprclean!(arg)
         elseif arg isa GlobalRef
             expr.args[i] = arg.name
+        elseif arg isa Function || arg isa Type
+            # Inlined globals: count them as the names they were spliced in for
+            expr.args[i] = if arg === rem; :%
+            elseif arg isa Function; nameof(arg)
+            else Symbol(string(arg)) end
         elseif arg isa LineNumberNode
             if expr.head === :macrocall
                 expr.args[i] = LineNumberNode(0, Symbol(""))
@@ -96,6 +105,7 @@ function exprclean!(expr::Expr)
         end
     end
     deleteat!(expr.args, delat)
+    filter!(a -> !Meta.isexpr(a, :meta), expr.args)  # also expanded by Julia <1.12
     expr
 end
 

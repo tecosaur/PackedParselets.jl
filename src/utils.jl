@@ -19,6 +19,8 @@
     takestring!(io::IO) = String(take!(io))
 end
 
+const unsafe_takestring = @static VERSION < v"1.12-" ? String : Base.unsafe_takestring
+
 ## Character parsing
 
 """
@@ -200,7 +202,7 @@ function chars2string(packed::P, nchars::Int,
                       oneindexed::Bool = false) where {P <: Unsigned, N}
     buf = Base.StringMemory(nchars)
     unpackchars!(buf, 0, packed, nchars, ranges, oneindexed)
-    Base.unsafe_takestring(buf)
+    unsafe_takestring(buf)
 end
 
 ## Buffer printing

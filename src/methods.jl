@@ -106,7 +106,10 @@ function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
     # Qualify bare references to PackedParselets runtime functions so that
     # generated code works when eval'd in any module.
     for v in values(typeparts)
-        v isa Expr && qualify_runtime_refs!(v, PackedParselets)
+        v isa Expr || continue
+        Base.remove_linenums!(v)
+        inline_globals!(v, PackedParselets)
+        VERSION < v"1.12-" && expand_macrocall_inbounds!(v)
     end
     (typeparts, state)
 end
@@ -211,7 +214,7 @@ function assemble_print(::PrintExprs, state::ParserState, name::Symbol)
         :($(GlobalRef(Base, :print))(io::IO, val::$(esc(name))) =
               ($(GlobalRef(Base, :write))(io, val); nothing)),
         :($(GlobalRef(Base, :string))(val::$(esc(name))) =
-              Base.unsafe_takestring($(GlobalRef(M, :tobytes))(val))))
+              $(GlobalRef(M, :unsafe_takestring))($(GlobalRef(M, :tobytes))(val))))
 end
 
 function resolve_print_markers!(exprs)
@@ -602,49 +605,109 @@ function bufprint_static(str::String)
     end
 end
 
-## Runtime reference qualification
-
-# PackedParselets runtime symbols that appear bare in generated code.
-# These must be qualified with GlobalRef when the generated code is
-# eval'd outside the defining module (which normally imports them).
-# Note: parsebytes/tobytes are excluded — they are API functions whose
-# method definitions already use GlobalRef(PackedParselets, ...).
-# Bare references in finalize hooks are the hook author's responsibility.
-const RUNTIME_SYMS = Set{Symbol}([
-    :parsechars, :parseint, :printchars, :printdigits, :chars2string,
-    :bufprint, :radix100_store, :unpackchars!, :takestring!,
-])
-
-"""
-    qualify_runtime_refs!(expr, mod)
-
-Walk `expr` and replace bare calls to known PackedParselets runtime
-functions with `GlobalRef(mod, name)`. This ensures generated code
-works when eval'd in any module, not just one that imports these symbols.
-Paths into `Base` and `Core` (`Core.Intrinsics.shl_int`) become `GlobalRef`s
-too, so lowering and inference see one constant instead of `getproperty`
-chains. Escaped (user) expressions are left alone.
-"""
-function qualify_runtime_refs!(expr::Expr, mod::Module)
-    for (i, arg) in enumerate(expr.args)
-        if arg isa Symbol && arg ∈ RUNTIME_SYMS
-            # Only qualify call-position symbols (first arg of :call)
-            # and assignment targets that are function calls
-            if (Meta.isexpr(expr, :call) && i == 1) ||
-               (Meta.isexpr(expr, :., 2) && i == 2)
-                expr.args[i] = GlobalRef(mod, arg)
-            end
-        elseif arg isa Expr && !Meta.isexpr(arg, :escape)
-            ref = module_path_ref(arg)
-            if isnothing(ref)
-                qualify_runtime_refs!(arg, mod)
-            else
-                expr.args[i] = ref
-            end
+# Before Julia 1.12, `@inbounds`'s hygienic `local val` clashes with parameters named `val`
+function expand_macrocall_inbounds!(ex)
+    ex isa Expr || return ex
+    for (i, a) in enumerate(ex.args)
+        if Meta.isexpr(a, :macrocall) && !isempty(a.args) &&
+                a.args[1] === Symbol("@inbounds")
+            inner = a.args[end]
+            expand_macrocall_inbounds!(inner)
+            v = gensym("inbounds")
+            ex.args[i] = Expr(:block,
+                              Expr(:inbounds, true),
+                              Expr(:local, :($v = $inner)),
+                              Expr(:inbounds, :pop),
+                              v)
+        else
+            expand_macrocall_inbounds!(a)
         end
+    end
+    ex
+end
+
+## Global inlining
+
+# Syntax whose symbols aren't references to globals
+const INERT_HEADS = (:escape, :quote, :inert, :meta, :inbounds, :loopinfo,
+                     :symboliclabel, :symbolicgoto, :line, :primitive, :struct, :abstract)
+
+"""
+    inline_globals!(expr, mod::Module) -> expr
+
+Replace references to constant globals of `mod` (bare symbols and `GlobalRef`s) in the
+bodies of the functions `expr` defines by their values, so loading the generated
+methods needn't rescan them for binding invalidation (Julia 1.12+). Names `expr` binds,
+escaped (user) expressions and signatures are left alone.
+"""
+function inline_globals!(expr::Expr, mod::Module)
+    bound = Set{Symbol}()
+    collect_bound!(bound, expr)
+    inline_globals!(expr, mod, bound)
+end
+
+function inline_globals!(expr::Expr, mod::Module, bound::Set{Symbol})
+    head, args = expr.head, expr.args
+    head in INERT_HEADS && return expr
+    head === :macrocall && args[1] in (Symbol("@label"), Symbol("@goto")) && return expr
+    # Past a macro's name and line, or a method's signature
+    from = if head === :macrocall 3
+    elseif head === :function || (head === :(=) && is_signature(args[1])) 2
+    else 1 end
+    for i in from:length(args)
+        args[i] = inline_global(args[i], mod, bound)
     end
     expr
 end
+
+function inline_global(@nospecialize(x), mod::Module, bound::Set{Symbol})
+    if x isa Expr
+        ref = module_path_ref(x)
+        isnothing(ref) ? inline_globals!(x, mod, bound) : inline_global(ref, mod, bound)
+    elseif x isa GlobalRef
+        isconst(x.mod, x.name) ? getglobal(x.mod, x.name) : x
+    elseif x isa Symbol && x ∉ bound && !startswith(String(x), '#') &&
+            isdefined(mod, x) && isconst(mod, x)
+        getglobal(mod, x)
+    else
+        x
+    end
+end
+
+is_assignment(head::Symbol) = endswith(String(head), '=')
+
+is_signature(@nospecialize(x)) = Meta.isexpr(x, :call) ||
+    (Meta.isexpr(x, (:where, :(::))) && is_signature(x.args[1]))
+
+# Every name `expr` binds: assignment targets, `local`s, and function arguments
+function collect_bound!(bound::Set{Symbol}, @nospecialize(x))
+    (x isa Expr && x.head !== :escape) || return bound
+    if x.head === :local
+        collect_names!(bound, x)
+    elseif x.head in (:kw, :function, :->) || is_assignment(x.head)
+        collect_names!(bound, x.args[1])
+    end
+    for a in x.args
+        collect_bound!(bound, a)
+    end
+    bound
+end
+
+# Names a binding position introduces, from `a`, `a::T`, `(a, b)`, `f(a, b; c=1) where T`
+function collect_names!(bound::Set{Symbol}, @nospecialize(x))
+    if x isa Symbol
+        push!(bound, x)
+    elseif Meta.isexpr(x, (:(::), :kw, :(=)))
+        collect_names!(bound, x.args[1])
+    elseif Meta.isexpr(x, (:tuple, :call, :parameters, :where, :local))
+        for a in @view x.args[1 + (x.head === :call):end]
+            collect_names!(bound, a)
+        end
+    end
+    bound
+end
+
+## Runtime reference qualification
 
 # The `GlobalRef` a dotted path rooted at `Base` or `Core` names, if it resolves.
 function module_path_ref(ex::Expr)

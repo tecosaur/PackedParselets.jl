@@ -169,7 +169,8 @@ end
 
 Replace `__cast_to_packed` / `__cast_from_packed` sentinels with the appropriate
 `Core.bitcast`, `zext_int`, or `trunc_int` call, now that the final type
-size is known.
+size is known, and each `__packed_shift(position)` with the literal shift that
+aligns a bit `position` (counted from the MSB) with the LSB.
 
 Compares physical type sizes (`sizeof`) for intrinsic selection, since
 `zext_int`/`trunc_int` operate on physical widths not logical bit counts.
@@ -201,11 +202,12 @@ function implement_casting!(expr::Expr, name::Symbol, targetsize::Int)
         else
             :(Core.Intrinsics.trunc_int($targettype, $value)).args
         end
-    else
-        for arg in expr.args
-            if arg isa Expr
-                implement_casting!(arg, name, targetsize)
-            end
+    end
+    for (i, arg) in enumerate(expr.args)
+        if Meta.isexpr(arg, :call, 2) && first(arg.args) === :__packed_shift
+            expr.args[i] = 8 * targetsize - arg.args[2]::Int
+        elseif arg isa Expr
+            implement_casting!(arg, name, targetsize)
         end
     end
     expr

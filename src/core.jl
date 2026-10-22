@@ -171,7 +171,7 @@ primitive type) into the `parsed` accumulator at bit position `shift`
 """
 function emit_pack(state::ParserState, type::Type, value::Union{Symbol, Expr, Bool}, shift::Int)
     valcast = Expr(:call, :__cast_to_packed, type, value)
-    :(parsed = Core.Intrinsics.or_int(parsed, Core.Intrinsics.shl_int($valcast, (8 * sizeof($(esc(state.name))) - $shift))))
+    :(parsed = Core.Intrinsics.or_int(parsed, Core.Intrinsics.shl_int($valcast, __packed_shift($shift))))
 end
 
 """
@@ -184,7 +184,7 @@ Emit an expression that extracts `width` bits ending at bit `position`
 function emit_extract(state::ParserState, position::Int, width::Int,
                             fT::Type=cardtype(width))
     fTbits = 8 * sizeof(fT)
-    fval = :(Core.Intrinsics.lshr_int(val, 8 * sizeof($(esc(state.name))) - $position))
+    fval = :(Core.Intrinsics.lshr_int(val, __packed_shift($position)))
     ival = Expr(:call, :__cast_from_packed, fT, fval)
     if width == fTbits
         ival

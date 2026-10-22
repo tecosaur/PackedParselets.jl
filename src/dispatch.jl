@@ -213,7 +213,7 @@ function arm_clear_bits(state::ParserState, bits_before::Int)
         Core.Intrinsics.not_int(
             Core.Intrinsics.shl_int(
                 __cast_to_packed($mT, $mask),
-                8 * sizeof($(esc(state.name))) - $(state.bits)))))]
+                __packed_shift($(state.bits))))))]
 end
 
 function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx,

@@ -3685,6 +3685,13 @@ end
         @test tryparse(CaseFoldChoice, "ef01") === nothing
         check_roundtrips(CaseFoldChoice, ("ab00", "ab99", "cd00", "cd99"))
     end
+    @testset "generator ordering is Base's stable sort" begin
+        for key in (identity, ncodeunits), rev in (false, true), n in 0:7, seed in 1:20
+            v = [string('a' + (seed * k * 7919) % 5)^((seed + k) % 3) for k in 1:n]
+            key === identity && (v = ncodeunits.(v))
+            @test PP.sortperm_by(key, v, rev) == sortperm(v; by=key, rev, alg=InsertionSort)
+        end
+    end
     @testset "cascade fallback" begin
         iddef = :(@defpacked CascadeChoice (choice((:a(digits(2)), "X"), (:b(digits(2)), "Y"))))
         @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=2:46)

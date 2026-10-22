@@ -221,7 +221,7 @@ const RADIX100 = Tuple(UInt16(UInt8('0') + i % 10) << 8 | UInt16(UInt8('0') + i 
     Base.unsafe_store!(Ptr{UInt16}(pointer(buf, pos)), @inbounds RADIX100[pair + 1])
 end
 
-const POW10 = ntuple(i -> UInt64(10)^(i - 1), 20)
+const POW10 = ntuple(i -> UInt64(10)^(i - 1), Val(20))
 
 Base.@constprop :aggressive @inline function bufprint(buf::Memory{UInt8}, pos::Int, num::Integer, base::Int = 10,
                                                       pad::Int = 0, maxdigits::Int = length(POW10))

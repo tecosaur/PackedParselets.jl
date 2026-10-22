@@ -27,7 +27,7 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
               $notfound
           end),
         :(pos += $litlen)]
-    spans = [[byte_set(codeunit(lit, i), casefold) for i in 1:litlen]]
+    spans = string_bytespans([lit], casefold)
     printout = ExprVarLine[:(print(io, $lit))]
     SegmentOutput(
         SegmentBounds(litlen:litlen, litlen:litlen, 0, nothing),
@@ -39,7 +39,7 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
         spans)
 end
 
-function skip_step_strings(arg)
+function skip_step_strings(@nospecialize(arg))
     arg isa String && return String[arg]
     if Meta.isexpr(arg, :call) && !isempty(arg.args) && first(arg.args) === :choice
         alts = arg.args[2:end]
@@ -63,9 +63,8 @@ function gen_skip_step(state::ParserState, nctx::NodeCtx,
     # candidates to verify, rather than trying each in turn.
     fieldvar = gensym("skip_match")
     cint = cardtype(cardbits(length(refs) + 1))
-    cctx = (; mopts=refs, sopts=alts, casefold, fieldvar,
-              onmatch = _ -> :(), cint)
-    matcher, _, _ = build_choice_matcher(state, nctx, cctx)
+    cmatch = ChoiceMatch(refs, alts, casefold, fieldvar, cint, :none)
+    matcher, _, _ = build_choice_matcher(state, nctx, cmatch)
     lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, refs))
     :(if $lencheck; $fieldvar = zero($cint); $(matcher...) end)
 end
@@ -73,23 +72,17 @@ end
 function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
     pval = get(nctx, :print, nothing)
     casefold = get(nctx, :casefold, false) === true
-    steps = [skip_step_strings(a) for a in args]
+    steps = Vector{String}[skip_step_strings(a) for a in args]
     !isnothing(pval) && !any(s -> pval ∈ s, steps) && push!(steps, String[pval])
     all_strings = reduce(vcat, steps)
     casefold && !all(isascii, all_strings) &&
         throw(ArgumentError("Expected all skip strings to be ASCII with casefolding"))
-    parse = ExprVarLine[]
+    parse, parsed_max = ExprVarLine[], 0
+    arrangements = Vector{ByteSet}[]  # Cartesian product of per-step alternatives (+ empty)
     for alts in steps
         push!(parse, gen_skip_step(state, nctx, alts, casefold))
-    end
-    parsed_max = sum(maximum(ncodeunits, step) for step in steps)
-    # Cartesian product of per-step alternatives (+ empty for each step)
-    arrangements = Vector{ByteSet}[]
-    for alts in steps
-        step_spans = [[byte_set(codeunit(s, i), casefold) for i in 1:ncodeunits(s)]
-                       for s in alts]
-        push!(step_spans, ByteSet[])
-        extend_bytespans!(arrangements, step_spans)
+        parsed_max += maximum(ncodeunits, alts)
+        extend_bytespans!(arrangements, push!(string_bytespans(alts, casefold), ByteSet[]))
     end
     plen = if isnothing(pval) 0 else ncodeunits(pval) end
     pexprs = if isnothing(pval) ExprVarLine[] else ExprVarLine[:(print(io, $pval))] end
@@ -143,16 +136,16 @@ Assumes prefixes are non-empty, and casefolded prefixes already lowercased.
 Expects `data`, `pos`, `nbytes` in scope.
 """
 function gen_static_lchop(prefixes::Vector{String}, casefold::Bool)
-    ordered = sort(prefixes, by=ncodeunits, rev=true, alg=InsertionSort)
-    arms = map(ordered) do p
+    ordered = prefixes[sortperm_by(ncodeunits, prefixes, true)]
+    # Built from the shortest (innermost) out
+    chain = nothing
+    for p in Iterators.reverse(ordered)
         nb = ncodeunits(p)
-        cond = :(nbytes - pos + 1 >= $nb && $(conjoin_match(p, casefold)))
-        cond => :(pos += $nb)
+        cond = :(nbytes - pos + 1 >= $nb && $(conjoin(gen_string_match(p, casefold))))
+        chain = if isnothing(chain) Expr(:if, cond, :(pos += $nb))
+        else Expr(:elseif, cond, :(pos += $nb), chain) end
     end
-    foldr(arms; init = nothing) do (cond, body), rest
-        if isnothing(rest); Expr(:if, cond, body)
-        else Expr(:elseif, cond, body, rest) end
-    end
+    chain
 end
 
 ## String matching primitives
@@ -169,7 +162,8 @@ guarantee the extra bytes are readable.
 """
 function gen_string_match(str::String, casefold::Bool, nbytes::Int = ncodeunits(str))
     strlen = ncodeunits(str)
-    map(register_chunks(nbytes)) do chunk
+    checks = Expr[]
+    for chunk in register_chunks(nbytes)
         valid = min(chunk.width, strlen - chunk.offset)
         (; value, mask) = pack_chunk(str, chunk, casefold, valid)
         posexpr = if iszero(chunk.offset)
@@ -177,11 +171,16 @@ function gen_string_match(str::String, casefold::Bool, nbytes::Int = ncodeunits(
         else
             :(pos + $(chunk.offset))
         end
-        gen_masked_compare(chunk.iT, posexpr, value, mask)
+        push!(checks, gen_masked_compare(chunk.iT, posexpr, value, mask))
     end
+    checks
 end
 
-negate_match(checks::Vector{Expr}) =
-    :(!($(foldl((a, b) -> :($a && $b), checks))))
-conjoin_match(str::String, casefold::Bool) =
-    foldl((a, b) -> :($a && $b), gen_string_match(str, casefold))
+function conjoin(checks::Vector{Expr})
+    joint = true
+    for check in checks
+        joint = if joint === true check else :($joint && $check) end
+    end
+    joint
+end
+negate_match(checks::Vector{Expr}) = :(!($(conjoin(checks))))

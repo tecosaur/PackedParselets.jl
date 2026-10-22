@@ -29,20 +29,21 @@ function register_type(nbytes::Int)
     end
 end
 
+const RegisterChunk = @NamedTuple{offset::Int, width::Int, iT::DataType}
+
 """
-    register_chunks(nbytes::Int) -> Vector{@NamedTuple{offset::Int, width::Int, iT::DataType}}
+    register_chunks(nbytes::Int) -> Vector{RegisterChunk}
 
 Decompose `nbytes` into a sequence of descending power-of-2 register-sized
-chunks covering the byte range. Each chunk carries its byte `offset` from
-the start, byte `width`, and unsigned integer type `iT`.
+chunks covering the byte range.
 """
 function register_chunks(nbytes::Int)
-    chunks = @NamedTuple{offset::Int, width::Int, iT::DataType}[]
+    chunks = RegisterChunk[]
     off, remaining = 0, nbytes
     while remaining > 0
         isize = min(length(REGISTER_TYPES), 8 * sizeof(Int) - leading_zeros(remaining))
         bw = 1 << (isize - 1)
-        push!(chunks, (; offset = off, width = bw, iT = REGISTER_TYPES[isize]))
+        push!(chunks, RegisterChunk((off, bw, REGISTER_TYPES[isize])))
         off += bw
         remaining -= bw
     end
@@ -80,7 +81,7 @@ the mask.
 This encapsulates the recurring `build_chunk_mask` + `pack_bytes & mask` pattern
 used across string matching, choice verification, and tail checking.
 """
-function pack_chunk(str::String, chunk::@NamedTuple{offset::Int, width::Int, iT::DataType},
+function pack_chunk(str::String, chunk::RegisterChunk,
                     casefold::Bool, valid::Int = min(chunk.width, ncodeunits(str) - chunk.offset))
     (; offset, iT) = chunk
     mask = zero(iT)

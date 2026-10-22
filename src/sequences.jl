@@ -43,14 +43,14 @@ function parse_groups_kwarg(nctx::NodeCtx, nchars::Int, skipbytes)
         throw(ArgumentError("groups requires skip (separator comes from the first skip character)"))
     groups = if raw isa Integer
         raw > 0 || throw(ArgumentError("groups must be positive"))
-        ntuple(i -> Base.min(raw, nchars - raw * (i - 1)), cld(nchars, raw))
+        Int[Base.min(raw, nchars - raw * (i - 1)) for i in 1:cld(nchars, raw)]
     elseif raw isa Tuple || (raw isa Expr && Meta.isexpr(raw, :tuple))
         vals = if raw isa Tuple raw else Tuple(raw.args) end
         all(v -> v isa Integer && v > 0, vals) ||
             throw(ArgumentError("groups must contain positive integers"))
         sum(vals) == nchars ||
             throw(ArgumentError("groups must sum to $nchars, got $(sum(vals))"))
-        Tuple{Vararg{Int}}(vals)
+        collect(Int, vals)
     else
         throw(ArgumentError("groups must be an integer or tuple, got $(repr(raw))"))
     end
@@ -58,7 +58,7 @@ function parse_groups_kwarg(nctx::NodeCtx, nchars::Int, skipbytes)
     groups
 end
 
-function emit_grouped(@nospecialize(emit_group::Function), @nospecialize(groups::Tuple), sep::UInt8)
+function emit_grouped(@nospecialize(emit_group::Function), groups::Vector{Int}, sep::UInt8)
     exprs = ExprVarLine[]
     for i in 1:length(groups)
         i > 1 && push!(exprs, :(write(io, $sep)))
@@ -89,10 +89,10 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     end
     pad = get(nctx, :pad, 0)::Int
     skipbytes = parse_skip_kwarg(nctx)
-    mindigits, maxdigits = parse_digit_range(args, vmax, base)
+    mindigits, maxdigits = parse_digit_range(args, vmax, base)::Tuple{Int, Int}
     vmin > 0 && (mindigits = max(mindigits, ndigits(vmin; base)))
     fixedwidth = mindigits == maxdigits
-    vmax = Int128(something(vmax, Int128(base)^maxdigits - 1))
+    vmax = Int128(something(vmax, Int128(base)^maxdigits - 1))::Int128
     option = get(nctx, :optional, nothing)
     claims = is_sentinel_unclaimed(nctx)
     range = vmax - vmin + 1 + claims
@@ -100,7 +100,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     dbits = cardbits(range)
     dI = cardtype(cardbits(vmax + 1))
     dT = cardtype(dbits)
-    fieldvar = get(nctx, :fieldvar, gensym("digits"))
+    fieldvar = get(nctx, :fieldvar, gensym("digits"))::Symbol
     bitpos = state.bits + dbits
     # gen_digit_parse reads parsed_min for SWAR safety, so call before
     # process_segment_output! updates bounds
@@ -168,7 +168,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     bytespans = if has_skip
         Vector{ByteSet}[]
     else
-        [fill(digit_set, n) for n in mindigits:maxdigits]
+        Vector{ByteSet}[fill(digit_set, n) for n in mindigits:maxdigits]
     end
     SegmentOutput(
         SegmentBounds(mindigits:parsed_max, printmin:printmax, dbits, sentinel),
@@ -200,9 +200,9 @@ function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, @nos
                putval = ExprVarLine[copy(printex)])
 end
 
-function grouped_digits_print(fextract::Expr, dT::DataType, fieldvar::Symbol, fvalue,
+function grouped_digits_print(fextract::Expr, dT::DataType, fieldvar::Symbol, @nospecialize(fvalue),
                               directvar::Bool, fnum::Symbol,
-                              @nospecialize(groups::Tuple), sep::UInt8, base::Int, valid::Expr)
+                              groups::Vector{Int}, sep::UInt8, base::Int, valid::Expr)
     printvar = if directvar fnum else fieldvar end
     ngroups = length(groups)
     gvars = Symbol[gensym("g$i") for i in 1:ngroups]
@@ -236,11 +236,13 @@ end
 # Thresholds that exceed the variable's type range are omitted (always false).
 function gen_digit_count(var, maxdigits::Int, base::Int=10, mindigits::Int=1,
                          maxval::Integer=Int128(base)^maxdigits - 1)
-    foldl(mindigits:maxdigits-1; init=mindigits) do ex, i
+    count = mindigits
+    for i in mindigits:maxdigits-1
         threshold = Int128(base)^i
-        threshold > maxval && return ex
-        :($ex + ($var >= $(threshold > typemax(Int64) ? UInt64(threshold) : Int(threshold))))
+        threshold > maxval && continue
+        count = :($count + ($var >= $(threshold > typemax(Int64) ? UInt64(threshold) : Int(threshold))))
     end
+    count
 end
 
 function digits_impart_exprs(state::ParserState, argvar::Symbol, fnum::Symbol,
@@ -295,7 +297,7 @@ function digits_byteset(base::Int)
     end
 end
 
-function parse_digit_range(args::Vector, max::Union{Nothing, Integer}, base::Integer)
+function parse_digit_range(args::Vector, @nospecialize(max::Union{Nothing, Integer}), base::Integer)
     if !isempty(args) && Meta.isexpr(first(args), :call, 3) && first(first(args).args) == :(:)
         lo, hi = first(args).args[2], first(args).args[3]
         (lo isa Integer && hi isa Integer) ||
@@ -392,7 +394,7 @@ function compile_charseq(state::ParserState, nctx::NodeCtx, ::PatternExprs,
     compile_charseq_impl(state, nctx, minlen, maxlen, ranges, cfold, kind, skipbytes)
 end
 
-function parse_charseq_length(arg, kind::Symbol)
+function parse_charseq_length(@nospecialize(arg), kind::Symbol)
     if arg isa Integer
         (Int(arg), Int(arg))
     elseif Meta.isexpr(arg, :call, 3) && first(arg.args) == :(:)
@@ -472,15 +474,16 @@ function collapse_letter_ranges(ranges, target::Symbol)
             push!(out, mapped)
         end
     end
-    sort!(out; by=first, alg=InsertionSort)
+    out[sortperm_by(first, out)]
 end
 
 function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
                               minlen::Int, maxlen::Int,
                               ranges::Vector{UnitRange{UInt8}},
                               cfold::Bool, kind::Symbol,
-                              @nospecialize(skipbytes::Union{Nothing, NTuple{<:Any, UInt8}}) = nothing)
-    ranges = Tuple(ranges)  # runtime functions dispatch on NTuple
+                              @nospecialize(skipbytes::Union{Nothing, NTuple{<:Any, UInt8}} = nothing))
+    # The Vector keeps generator closures unspecialised on the number of ranges
+    rangetuple = Tuple(ranges)
     has_skip = !isnothing(skipbytes)
     variable = minlen != maxlen
     option = get(nctx, :optional, nothing)
@@ -532,15 +535,15 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
             push!(swar_body, Expr(:(=), lenvar, maxlen), Expr(:(=), scannedvar, total_bytes))
             fallback = ExprVarLine[
                 :(($lenvar, $charvar, $scannedvar) = parsechars($cT, data, pos,
-                    $scanlimit, $ranges, $cfold, false, $skipbytes)),
+                    $scanlimit, $rangetuple, $cfold, false, $skipbytes)),
                 :(if $lenvar != $maxlen; $notfound end)]
             lencheck = emit_lengthcheck(state, nctx, total_bytes)
             ExprVarLine[:(if $lencheck && $sep_check; $(swar_body...)
                           else $(fallback...) end)]
         else
             chunksize = sizeof(UInt)
-            chunks = Tuple((chunksize * i, Base.min(chunksize, maxlen - chunksize * i))
-                           for i in 0:cld(maxlen, chunksize)-1)
+            chunks = Tuple{Int, Int}[(chunksize * i, Base.min(chunksize, maxlen - chunksize * i))
+                                     for i in 0:cld(maxlen, chunksize)-1]
             exprs = ExprVarLine[:($(emit_lengthcheck(state, nctx, maxlen)) || $notfound)]
             append!(exprs, gen_swar_chunks(state, nctx, chunks, 16, charvar, cT,
                                            notfound, :shift_or, hexcase))
@@ -549,11 +552,11 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         end
     elseif has_skip
         ExprVarLine[:(($lenvar, $charvar, $scannedvar) =
-            parsechars($cT, data, pos, $scanlimit, $ranges, $cfold, $oneindexed, $skipbytes)),
+            parsechars($cT, data, pos, $scanlimit, $rangetuple, $cfold, $oneindexed, $skipbytes)),
             :(if $lenvar != $maxlen; $notfound end)]
     else
         exprs = ExprVarLine[:(($lenvar, $charvar) =
-            parsechars($cT, data, pos, $scanlimit, $ranges, $cfold, $oneindexed))]
+            parsechars($cT, data, pos, $scanlimit, $rangetuple, $cfold, $oneindexed))]
         if !isnothing(option) && variable && iszero(minlen)
             push!(exprs, :($lenvar > 0 || $notfound))
         else
@@ -584,36 +587,34 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         end)
     end
     charargs = if variable
-        :($charvar, Int($lenvar), $ranges)
+        :($charvar, Int($lenvar), $rangetuple)
     else
-        :($charvar, $maxlen, $ranges, $oneindexed)
+        :($charvar, $maxlen, $rangetuple, $oneindexed)
     end
     printexprs = if isnothing(groups)
         ExprVarLine[:(printchars(io, $(charargs.args...)))]
     else
         # Precompute the bit shift for each group (chars remaining after it)
-        shifts = let total = sum(groups)
-            ntuple(length(groups)) do i
-                total -= groups[i]
-                total * bpc
-            end
-        end
+        shifts = Int[(sum(groups) - done) * bpc for done in cumsum(groups)]
         emit_grouped(groups, first(skipbytes)) do gi, gsize
             gexpr = if iszero(shifts[gi]) charvar else :($charvar >> $(shifts[gi])) end
-            ExprVarLine[:(printchars(io, $gexpr, $gsize, $ranges, $oneindexed))]
+            ExprVarLine[:(printchars(io, $gexpr, $gsize, $rangetuple, $oneindexed))]
         end
     end
     numeric = get(nctx, :numeric, false)::Bool
     tostringex = if numeric; :($charvar % $cT) else :(chars2string($(charargs.args...))) end
     argvar = gensym("arg_charseq")
-    cspec = (; cT, lT, cfold, oneindexed, ranges, kind,
+    cspec = (; cT, lT, cfold, oneindexed, ranges = rangetuple, kind,
                variable, minlen, maxlen, lenbase, bitpos, lenbits)
     impart_body = charseq_impart_exprs(state, cspec, argvar, charvar, lenvar, lenoffset; numeric)
-    seg_shortform = let charset = join((string(Char(first(r)), '-', Char(last(r))) for r in ranges), "")
+    seg_shortform = let charset = join(String[string(Char(first(r)), '-', Char(last(r))) for r in ranges])
         count = if variable; "$minlen:$maxlen" else "$maxlen" end
         "$charset × $count"
     end
-    char_set = reduce(∪, ByteSet(r) for r in ranges; init=ByteSet())
+    char_set = ByteSet()
+    for r in ranges
+        char_set = char_set ∪ ByteSet(r)
+    end
     if cfold
         folded = ByteSet()
         for b in char_set
@@ -639,7 +640,7 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         Vector{ByteSet}[]
     else
         let char_set = char_set
-            [fill(char_set, n) for n in minlen:maxlen]
+            Vector{ByteSet}[fill(char_set, n) for n in minlen:maxlen]
         end
     end
     nseps = if isnothing(groups) 0 else length(groups) - 1 end

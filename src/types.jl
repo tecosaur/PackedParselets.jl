@@ -291,3 +291,16 @@ struct HashPlan
     table2::Vector{Int}
     injective::Bool
 end
+
+# `record`: a match stores its index (`:index`), `true` (`:flag`), or nothing (`:none`)
+struct ChoiceMatch
+    mopts::Vector{String}
+    sopts::Vector{String}
+    casefold::Bool
+    fieldvar::Symbol
+    cint::DataType
+    record::Symbol
+end
+
+# `injective`: a hit identifies the window value
+const HashCandidate = @NamedTuple{hash::WindowHash, injective::Bool, maxval::UInt64}

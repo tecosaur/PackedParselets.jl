@@ -37,10 +37,10 @@ or manipulate individual components before assembling.
 - `hookdata`: `Expr(:block, ...)` of additional expressions from finalize hooks
 """
 function maketype(@nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), mod::Module, name::Symbol, @nospecialize(pattern);
-                  supertype::Type = Any,
+                  @nospecialize(supertype::Type = Any),
                   casefold::Bool = true,
-                  globals::NamedTuple = (;),
-                  global_kwargs::Tuple = ())
+                  @nospecialize(globals::NamedTuple = (;)),
+                  @nospecialize(global_kwargs::Tuple = ()))
     root = ParseBranch(1, nothing, :root, 0, 0, 0, 0, 0, 0)
     state = ParserState(name, mod, 0, supertype,
                         globals, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
@@ -64,7 +64,7 @@ Runs finalize hooks from the segment registry, collecting their outputs
 in the `hookdata` field.
 """
 function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
-                       @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}) = (;))
+                       @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}} = (;)))
     numbits = 8 * cld(state.bits, 8)
     for field in (:direct, :getval, :getlen, :putval)
         implement_casting!(state, getfield(exprs.print, field))
@@ -181,7 +181,7 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
     else
         # Measure the exact length, then write through the buffer method rather than
         # a second copy of the print code.
-        localdecls = [Expr(:(=), v, d) for (v, d) in print.vars]
+        localdecls = Expr[Expr(:(=), v, d) for (v, d) in print.vars]
         :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
               $(if !isempty(localdecls) Expr(:local, localdecls...) end)
               pos = 0
@@ -244,18 +244,20 @@ function assemble_properties(properties::Vector{Pair{Symbol, Union{Symbol, Vecto
         end
     end
     fallback = :(throw(FieldError($(esc(name)), prop)))
-    clauses = foldr(enumerate(grouped), init = fallback) do (i, (prop, vals)), rest
+    clauses = fallback
+    for i in length(grouped):-1:1
+        prop, vals = grouped[i]
         prop_exprs = if length(vals) == 1
             resolve_extract(only(vals), segs)
         else
             # Build nested if-elseif chain from guarded extract entries.
-            entries = [resolve_extract(val, segs) for val in vals]
+            entries = Vector{ExprVarLine}[resolve_extract(val, segs) for val in vals]
             filter!(!isempty, entries)
             ExprVarLine[chain_guarded(entries)]
         end
         qprop = QuoteNode(prop)
         body = Expr(:block, implement_casting!(state, prop_exprs)...)
-        Expr(if i == 1; :if else :elseif end, :(prop === $qprop), body, rest)
+        clauses = Expr(if i == 1; :if else :elseif end, :(prop === $qprop), body, clauses)
     end
     :(function $(GlobalRef(Base, :getproperty))(val::$(esc(name)), prop::Symbol)
           $clauses
@@ -280,18 +282,20 @@ function assemble_constructor(segs::Vector{ValueSegment},
         end
     end
     isempty(args) && return :()
-    params = [let seg = segs[si]
-                  if isnothing(seg.argtype)
-                      :($aname)
-                  elseif !isnothing(seg.condition)
-                      :($aname::Union{$(seg.argtype), Nothing})
-                  else
-                      :($aname::$(seg.argtype))
-                  end
-              end for (aname, si) in args]
-    argbindings = [:($(segs[si].argvar) = $aname) for (aname, si) in args]
+    params, argbindings, encode_exprs = Union{Symbol, Expr}[], Expr[], Expr[]
+    for (aname, si) in args
+        seg = segs[si]
+        push!(params, if isnothing(seg.argtype)
+                  aname
+              elseif !isnothing(seg.condition)
+                  :($aname::Union{$(seg.argtype), Nothing})
+              else
+                  :($aname::$(seg.argtype))
+              end)
+        push!(argbindings, :($(seg.argvar) = $aname))
+        append!(encode_exprs, seg.impart)
+    end
     scope_checks = constructor_scope_checks(args, segs, state)
-    encode_exprs = reduce(vcat, (segs[si].impart for (_, si) in args); init=Expr[])
     targetsize = cld(state.bits, 8)
     for expr in encode_exprs
         implement_casting!(expr, name, targetsize)
@@ -373,10 +377,12 @@ end
 
 function assemble_segments_type(segs::Vector{ValueSegment}, ::ParserState, name::Symbol)
     isempty(segs) && return :()
-    M = PackedParselets
-    :(function $(GlobalRef(M, :segments))(::Type{$(esc(name))})
-          $(Expr(:tuple, [(; nbits=s.nbits, kind=s.kind, label=s.label, desc=s.desc, shortform=s.shortform)
-                          for s in segs if s.nbits > 0]...))
+    infos = Expr(:tuple)
+    for s in segs
+        s.nbits > 0 && push!(infos.args, (; s.nbits, s.kind, s.label, s.desc, s.shortform))
+    end
+    :(function $(GlobalRef(PackedParselets, :segments))(::Type{$(esc(name))})
+          $infos
       end)
 end
 
@@ -405,10 +411,10 @@ function rewrite_segment_captures!(segvars::Vector{Tuple{Int, Symbol}},
                                    expr::ExprVarLine)
     expr isa Expr || return expr
     if Meta.isexpr(expr, :(=)) && first(expr.args) === :__segment_printed
-        _, i = expr.args
+        i = expr.args[2]::Int
         if i > length(segvars)
             anon = iszero(segs[i].nbits)
-            precount = sum((s.nbits > 0 for s in segs[1:i-1]), init = 0)
+            precount = count(s -> s.nbits > 0, @view segs[1:i-1])
             push!(segvars, (if anon; 0 else precount + 1 end, Symbol("seg$i")))
         end
         var = last(segvars[i])
@@ -440,8 +446,10 @@ function resolve_property_segments(properties, segs::Vector{ValueSegment})
             push!(result, pname => [idx])
         elseif val isa Vector
             push!(seen, pname)
-            idxs = [i for (i, s) in enumerate(segs)
-                     if !isnothing(s.argtype) && s.label == pname]
+            idxs = Int[]
+            for (i, s) in enumerate(segs)
+                !isnothing(s.argtype) && s.label == pname && push!(idxs, i)
+            end
             isempty(idxs) || push!(result, pname => idxs)
         end
     end
@@ -593,7 +601,8 @@ function rewrite_print_call(args::Vector)
 end
 
 function bufprint_static(str::String)
-    reduce(register_chunks(ncodeunits(str)), init = Expr[]) do exprs, (; offset, width, iT)
+    exprs = Expr[]
+    for (; offset, width, iT) in register_chunks(ncodeunits(str))
         value = pack_bytes(str, offset, width, iT)
         if iT === UInt8
             push!(exprs, :(@inbounds buf[pos += 1] = $value))
@@ -603,6 +612,7 @@ function bufprint_static(str::String)
                   :(pos += $width))
         end
     end
+    exprs
 end
 
 # Before Julia 1.12, `@inbounds`'s hygienic `local val` clashes with parameters named `val`

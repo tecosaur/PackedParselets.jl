@@ -40,6 +40,9 @@ end
 Base.eltype(::Type{ByteSet}) = UInt8
 Base.IteratorSize(::Type{ByteSet}) = Base.HasLength()
 
+string_bytespans(strs::AbstractVector{String}, casefold::Bool) =
+    Vector{ByteSet}[ByteSet[byte_set(b, casefold) for b in codeunits(s)] for s in strs]
+
 function byte_set(b::UInt8, casefold::Bool)
     if casefold && UInt8('a') <= (b | 0x20) <= UInt8('z')
         ByteSet(b & 0xdf) ∪ ByteSet(b | 0x20)

@@ -22,7 +22,7 @@ const CORE_SEGMENTS = (
 function pattern_dispatch!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
                            @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
-                           node::Any, args::Vector{Any})
+                           @nospecialize(node), args::Vector{Any})
     if node isa QuoteNode
         pattern_field!(exprs, state, nctx, segments, global_kwargs, node, args)
     elseif node === :seq
@@ -45,8 +45,12 @@ end
 function pattern_dispatch!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
                            @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
-                           thing::Any)
-    all_kws = (Iterators.flatten(s.kwargs for s in segments)..., global_kwargs...)
+                           @nospecialize(thing))
+    all_kws = Symbol[]
+    for i in 1:length(segments), kw in getfield(segments, i).kwargs
+        push!(all_kws, kw)
+    end
+    append!(all_kws, global_kwargs)
     if Meta.isexpr(thing, :tuple)
         args = Any[]
         for arg in thing.args
@@ -88,7 +92,7 @@ end
 
 ## Field capture
 
-copyex(e) = if e isa Expr copy(e) else e end
+copyexprs(exprs::AbstractVector) = ExprVarLine[if e isa Expr copy(e) else e end for e in exprs]
 
 """
     pattern_field!(exprs, state, nctx, segments, global_kwargs, node, args)
@@ -116,10 +120,10 @@ function pattern_field!(exprs::PatternExprs,
     all_exclusive = length(new_value_segs) > 1 &&
         length(new_value_segs) == length(all_segs) &&
         all(s -> !isnothing(s.condition), new_value_segs) &&
-        allunique(s.condition for s in new_value_segs)
+        allunique(Any[s.condition for s in new_value_segs])
     if all_exclusive
         for seg in new_value_segs
-            push!(exprs.properties, node.value => ExprVarLine[copyex(e) for e in seg.extract])
+            push!(exprs.properties, node.value => copyexprs(seg.extract))
         end
     elseif length(new_value_segs) == 1
         push!(exprs.properties, node.value => new_value_segs[1].label)
@@ -143,9 +147,9 @@ function resolve_extract(val::Union{Symbol, Vector{ExprVarLine}},
                          range::AbstractVector{Int}=eachindex(segs))
     if val isa Symbol
         idx = findfirst(i -> segs[i].label == val, range)
-        if isnothing(idx) ExprVarLine[] else ExprVarLine[copyex(e) for e in segs[range[idx]].extract] end
+        if isnothing(idx) ExprVarLine[] else copyexprs(segs[range[idx]].extract) end
     else
-        ExprVarLine[copyex(e) for e in val]
+        copyexprs(val)
     end
 end
 
@@ -217,7 +221,7 @@ function arm_clear_bits(state::ParserState, bits_before::Int)
 end
 
 function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx,
-                          @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}), arm)
+                          @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}), @nospecialize(arm))
     if Meta.isexpr(arm, :tuple)
         for a in arm.args
             pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, a)
@@ -240,24 +244,37 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::S
     narms = length(arm_spans)
     narms >= 2 || return nothing
     any(isempty, arm_spans) && return nothing
-    min_len = minimum(minimum(length, spans) for spans in arm_spans)
+    min_len = typemax(Int)
+    for spans in arm_spans, span in spans
+        min_len = min(min_len, length(span))
+    end
     ph_result = try_perfect_hash_dispatch(arm_spans, narms, min_len, reg)
     !isnothing(ph_result) && return ph_result
     function window_index(pos::Int, iT::DataType, hash::WindowHash, maxval::UInt64)
         maxval + 1 > 512 && return nothing
         bwidth = sizeof(iT)
         groups = Dict{UInt64, Int}()
-        for (k, spans) in enumerate(arm_spans)
-            for alt in spans
-                window = @view alt[pos:pos+bwidth-1]
-                for combo in Iterators.product(window...)
-                    regval = reduce(|, UInt64(b) << (8*(j-1))
-                                    for (j, b) in enumerate(combo); init=zero(UInt64))
-                    mv = hashvalue(hash, regval, iT)
-                    prev = get(groups, mv, 0)
-                    (!iszero(prev) && prev != k) && return nothing
-                    groups[mv] = k
+        for (k, spans) in enumerate(arm_spans), alt in spans
+            window = Vector{UInt8}[collect(set) for set in @view alt[pos:pos+bwidth-1]]
+            any(isempty, window) && continue
+            # Every register value the window admits, by an odometer over each byte's candidates
+            idx = ones(Int, bwidth)
+            while true
+                regval = zero(UInt64)
+                for j in 1:bwidth
+                    regval |= UInt64(window[j][idx[j]]) << (8 * (j - 1))
                 end
+                mv = hashvalue(hash, regval, iT)
+                prev = get(groups, mv, 0)
+                (!iszero(prev) && prev != k) && return nothing
+                groups[mv] = k
+                j = 1
+                while j <= bwidth && idx[j] == length(window[j])
+                    idx[j] = 1
+                    j += 1
+                end
+                j > bwidth && break
+                idx[j] += 1
             end
         end
         length(groups) < 2 && return nothing
@@ -273,12 +290,12 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::S
         end
         hx = hashexpr(hash, reg, iT)
         if direct
-            sorted = sortperm(arm_vals, alg=InsertionSort)
+            sorted = sortperm_by(identity, arm_vals)
             vals = arm_vals[sorted]
             if vals[end] - vals[1] + 1 == narms
                 idx = :($hx - $(iT(vals[1]) - one(iT)))
                 ip = invperm(sorted)
-                return if ip == 1:narms idx else :(@inbounds $(Tuple(UInt8.(ip)))[$idx]) end
+                return if ip == 1:narms idx else :(@inbounds $(Tuple(map(UInt8, ip)))[$idx]) end
             end
         end
         table = zeros(UInt8, maxval + 1)
@@ -342,7 +359,7 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Sym
     fm = ph.foldmask % ph.iT
     hx = hashexpr(ph, if iszero(fm) reg else :($reg | $fm) end)
     ip = invperm(ph.perm)
-    idx = if ip == 1:narms hx else :(@inbounds $(Tuple(UInt8.(ip)))[$hx]) end
+    idx = if ip == 1:narms hx else :(@inbounds $(Tuple(map(UInt8, ip)))[$hx]) end
     (; offset = ph.pos, iT = ph.iT, idx)
 end
 
@@ -449,6 +466,18 @@ function pattern_choice_optional!(exprs::PatternExprs,
     end
 end
 
+struct ChoiceArm
+    armvar::Symbol
+    end_label::Symbol
+    child::ParseBranch
+    oexprs::PatternExprs
+    arm_nctx::NodeCtx
+    arm_props::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}}
+    seg_range::UnitRange{Int}
+    bits_before::Int
+    bits_after::Int
+end
+
 """
     pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms)
 
@@ -474,9 +503,8 @@ function pattern_choice_multi!(exprs::PatternExprs,
     discrim_pos = state.bits + discrim_bits
     state.bits += discrim_bits
     arm_base = state.bits
-    # Over indices: the arms' element types would each specialise this closure
-    arm_data = map(1:narms) do k
-        arm = arms[k]
+    arm_data = ChoiceArm[]
+    for (k, arm) in enumerate(arms)
         armvar = gensym("arm$k")
         end_label = gensym("arm$(k)_end")
         arm_nctx = NodeCtx(nctx, :optional, armvar)
@@ -502,9 +530,8 @@ function pattern_choice_multi!(exprs::PatternExprs,
         push!(oexprs.parse, emit_pack(state, discrim_type, dval, discrim_pos))
         parent.parsed_max += child.parsed_max - child.start_min
         parent.print_max = Base.max(parent.print_max, child.print_max)
-        (; armvar, end_label, child, oexprs, arm_nctx, arm_props,
-           seg_range = seg_start+1:length(exprs.segments),
-           bits_before, bits_after)
+        push!(arm_data, ChoiceArm(armvar, end_label, child, oexprs, arm_nctx, arm_props,
+                                  seg_start+1:length(exprs.segments), bits_before, bits_after))
     end
     state.bits = maximum(ad.bits_after for ad in arm_data)
     for (k, ad) in enumerate(arm_data)
@@ -516,7 +543,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
         end
     end
     final_bits = state.bits
-    arm_spans = [ad.oexprs.bytespans for ad in arm_data]
+    arm_spans = Vector{Vector{ByteSet}}[ad.oexprs.bytespans for ad in arm_data]
     dispatch_reg = gensym("dispatch_reg")
     dispatch = find_choice_dispatch(arm_spans, dispatch_reg)
     if !isnothing(dispatch)
@@ -549,7 +576,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
     end
     # Propagate bytespans upward so parent sequences can dispatch on our content.
     # A choice contributes the union of all arm alternatives.
-    all_alts = reduce(vcat, arm_spans; init=Vector{ByteSet}[])
+    all_alts = reduce(vcat, arm_spans)
     extend_bytespans!(exprs.bytespans, all_alts)
     # Tagged choice: the tag is just a property contributed by every arm
     if !isnothing(tag_field)
@@ -563,8 +590,8 @@ function pattern_choice_multi!(exprs::PatternExprs,
 end
 
 function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
-                              popt::Union{Nothing, Symbol}, savedpos::Symbol,
-                              arm_data, reg_var::Symbol, @nospecialize(dispatch), has_empty::Bool)
+                              @nospecialize(popt::Union{Nothing, Symbol}), savedpos::Symbol,
+                              arm_data::Vector{ChoiceArm}, reg_var::Symbol, @nospecialize(dispatch), has_empty::Bool)
     arm_idx_var = gensym("arm_idx")
     (; offset, iT, idx) = dispatch
     bwidth = sizeof(iT)
@@ -592,7 +619,10 @@ function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::Nod
                              end))
     end
     if !has_empty || !isnothing(popt)
-        any_ok = reduce((a, ad) -> :($a || $(ad.armvar)), arm_data; init=false)
+        any_ok = false
+        for ad in arm_data
+            any_ok = :($any_ok || $(ad.armvar))
+        end
         fail = build_fail_expr!(state, nctx, "No choice arm matched")
         push!(exprs.parse, :(if !($any_ok); $fail end))
     end
@@ -610,18 +640,18 @@ widest arms are also unambiguous costs nothing extra. Otherwise the best success
 so far is snapshotted and rewound, and restored once every arm has been tried.
 """
 function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
-                             popt::Union{Nothing, Symbol}, savedpos::Symbol,
-                             arm_data, has_empty::Bool, discrim_bits::Int)
+                             @nospecialize(popt::Union{Nothing, Symbol}), savedpos::Symbol,
+                             arm_data::Vector{ChoiceArm}, has_empty::Bool, discrim_bits::Int)
     innermost = if has_empty && isnothing(popt)
         ExprVarLine[]
     else
         ExprVarLine[build_fail_expr!(state, nctx, "No choice arm matched")]
     end
-    plan = cascade_commit_plan(
-        [(ad.child.parsed_min:ad.child.parsed_max) .- ad.child.start_min for ad in arm_data])
+    plan = cascade_commit_plan(UnitRange{Int}[
+        ad.child.parsed_min - ad.child.start_min:ad.child.parsed_max - ad.child.start_min for ad in arm_data])
     deferring = !all(p -> p.static_commit, plan)
     bestparsed, bestlen, bestsrc, len, isbest =
-        gensym.(("bestparsed", "bestlen", "bestsrc", "len", "isbest"))
+        map(gensym, ("bestparsed", "bestlen", "bestsrc", "len", "isbest"))
     if deferring
         innermost = ExprVarLine[:(if $bestlen >= 0
                                       parsed = $bestparsed
@@ -630,7 +660,9 @@ function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::Node
                                       $(innermost...)
                                   end)]
     end
-    cascade = foldr(plan, init=innermost) do p, fallback
+    # Built from the last arm tried (innermost) out
+    cascade = innermost
+    for p in Iterators.reverse(plan)
         ad = arm_data[p.src]
         branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
         guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
@@ -656,8 +688,8 @@ function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::Node
             # A rewound success has packed its discriminant, just below the arm's bits.
             arm_clear_bits(state, ad.bits_before - discrim_bits)
         end
-        ExprVarLine[attempt...,
-            :(if !$(ad.armvar); pos = $savedpos; $(clear...); $(fallback...) end)]
+        cascade = ExprVarLine[attempt...,
+            :(if !$(ad.armvar); pos = $savedpos; $(clear...); $(cascade...) end)]
     end
     if deferring
         append!(exprs.parse, ExprVarLine[
@@ -666,8 +698,16 @@ function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::Node
     append!(exprs.parse, cascade)
 end
 
+# One arm's place in a cascade (see `cascade_commit_plan`)
+struct CascadeStep
+    src::Int
+    threshold::Int
+    clears_threshold::Bool
+    static_commit::Bool
+end
+
 """
-    cascade_commit_plan(consumed) -> Vector{NamedTuple}
+    cascade_commit_plan(consumed) -> Vector{CascadeStep}
 
 Order cascade arms widest-first given each arm's `consumed` byte range. For each
 arm (by rank) gives its source index `src`; the `threshold` length at which its
@@ -676,17 +716,19 @@ whether every success `clears_threshold`; and whether it may `static_commit`:
 clearing the threshold with no earlier arm able to have deferred a better match.
 """
 function cascade_commit_plan(consumed::Vector{UnitRange{Int}})
-    order = sortperm(consumed, by=last, rev=true, alg=InsertionSort)
-    plan = map(eachindex(order)) do rank
-        src = order[rank]
-        later = order[rank+1:end]
-        beat = maximum((last(consumed[j]) + 1 for j in later if j < src), init=0)
-        tie = maximum((last(consumed[j]) for j in later if j > src), init=0)
-        threshold = max(beat, tie)
-        (; src, threshold, clears_threshold = first(consumed[src]) >= threshold)
+    order = sortperm_by(last, consumed, true)
+    plan = CascadeStep[]
+    committing = true
+    for (rank, src) in enumerate(order)
+        threshold = 0
+        for j in @view order[rank+1:end]
+            threshold = max(threshold, last(consumed[j]) + (j < src))
+        end
+        clears = first(consumed[src]) >= threshold
+        committing &= clears
+        push!(plan, CascadeStep(src, threshold, clears, committing))
     end
-    ndirect = something(findfirst(p -> !p.clears_threshold, plan), length(plan) + 1) - 1
-    [merge(p, (; static_commit = rank <= ndirect)) for (rank, p) in enumerate(plan)]
+    plan
 end
 
 function pattern_optional!(exprs::PatternExprs,

@@ -35,9 +35,9 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
     sopts = Vector{String}(options)
     allowempty = any(isempty, sopts)
     allowempty && filter!(!isempty, sopts)
-    casefold = get(nctx, :casefold, false)
+    casefold = get(nctx, :casefold, false)::Bool
     target = get(nctx, :is, nothing)::Union{Nothing, String}
-    fieldvar = get(nctx, :fieldvar, gensym("prefix"))
+    fieldvar = get(nctx, :fieldvar, gensym("prefix"))::Symbol
     option = get(nctx, :optional, nothing)
     claims = is_sentinel_unclaimed(nctx)
     cbits = cardbits(length(sopts) + 1)
@@ -51,13 +51,8 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
         all(isascii, sopts) || throw(ArgumentError("Expected all options to be ASCII strings for casefolding"))
     end
     mopts = if casefold; map(lowercase, sopts) else sopts end
-    onmatch = if isnothing(target)
-        valexpr -> :($fieldvar = $valexpr)
-    else
-        _ -> :($fieldvar = one($fieldvar))
-    end
-    cctx = (; mopts, sopts, casefold, fieldvar, onmatch, cint)
-    matcher, mopts, sopts = build_choice_matcher(state, nctx, cctx)
+    cmatch = ChoiceMatch(mopts, sopts, casefold, fieldvar, cint, if isnothing(target); :index else :flag end)
+    matcher, mopts, sopts = build_choice_matcher(state, nctx, cmatch)
     # Length-guarded match wrapper
     notfound = build_fail_expr!(state, nctx, "Expected one of $(join(sopts, ", "))")
     lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, sopts))
@@ -104,7 +99,7 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
     valid = emit_validity_check(state, fieldvar, fieldvar, 1:length(sopts))
     opttuple = Tuple(sopts)
     printexpr = :(print(io, @inbounds $opttuple[$fieldvar]))
-    optlens = ncodeunits.(sopts)
+    optlens = map(ncodeunits, sopts)
     lenexpr = if allequal(optlens)
         :(pos += $(first(optlens)))
     else
@@ -128,8 +123,7 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
     sentinel = if claims SentinelSpec((0, cbits)) end
     pmax = maximum(ncodeunits, sopts)
     casefold = get(nctx, :casefold, false) === true
-    arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
-                     for o in sopts]
+    arrangements = string_bytespans(sopts, casefold)
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     extract_setup = ExprVarLine[fextract]
     desc = join(sopts, " | ")
@@ -147,10 +141,10 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
         arrangements)
 end
 
-function choice_value_codegen(state::ParserState, valtype::Symbol, sopts,
-                               fieldvar, argvar, cint, bitpos)
+function choice_value_codegen(state::ParserState, valtype::Symbol, sopts::Vector{String},
+                               fieldvar::Symbol, argvar::Symbol, cint::DataType, bitpos::Int)
     vals, conv, argtype = if valtype === :Symbol
-        Tuple(Symbol.(sopts)), :Symbol, :Symbol
+        Tuple(map(Symbol, sopts)), :Symbol, :Symbol
     else
         Tuple(sopts), :String, :AbstractString
     end
@@ -183,8 +177,7 @@ function compile_choice_fixed(::ParserState, nctx::NodeCtx, @nospecialize(ctx))
     tlen = ncodeunits(target)
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     casefold = get(nctx, :casefold, false) === true
-    arrangements = [[byte_set(codeunit(o, i), casefold) for i in 1:ncodeunits(o)]
-                     for o in sopts]
+    arrangements = string_bytespans(sopts, casefold)
     printout = ExprVarLine[:(print(io, $target))]
     SegmentOutput(
         SegmentBounds(pmin:maximum(ncodeunits, sopts), tlen:tlen, 0, nothing),
@@ -201,9 +194,7 @@ end
 ## Matcher assembly
 
 """
-    build_choice_matcher(mopts, sopts, casefold, fieldvar, onmatch,
-                         cint, state, nctx)
-        -> (matcher, mopts, sopts)
+    build_choice_matcher(state, nctx, cmatch::ChoiceMatch) -> (matcher, mopts, sopts)
 
 Build parse-time matcher expressions for a choice node.
 
@@ -212,8 +203,8 @@ for injective hashes and widened verify tables when they reduce chunk count),
 then a bucketed hash for larger option sets, and falls back to linear scan.
 May reorder options to match hash output order.
 """
-function build_choice_matcher(state::ParserState, nctx::NodeCtx, @nospecialize(cctx))
-    (; mopts, casefold) = cctx
+function build_choice_matcher(state::ParserState, nctx::NodeCtx, cmatch::ChoiceMatch)
+    (; mopts, casefold) = cmatch
     ph = find_window_hash(classify_hash, mopts, casefold)
     minbucketed = if allequal(map(ncodeunits, mopts))
         BUCKETED_MIN_FIXED_OPTIONS
@@ -224,18 +215,25 @@ function build_choice_matcher(state::ParserState, nctx::NodeCtx, @nospecialize(c
         ph = find_window_hash(classify_bucketed, mopts, casefold)
     end
     if !isnothing(ph)
-        build_hash_matcher(state, nctx, ph, cctx)
+        build_hash_matcher(state, nctx, ph, cmatch)
     else
-        build_linear_matcher(state, nctx, cctx)
+        build_linear_matcher(state, nctx, cmatch)
     end
 end
 
-function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, @nospecialize(cctx))
-    (; casefold, fieldvar, onmatch, cint) = cctx
+function record_match(cmatch::ChoiceMatch, @nospecialize(index))
+    (; fieldvar, record) = cmatch
+    if record === :index; :($fieldvar = $index)
+    elseif record === :flag; :($fieldvar = one($fieldvar))
+    else :() end
+end
+
+function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cmatch::ChoiceMatch)
+    (; casefold, fieldvar, cint) = cmatch
     # Reorder options to match hash output order
-    mopts = cctx.mopts[ph.perm]
-    sopts = cctx.sopts[ph.perm]
-    optlens = Tuple(ncodeunits.(mopts))
+    mopts = cmatch.mopts[ph.perm]
+    sopts = cmatch.sopts[ph.perm]
+    optlens = Tuple(map(ncodeunits, mopts))
     phoff = ph.pos - 1
     phposexpr = if iszero(phoff); :pos else :(pos + $phoff) end
     load = gen_load(ph.iT, phposexpr)
@@ -264,7 +262,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, @no
     else
         nothing
     end
-    vt = gen_verify_table(mopts, casefold; skip = hash_skip)
+    vt = gen_verify_table(mopts, casefold, hash_skip)
     # Try backward-aligned single-register verify when prior parsed content provides safety
     b = nctx[:current_branch]
     bvc = backward_verify_chunk(minoptlen)
@@ -279,7 +277,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, @no
     use_wide_vt = !use_backward && isnothing(hash_skip) && wide_minlen > minoptlen &&
         length(register_chunks(wide_minlen)) < length(vt.chunks)
     vt_wide = if use_wide_vt
-        gen_verify_table(mopts, casefold; nbytes = wide_minlen)
+        gen_verify_table(mopts, casefold, nothing, wide_minlen)
     else
         nothing
     end
@@ -344,12 +342,12 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, @no
     # Stage 4: advance pos and record the matched option
     coerced_i = if ph.kind === :direct && ph.iT === cint; :i else :(i % $cint) end
     action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end)),
-                         onmatch(coerced_i)]
+                         record_match(cmatch, coerced_i)]
     guard_append!(action)
     push!(parts, :(if found; $(body...) end))
     if ph.kind === :bucketed
         # A slot holds up to two options: when the first fails to verify, try the second.
-        retry = map(e -> e isa Expr ? copy(e) : e, body)
+        retry = copyexprs(body)
         push!(parts, :(if !found && 1 <= hi <= $(length(ph.table2))
                            i = $(Tuple(ph.table2))[hi]
                            found = !iszero(i)
@@ -359,10 +357,10 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, @no
     (parts, mopts, sopts)
 end
 
-function build_linear_matcher(state::ParserState, nctx::NodeCtx, @nospecialize(cctx))
-    (; mopts, sopts, casefold, onmatch, cint) = cctx
+function build_linear_matcher(state::ParserState, nctx::NodeCtx, cmatch::ChoiceMatch)
+    (; mopts, sopts, casefold, cint) = cmatch
     # Sort longest-first for greedy matching when options share prefixes
-    perm = sortperm(mopts, by=ncodeunits, rev=true, alg=InsertionSort)
+    perm = sortperm_by(ncodeunits, mopts, true)
     mopts = mopts[perm]
     sopts = sopts[perm]
     # Unrolled if/elseif rather than iterating a tuple of byte-tuples, which boxes.
@@ -374,7 +372,7 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, @nospecialize(c
         fit = :(nbytes - pos + 1 >= $n)
         nomatch = gen_literal_mismatch(state, nctx, sopts[i], casefold)
         body = quote
-            $(onmatch(:($(i % cint))))
+            $(record_match(cmatch, :($(i % cint))))
             pos += $n
         end
         chain = if isnothing(chain)
@@ -391,7 +389,7 @@ end
 const HASH_MULTIPLIERS = (0x9e3779b97f4a7c15, 0x517cc1b727220a95, 0x6c62272e07bb0142)
 
 """
-    hash_candidates(nopts, iT) -> Vector{@NamedTuple{hash::WindowHash, injective::Bool, maxval::UInt64}}
+    hash_candidates(nopts, iT) -> Vector{HashCandidate}
 
 Candidate hashes of a register window of type `iT` over `nopts` options, in search
 order: identity (injective: a hit identifies the window value), then for each modulus
@@ -400,15 +398,14 @@ the hash's output.
 """
 function hash_candidates(nopts::Int, iT::DataType)
     w = 8 * sizeof(iT)
-    cands = @NamedTuple{hash::WindowHash, injective::Bool, maxval::UInt64}[
-        (WindowHash(1, 0, 0), true, typemax(UInt64) >> (64 - w))]
+    cands = HashCandidate[HashCandidate((WindowHash(1, 0, 0), true, typemax(UInt64) >> (64 - w)))]
     for m in nopts:2nopts
-        push!(cands, (WindowHash(1, 0, m), false, UInt64(m)))
+        push!(cands, HashCandidate((WindowHash(1, 0, m), false, UInt64(m))))
         for k in 1:min(w - 1, 16)
-            push!(cands, (WindowHash(1, k, m), false, UInt64(m)))
+            push!(cands, HashCandidate((WindowHash(1, k, m), false, UInt64(m))))
         end
         for c in HASH_MULTIPLIERS, k in max(1, w - 8):w - 1
-            push!(cands, (WindowHash(c, k, m), false, UInt64(m)))
+            push!(cands, HashCandidate((WindowHash(c, k, m), false, UInt64(m))))
         end
     end
     cands
@@ -451,7 +448,7 @@ families, for the cheapest hash that `classify` accepts:
 
 Returns `nothing` when no hash is accepted.
 """
-function find_window_hash(@nospecialize(classify), options::Vector{String}, casefold::Bool)
+function find_window_hash(classify::F, options::Vector{String}, casefold::Bool) where {F}
     nopts = length(options)
     iszero(nopts) && return nothing
     minlen = minimum(ncodeunits, options)
@@ -460,13 +457,14 @@ function find_window_hash(@nospecialize(classify), options::Vector{String}, case
         bwidth = sizeof(iT)
         bwidth > minlen && break
         for pos in 1:minlen - bwidth + 1
-            values = map(options) do opt
+            values = UInt64[]
+            for opt in options
                 v = zero(UInt64)
                 for j in 0:bwidth-1
                     b = codeunit(opt, pos + j)
                     v |= UInt64(if casefold; b | 0x20 else b end) << (8j)
                 end
-                v
+                push!(values, v)
             end
             allunique(values) || continue
             foldmask = zero(UInt64)
@@ -496,7 +494,7 @@ function classify_hash(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask::
                        hash::WindowHash, injective::Bool; max_tablelen::Int = 4 * length(hvals))
     nopts = length(hvals)
     allunique(hvals) || return nothing
-    sorted_indices = sortperm(hvals, alg=InsertionSort)
+    sorted_indices = sortperm_by(identity, hvals)
     lo, hi = Int(hvals[first(sorted_indices)]), Int(hvals[last(sorted_indices)])
     # Direct: consecutive values, so the hash less an offset is the option index
     if hi - lo + 1 == nopts
@@ -574,30 +572,34 @@ end
 
 # Constant comparison for a shared suffix, addressed via pos+optlen.
 function gen_suffix_check(suffix::String, casefold::Bool, suffix_len::Int)
-    chunks = register_chunks(suffix_len)
-    foldr(chunks, init=:(true)) do c, rest
+    checks = Expr[]
+    for c in register_chunks(suffix_len)
         (; value, mask) = pack_chunk(suffix, c, casefold)
-        tailoff = suffix_len - c.offset
-        check = gen_masked_compare(c.iT, :(pos + optlen - $tailoff), value, mask)
-        if rest == :(true) check else :($check && $rest) end
+        push!(checks, gen_masked_compare(c.iT, :(pos + optlen - $(suffix_len - c.offset)), value, mask))
     end
+    conjoin(checks)
 end
 
 ## Verification codegen
 #
-# Tables are `Any` vectors of per-option tuples and `Unsigned` vectors of masks,
-# so their types never depend on the options; the splice converts to a tuple.
+# `Any`/`Unsigned` vectors keep the type independent of the options
+struct VerifyTable
+    verify_table::Vector{Any}
+    masks::Vector{Unsigned}
+    chunks::Vector{RegisterChunk}
+end
 
 """
-    gen_verify_table(options, casefold; skip, nbytes) -> (; verify_table, masks, chunks)
+    gen_verify_table(options, casefold, skip = nothing, nbytes = minlen) -> VerifyTable
 
 Build per-option register-sized comparison data for verifying hash matches.
 
 Masks use `0xDF` where any option has a casefold alpha byte, `0xFF` for
 exact match, `0x00` for overflow. When `skip = (gap_offset, gap_width)`,
 the gap region is excluded from verification (used with injective hashes).
+These are positional so a `Union`-typed `skip` still dispatches statically.
 """
-function gen_verify_table(options::Vector{String}, casefold::Bool;
+function gen_verify_table(options::Vector{String}, casefold::Bool,
                           skip::Union{Nothing, Tuple{Int, Int}} = nothing,
                           nbytes::Int = minimum(ncodeunits, options))
     minlen = minimum(ncodeunits, options)
@@ -611,7 +613,7 @@ function gen_verify_table(options::Vector{String}, casefold::Bool;
         right = register_chunks(minlen - gap_offset - gap_width)
         right_base = gap_offset + gap_width
         for i in eachindex(right)
-            right[i] = (; right[i]..., offset = right[i].offset + right_base)
+            right[i] = RegisterChunk((right[i].offset + right_base, right[i].width, right[i].iT))
         end
         vcat(left, right)
     end
@@ -631,31 +633,22 @@ function gen_verify_table(options::Vector{String}, casefold::Bool;
         mask
     end
     masks = Unsigned[chunk_mask(c) for c in chunks]
-    verify_table = Any[Tuple(Unsigned[pack_bytes(opt, c.offset, min(c.width, max(0, minlen - c.offset)), c.iT) & m
-                                      for (c, m) in zip(chunks, masks)])
+    verify_table = Any[Tuple(Unsigned[pack_bytes(opt, c.offset, min(c.width, max(0, minlen - c.offset)), c.iT) & masks[k]
+                                      for (k, c) in enumerate(chunks)])
                        for opt in options]
-    (; verify_table, masks, chunks)
+    VerifyTable(verify_table, masks, chunks)
 end
 
-function gen_verify_exprs(vt, prefix::Symbol; pos_offset::Int = 0)
-    nchunks = length(vt.chunks)
-    cvars = [Symbol(prefix, "_expect", ci) for ci in 1:nchunks]
+function gen_verify_exprs(vt::VerifyTable, prefix::Symbol; pos_offset::Int = 0)
+    cvars = Symbol[Symbol(prefix, "_expect", ci) for ci in eachindex(vt.chunks)]
     destructure = [Expr(:(=), Expr(:tuple, cvars...), :($(Tuple(vt.verify_table))[i]))]
-    checks = foldr(1:nchunks, init = :(true)) do ci, rest
-        baseoff = vt.chunks[ci].offset + pos_offset
-        posexpr = if iszero(baseoff)
-            :pos
-        else
-            :(pos + $baseoff)
-        end
-        check = gen_masked_compare(vt.chunks[ci].iT, posexpr, cvars[ci], vt.masks[ci])
-        if rest == :(true)
-            check
-        else
-            :($check && $rest)
-        end
+    checks = Expr[]
+    for (ci, c) in enumerate(vt.chunks)
+        baseoff = c.offset + pos_offset
+        posexpr = if iszero(baseoff); :pos else :(pos + $baseoff) end
+        push!(checks, gen_masked_compare(c.iT, posexpr, cvars[ci], vt.masks[ci]))
     end
-    (; destructure, checks)
+    (; destructure, checks = conjoin(checks))
 end
 
 # Backward-aligned single-register verify: loads from pos-padding, padding
@@ -700,8 +693,8 @@ variable-length options. Uses register-sized comparisons when all
 non-empty tails have the same length, otherwise a codeunit loop.
 """
 function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int, prefix::Symbol)
-    tails = [opt[minoptlen+1:end] for opt in options]
-    taillens = ncodeunits.(tails)
+    tails = String[opt[minoptlen+1:end] for opt in options]
+    taillens = map(ncodeunits, tails)
     has_empty = any(iszero, taillens)
     distinct_taillens = unique(filter(!iszero, taillens))
     body = if length(distinct_taillens) == 1
@@ -720,10 +713,11 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
         verify_table = Any[if isempty(tail)
                                Tuple(Unsigned[zero(c.iT) for c in chunks])
                            else
-                               Tuple(Unsigned[pack_bytes(tail, c.offset, c.width, c.iT) & m for (c, m) in zip(chunks, masks)])
+                               Tuple(Unsigned[pack_bytes(tail, chunks[k].offset, chunks[k].width, chunks[k].iT) & masks[k]
+                                              for k in eachindex(chunks)])
                            end
                            for tail in tails]
-        tve = gen_verify_exprs((; verify_table, masks, chunks), Symbol(prefix, "_tail"); pos_offset = minoptlen)
+        tve = gen_verify_exprs(VerifyTable(verify_table, masks, chunks), Symbol(prefix, "_tail"); pos_offset = minoptlen)
         ExprVarLine[tve.destructure..., :(found = $(tve.checks))]
     else
         # Multiple tail lengths: codeunit loop over tail bytes. Tails are padded
@@ -736,8 +730,8 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
                                     else 0xFF end
                                     for j in 1:maxtail])
                         for t in tails]
-        bytetable = Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & mask[j] else 0x00 end for j in 1:maxtail])
-                        for (t, mask) in zip(tails, masktable)]
+        bytetable = Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & masktable[k][j] else 0x00 end for j in 1:maxtail])
+                        for (k, t) in enumerate(tails)]
         ExprVarLine[:(tailbytes = $(Tuple(bytetable))[i]),
                      :(tailmasks = $(Tuple(masktable))[i]),
                      :(@inbounds(for j in 1:$(Tuple(taillens))[i]

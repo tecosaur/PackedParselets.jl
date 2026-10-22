@@ -8,6 +8,9 @@
 
 module PackedParselets
 
+# Union-splitting the generator's loosely typed calls only bloats the image
+Base.Experimental.@max_methods 1
+
 include("bytemask.jl")
 include("types.jl")
 include("core.jl")

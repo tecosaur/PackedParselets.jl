@@ -705,7 +705,7 @@ end
 
 # Compute sub-chunked offsets and separator check expression for grouped fields.
 # Groups larger than a register are split into register-sized pieces.
-function grouped_chunks_and_check(@nospecialize(groups), @nospecialize(skipbytes), chunksize::Int = sizeof(UInt))
+function grouped_chunks_and_check(groups::Vector{Int}, @nospecialize(skipbytes), chunksize::Int = sizeof(UInt))
     sep = first(skipbytes)
     chunks = Tuple{Int, Int}[]
     sep_check = :(true)

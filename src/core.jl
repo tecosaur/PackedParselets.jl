@@ -92,6 +92,23 @@ Base.@assume_effects :foldable function cardtype(minbits::Int)
     (UInt8, UInt16, UInt32, UInt64, UInt128)[logtypesize]
 end
 
+## Ordering
+
+# Insertion sort: the generator sorts a handful of items, and Base's sort bloats the image
+function sortperm_by(key, v::AbstractVector, rev::Bool = false)
+    perm = collect(eachindex(v))
+    for i in 2:length(perm)
+        j = i
+        while j > 1
+            a, b = key(v[perm[j - 1]]), key(v[perm[j]])
+            (rev ? isless(a, b) : isless(b, a)) || break
+            perm[j - 1], perm[j] = perm[j], perm[j - 1]
+            j -= 1
+        end
+    end
+    perm
+end
+
 ## State mutation helpers
 
 function inc_parsed!(nctx::NodeCtx, dmin, dmax)
@@ -360,7 +377,10 @@ function extend_bytespans!(target::Vector{Vector{ByteSet}}, new::Vector{Vector{B
     if isempty(target)
         append!(target, new)
     else
-        combined = [vcat(prev, ext) for prev in target for ext in new]
+        combined = Vector{ByteSet}[]
+        for prev in target, ext in new
+            push!(combined, vcat(prev, ext))
+        end
         empty!(target)
         append!(target, combined)
     end

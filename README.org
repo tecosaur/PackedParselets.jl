@@ -26,7 +26,8 @@ that provide their own macros and domain-specific behaviour.
 Fields are packed into the minimum number of bits: the semver example below fits
 in 5 bytes despite having six fields and two levels of optionals. The generated
 parser operates directly on bytes with no intermediate string allocations, no
-regular expressions, and no exceptions on the hot path.
+regular expressions, and no exceptions on the hot path. Digit and character
+segments parse at roughly 1--3 cycles per byte (see [[file:docs/src/segments.org::*Parsing cost][Parsing cost]]).
 
 From a single pattern you get:
 + A ~primitive type~ with optimal bit-width storage
@@ -56,8 +57,8 @@ working ~eval~ wrapper.
           optional(".", :prebuild(digits(max=99)))))
 #+end_src
 
-Six fields and two levels of optionals, packed into 5 bytes. Parsing takes 9-16ns,
-printing ~7 ns (zero-allocation into a pre-allocated buffer).
+Six fields and two levels of optionals, packed into 5 bytes. Parsing takes 41--81
+cycles (8--16 ns), printing ~7 ns (zero-allocation into a pre-allocated buffer).
 
 #+begin_src julia-repl
 julia> map(eval, values(maketype(...))) # Create `SemVer` type from DSL
@@ -101,8 +102,8 @@ that is
                        :tzmin(digits(2, max=59, pad=2)))))
 #+end_src
 
-The ten fields are packed into an 11-byte primitive type, that takes 7-11ns to
-parse, and ~20ns to write to pre-allocated memory.
+The ten fields are packed into an 11-byte primitive type, that takes 35--65 cycles
+(7--13 ns) to parse, and ~20ns to write to pre-allocated memory.
 
 #+begin_src julia-repl
 julia> map(eval, values(maketype(...))) # Create `RFC3339` type from DSL
@@ -114,5 +115,5 @@ julia> t.year, t.month, t.day
 (2025, 3, 17)
 
 julia> sizeof(RFC3339)
-5
+11
 #+end_src

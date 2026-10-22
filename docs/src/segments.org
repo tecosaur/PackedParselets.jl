@@ -257,3 +257,26 @@ skip(print="-")                             # strip "-" if present, print "-"
 
 Within each step, alternatives are tried longest-first.  The ~print~
 keyword specifies what to emit on output (nothing if omitted).
+
+* Parsing cost
+
+Throughput of back-to-back parses on one performance core of an Intel
+i5-13600K (Julia 1.14), from hardware cycle counters. Each figure is for
+a parse of the segment alone at the given width, so includes a parse's
+fixed cost of about 3 cycles (and 1--2 cycles of benchmark loop).
+
+| Segment                             | Width | Cycles/byte                 |
+|-------------------------------------+-------+-----------------------------|
+| Literal                             |    16 | ≈ 0.1 beyond the fixed cost |
+| ~digits~, fixed width               |  8/16 | 0.85/0.75                   |
+| ~digits~, variable width (≤ 8)      |   4/8 | 2.5/1.35                    |
+| ~digits~, variable width (> 8)      |    16 | 3.2                         |
+| ~hex~, ~letters~, fixed width       |    16 | 1.1--1.25                   |
+| ~alphnum~, ~charset~, fixed width   |    16 | 1.5                         |
+| Character sequences, variable width |    16 | 2.9                         |
+
+Choices and structural segments cost a roughly constant number of
+cycles: a string ~choice~ 7--13 cycles and a structured choice about 9
+in all; a ~skip~ adds 2--3 cycles when absent and 6 for an
+~"https://"~; an ~optional~ adds about a cycle when absent and 5 when
+present; an ~embed~ costs the same as its fields inline.

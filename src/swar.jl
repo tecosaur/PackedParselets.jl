@@ -77,7 +77,7 @@ is zero per-byte for valid digits.
 For base 11–16 (hex): addition-based range checks on both decimal and
 alpha ranges after casefolding, using bit 7 as the per-byte indicator.
 """
-function swar_digitconsts(T::DataType, base::Int, hexcase::Symbol = :mixed)
+function swar_digitconsts(T::DataType, base::Int)
     rep = T(0x01) * typemax(T) ÷ typemax(UInt8)  # 0x0101…
     if base <= 10
         (; kind = :nibble,
@@ -85,9 +85,9 @@ function swar_digitconsts(T::DataType, base::Int, hexcase::Symbol = :mixed)
            nibmask  = T(0xF0) * rep,
            expected = T(0x30) * rep)
     else
-        alp_start = if hexcase === :upper 0x41 else 0x61 end
+        alp_start = 0x61
         alp_end = alp_start + base - 10
-        (; kind = :hex, hexcase,
+        (; kind = :hex,
            foldmask = T(0x20) * rep,
            hibits   = T(0x80) * rep,
            dec_lo   = T(0x80 - 0x30) * rep,
@@ -109,17 +109,16 @@ For base ≤ 10, each byte of `result` is zero for valid digits and nonzero
 otherwise. For base > 10, bit 7 of each byte is set for non-digits.
 """
 function gen_swar_nondigits(T::DataType, var::Symbol, result::Symbol,
-                            base::Int, hexcase::Symbol = :mixed)
-    c = swar_digitconsts(T, base, hexcase)
+                            base::Int)
+    c = swar_digitconsts(T, base)
     if c.kind === :nibble
         :($result = ($var & ($var + $(c.addmask)) & $(c.nibmask)) ⊻ $(c.expected))
     else
         dec_ok = gensym("dec")
         alp_ok = gensym("alp")
-        av = if c.hexcase === :mixed gensym("folded") else var end
-        fold = if c.hexcase === :mixed Expr(:(=), av, :($var | $(c.foldmask))) end
+        av = gensym("folded")
         quote
-            $fold
+            $av = $var | $(c.foldmask)
             $dec_ok = ($var + $(c.dec_lo)) & ~($var + $(c.dec_hi)) & $(c.hibits)
             $alp_ok = ($av + $(c.alp_lo)) & ~($av + $(c.alp_hi)) & $(c.hibits)
             $result = ($dec_ok | $alp_ok) ⊻ $(c.hibits)
@@ -134,10 +133,9 @@ Check that `nd` high-aligned digit bytes in `var::T` are valid, evaluating
 `on_fail` otherwise. When `nd < sizeof(T)`, a mask restricts the check to
 the digit bytes only.
 """
-function gen_swar_digitcheck(T::DataType, var::Symbol, base::Int, nd::Int, on_fail,
-                              hexcase::Symbol = :mixed)
+function gen_swar_digitcheck(T::DataType, var::Symbol, base::Int, nd::Int, on_fail)
     nondig = gensym("nondig")
-    check_expr = gen_swar_nondigits(T, var, nondig, base, hexcase)
+    check_expr = gen_swar_nondigits(T, var, nondig, base)
     padding = sizeof(T) - nd
     checkmask = if !iszero(padding)
         padmask = typemax(T) - ((one(T) << (8 * padding)) - one(T))
@@ -196,17 +194,18 @@ function gen_swar_digitcount(T::DataType, var::Symbol, countvar::Symbol, base::I
 end
 
 """
-    gen_swarparse(::Type{T}, var, base, nd) -> Vector{ExprVarLine}
+    gen_swarparse(::Type{T}, var, base, nd, decoded = false) -> Vector{ExprVarLine}
 
 Emit the multiply-shift reduction that converts `nd` high-aligned ASCII
 digit bytes in `var::T` into an integer value (stored back in `var`).
 
 For hex, applies `(alpha >> 6) * 9` letter correction before reduction.
+When `decoded`, the bytes already hold digit values (zero in padding bytes).
 """
-function gen_swarparse(T::DataType, var::Symbol, base::Int, nd::Int)
+function gen_swarparse(T::DataType, var::Symbol, base::Int, nd::Int, decoded::Bool = false)
     c = swarparse_consts(T, base, nd)
-    exprs = ExprVarLine[:($var &= $(c.ascii_mask))]
-    if !iszero(c.alpha_mask)
+    exprs = if decoded ExprVarLine[] else ExprVarLine[:($var &= $(c.ascii_mask))] end
+    if !decoded && !iszero(c.alpha_mask)
         alpha = gensym("alpha")
         push!(exprs,
               :($alpha = $var & $(c.alpha_mask)),
@@ -230,8 +229,7 @@ Generate check + parse expressions for a single SWAR chunk.
 Handles 1-digit decimal (sub+cmp), 1-digit hex (casefold+dual range),
 and multi-digit (via `gen_swar_digitcheck`/`gen_swarparse`).
 """
-function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail,
-                        hexcase::Symbol = :mixed)
+function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail)
     check = if nd == 1 && base <= 10
         ExprVarLine[:($var = ($var - $(UInt8('0'))) % $cT),
                     :(if $var >= $(cT(base)); $on_fail end)]
@@ -246,7 +244,7 @@ function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail,
                           end
                       end)]
     else
-        gen_swar_digitcheck(cT, var, base, nd, on_fail, hexcase)
+        gen_swar_digitcheck(cT, var, base, nd, on_fail)
     end
     parse = if nd == 1 ExprVarLine[] else gen_swarparse(cT, var, base, nd) end
     (check, parse)
@@ -528,8 +526,7 @@ function gen_digit_swar_fixed(state::ParserState, nctx::NodeCtx,
     b = nctx[:current_branch]
     len_check = Expr(:call, :__length_check, b.id, b.parsed_max, maxdigits, maxdigits, maxdigits)
     result = ExprVarLine[:($len_check || $fail_expr)]
-    append!(result, gen_swar_chunks(state, nctx, chunks, base, fnum, dI,
-                                    fail_expr, :mul_add))
+    append!(result, gen_swar_chunks(state, nctx, chunks, base, fnum, dI, fail_expr))
     rangecheck != :() && push!(result, rangecheck)
     if !directvar; push!(result, :($fieldvar = $numexpr)) end
     result
@@ -660,19 +657,15 @@ end
 ## Multi-chunk SWAR: load → validate → reduce → accumulate
 
 """
-    gen_swar_chunks(state, nctx, chunks, base, resultvar, resultT, on_fail,
-                    accum, hexcase) -> Vector{ExprVarLine}
+    gen_swar_chunks(state, nctx, chunks, base, resultvar, resultT, on_fail) -> Vector{ExprVarLine}
 
 SWAR parse `chunks` (tuple of `(offset, ndigits)` pairs) and accumulate
-into `resultvar::resultT`. `accum` is `:shift_or` (charseq bit-packing)
-or `:mul_add` (positional integer value).
+their positional integer value into `resultvar::resultT`.
 """
 function gen_swar_chunks(state::ParserState, nctx::NodeCtx,
                          @nospecialize(chunks), base::Int, resultvar::Symbol, resultT::DataType,
-                         @nospecialize(on_fail), accum::Symbol, hexcase::Symbol = :mixed)
-    bpc = cardbits(base)
+                         @nospecialize(on_fail))
     exprs = ExprVarLine[]
-    digits_remaining = sum(last, chunks)
     for (ci, (offset, nd)) in enumerate(chunks)
         svar = gensym("chunk$ci")
         sT = register_type(nd)
@@ -682,22 +675,85 @@ function gen_swar_chunks(state::ParserState, nctx::NodeCtx,
         else
             gen_swar_load(sT, svar, nd, false, offset)
         end
-        check, parse = gen_swar_chunk(sT, svar, nd, base, on_fail, hexcase)
+        check, parse = gen_swar_chunk(sT, svar, nd, base, on_fail)
         append!(exprs, ExprVarLine[load, check..., parse...])
-        digits_remaining -= nd
         val = if sT == resultT svar else :($svar % $resultT) end
-        expr = if accum === :shift_or
-            nbits = digits_remaining * bpc
-            if ci == 1 && iszero(nbits) val
-            elseif ci == 1; :($val << $nbits)
-            elseif iszero(nbits); :($resultvar | $val)
-            else :($resultvar | $val << $nbits) end
-        else
-            if ci == 1 val
-            else :($resultvar * $(resultT(base) ^ nd) + $val) end
-        end
-        push!(exprs, Expr(:(=), resultvar, expr))
+        push!(exprs, Expr(:(=), resultvar,
+                          if ci == 1 val else :($resultvar * $(resultT(base) ^ nd) + $val) end))
     end
+    exprs
+end
+
+## Character sequences
+
+# Ranges as `(lo, len, base)`, or `nothing` unless lane-wise indexing is exact: ASCII,
+# disjoint once folded, and `base <= lo` so no lane borrows from the next
+function swar_charset_spans(ranges::Vector{UnitRange{UInt8}}, casefold::Bool, base::Int)
+    spans = Tuple{UInt8, Int, Int}[]
+    for r in ranges
+        lo, len = if casefold first(r) | 0x20 else first(r) end, length(r)
+        (lo + len <= 0x80 && base <= lo) || return nothing
+        for (l, n, _) in spans
+            lo < l + n && l < lo + len && return nothing
+        end
+        push!(spans, (lo, len, base))
+        base += len
+    end
+    spans
+end
+
+"""
+    gen_swar_charseq(var, cT, chunks, spans, casefold, bpc, on_fail) -> Vector{ExprVarLine}
+
+Parse the characters at `chunks` (`(offset, count ≤ 8)` pairs) into `var::cT` as
+`parsechars` would, a register per chunk.
+"""
+function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, Int}},
+                          spans::Vector{Tuple{UInt8, Int, Int}}, casefold::Bool, bpc::Int,
+                          @nospecialize(on_fail))
+    exprs = ExprVarLine[:($var = zero($cT))]
+    valid = nothing
+    for (start, nd) in chunks
+        sT = register_type(nd)
+        width = sizeof(sT)
+        pad = width - nd
+        # `b` in each character lane (a short load fills the high lanes)
+        lanes(b) = (m = zero(sT); for i in pad:width-1; m |= sT(b) << 8i; end; m)
+        reg, folded, idx = gensym("chars"), gensym("folded"), gensym("indices")
+        push!(exprs, gen_swar_load(sT, reg, nd, false, start),
+              :($folded = $(if casefold; :($reg | $(lanes(0x20))) else reg end)))
+        # A non-ASCII byte's carries may corrupt neighbouring flags, but it fails its own lane
+        # Every valid lane lies in one range: offset by the least, plus its range's excess
+        least = minimum(Int[lo - base for (lo, _, base) in spans])
+        matched, offsets = nothing, lanes(least)
+        for (lo, len, base) in spans
+            f = gensym("inrange")
+            push!(exprs, :($f = (($folded + $(lanes(0x80 - lo))) ⊻
+                                 ($folded + $(lanes(0x80 - lo - len)))) & $(lanes(0x80))))
+            matched = if isnothing(matched) f else :($matched | $f) end
+            lo - base > least && (offsets = :($offsets + ($f >> 7) * $(sT(lo - base - least))))
+        end
+        chunkvalid = :($matched & ~$reg == $(lanes(0x80)))
+        valid = if isnothing(valid) chunkvalid else :($valid & $chunkvalid) end
+        push!(exprs, :($idx = $folded - $offsets))
+        # Packing reads indices as base-2^bpc digits (the zero padding lanes as leading
+        # zeros); above 4 bits they overflow the reduction's lanes, so merge pairwise
+        if bpc <= 4
+            append!(exprs, gen_swarparse(sT, idx, 1 << bpc, nd, true))
+        else
+            half = 8
+            while half < 8width
+                low = zero(sT)
+                for i in 0:2half:8width-1
+                    low |= ((one(sT) << half) - one(sT)) << i
+                end
+                push!(exprs, :($idx = (($idx & $low) << $(bpc * (half ÷ 8))) | (($idx >> $half) & $low)))
+                half *= 2
+            end
+        end
+        push!(exprs, :($var = ($var << $(bpc * nd)) | ($idx % $cT)))
+    end
+    push!(exprs, :($valid || $on_fail))
     exprs
 end
 
@@ -727,8 +783,7 @@ function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
     (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
     (; base, maxdigits, dI, groups, skipbytes) = dspec
     (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(groups, skipbytes)
-    swar_body = gen_swar_chunks(state, nctx, chunks, base, fnum, dI,
-                                fail_expr, :mul_add)
+    swar_body = gen_swar_chunks(state, nctx, chunks, base, fnum, dI, fail_expr)
     scanned = Symbol("$(fieldvar)_scanned")
     bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     push!(swar_body, Expr(:(=), scanned, total_bytes))

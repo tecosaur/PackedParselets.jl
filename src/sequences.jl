@@ -522,34 +522,26 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     groups = parse_groups_kwarg(nctx, maxlen, skipbytes)
     !isnothing(groups) && variable &&
         throw(ArgumentError("groups requires fixed-width character sequence"))
-    use_swar_hex = kind === :hex && !variable && !oneindexed &&
-        (!has_skip || !isnothing(groups))
-    parse_exprs = if use_swar_hex
-        hexcase = if cfold; :mixed
-        elseif first(ranges[2]) == UInt8('A'); :upper
-        else :lower end
-        if has_skip
-            (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(groups, skipbytes)
-            swar_body = gen_swar_chunks(state, nctx, chunks, 16, charvar, cT,
-                                        notfound, :shift_or, hexcase)
-            push!(swar_body, Expr(:(=), lenvar, maxlen), Expr(:(=), scannedvar, total_bytes))
-            fallback = ExprVarLine[
-                :(($lenvar, $charvar, $scannedvar) = parsechars($cT, data, pos,
-                    $scanlimit, $rangetuple, $cfold, false, $skipbytes)),
-                :(if $lenvar != $maxlen; $notfound end)]
-            lencheck = emit_lengthcheck(state, nctx, total_bytes)
-            ExprVarLine[:(if $lencheck && $sep_check; $(swar_body...)
-                          else $(fallback...) end)]
-        else
-            chunksize = sizeof(UInt)
-            chunks = Tuple{Int, Int}[(chunksize * i, Base.min(chunksize, maxlen - chunksize * i))
-                                     for i in 0:cld(maxlen, chunksize)-1]
-            exprs = ExprVarLine[:($(emit_lengthcheck(state, nctx, maxlen)) || $notfound)]
-            append!(exprs, gen_swar_chunks(state, nctx, chunks, 16, charvar, cT,
-                                           notfound, :shift_or, hexcase))
-            push!(exprs, Expr(:(=), lenvar, maxlen))
-            exprs
-        end
+    spans = if !variable && (!has_skip || !isnothing(groups))
+        swar_charset_spans(ranges, cfold, Int(oneindexed))
+    end
+    parse_exprs = if !isnothing(spans) && has_skip
+        (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(groups, skipbytes)
+        swar_body = gen_swar_charseq(charvar, cT, chunks, spans, cfold, bpc, notfound)
+        push!(swar_body, Expr(:(=), lenvar, maxlen), Expr(:(=), scannedvar, total_bytes))
+        fallback = ExprVarLine[
+            :(($lenvar, $charvar, $scannedvar) = parsechars($cT, data, pos,
+                $scanlimit, $rangetuple, $cfold, $oneindexed, $skipbytes)),
+            :(if $lenvar != $maxlen; $notfound end)]
+        lencheck = emit_lengthcheck(state, nctx, total_bytes)
+        ExprVarLine[:(if $lencheck && $sep_check; $(swar_body...)
+                      else $(fallback...) end)]
+    elseif !isnothing(spans)
+        chunks = Tuple{Int, Int}[(8i, Base.min(8, maxlen - 8i)) for i in 0:cld(maxlen, 8)-1]
+        exprs = ExprVarLine[:($(emit_lengthcheck(state, nctx, maxlen)) || $notfound)]
+        append!(exprs, gen_swar_charseq(charvar, cT, chunks, spans, cfold, bpc, notfound))
+        push!(exprs, Expr(:(=), lenvar, maxlen))
+        exprs
     elseif has_skip
         ExprVarLine[:(($lenvar, $charvar, $scannedvar) =
             parsechars($cT, data, pos, $scanlimit, $rangetuple, $cfold, $oneindexed, $skipbytes)),

@@ -66,7 +66,13 @@ function gen_skip_step(state::ParserState, nctx::NodeCtx,
     cmatch = ChoiceMatch(refs, alts, casefold, fieldvar, cint, :none)
     matcher, _, _ = build_choice_matcher(state, nctx, cmatch)
     lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, refs))
-    :(if $lencheck; $fieldvar = zero($cint); $(matcher...) end)
+    # Inputs rarely start like an alternative: test the first byte before hashing
+    guard = nothing
+    for b in unique(UInt8[codeunit(r, 1) for r in refs])
+        check = conjoin(gen_string_match(String(UInt8[b]), casefold))
+        guard = if isnothing(guard) check else :($guard || $check) end
+    end
+    :(if $lencheck && $guard; $fieldvar = zero($cint); $(matcher...) end)
 end
 
 function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})

@@ -165,31 +165,19 @@ A sentinel mask beyond `maxdigits` caps the count.
 """
 function gen_swar_digitcount(T::DataType, var::Symbol, countvar::Symbol, base::Int, maxdigits::Int)
     nondig = gensym("nondig")
-    check_expr = gen_swar_nondigits(T, var, nondig, base)
-    # Set sentinel bits beyond maxdigits to stop counting
-    sentinel_expr = if maxdigits < sizeof(T)
-        sentinel = ~((one(T) << (8 * maxdigits)) - one(T))
-        if base <= 10
-            :($nondig |= $sentinel)
-        else
-            hibits = T(0x80) * (T(0x01) * typemax(T) ÷ typemax(UInt8))
-            :($nondig |= $(sentinel & hibits))
-        end
-    end
-    count_assign = if base <= 10
-        # haszero trick: sets bit 7 for each ZERO byte, invert to find first non-digit
-        rep01 = T(0x01) * typemax(T) ÷ typemax(UInt8)
-        rep80 = T(0x80) * rep01
-        :($countvar = trailing_zeros(
-            (($nondig - $rep01) & ~$nondig & $rep80) ⊻ $rep80) >> 3)
+    hibits = T(0x80) * (T(0x01) * typemax(T) ÷ typemax(UInt8))
+    # Bit 7 marks each non-digit byte (a non-ASCII byte's carries only reach later lanes)
+    check_expr = if base <= 10
+        rep(b) = T(b) * (hibits >> 7)
+        :($nondig = ((($var + $(rep(0x50))) ⊻ ($var + $(rep(0x50 - base)))) & ~$var & $hibits) ⊻ $hibits)
     else
-        :($countvar = trailing_zeros($nondig) >> 3)
+        gen_swar_nondigits(T, var, nondig, base)
     end
     result = ExprVarLine[check_expr]
-    if !isnothing(sentinel_expr)
-        push!(result, sentinel_expr)
+    if maxdigits < sizeof(T)
+        push!(result, :($nondig |= $(~((one(T) << (8 * maxdigits)) - one(T)) & hibits)))
     end
-    push!(result, count_assign)
+    push!(result, :($countvar = trailing_zeros($nondig) >> 3))
     result
 end
 
@@ -267,7 +255,8 @@ function gen_swar_hiload(state::ParserState, nctx::NodeCtx, var::Symbol, nd::Int
         shift = 8 * (sizeof(sT) - nd)
         Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
              :($var = htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos)))) << $shift),
-             gen_swar_load(sT, var, nd, false))
+             Expr(:if, :(pos > $(sizeof(sT) - nd)),
+                  gen_swar_load(sT, var, nd, true), gen_swar_load(sT, var, nd, false)))
     else
         gen_swar_load(sT, var, nd, backward)
     end

@@ -125,6 +125,11 @@ function fold_branches!(items::AbstractVector)
                item.args[1].args[1] === :! && item.args[1].args[2] isa Bool
             item.args[1] = !item.args[1].args[2]
         end
+        # A static operand settles a condition: `true || x` is true, `false && x` false
+        cond = if item.head in (:if, :elseif) item.args[1] end
+        if Meta.isexpr(cond, (:||, :&&)) && cond.args[1] isa Bool
+            item.args[1] = if (cond.head === :||) == cond.args[1]; cond.args[1] else cond.args[2] end
+        end
         if item.head in (:if, :elseif) && item.args[1] isa Bool
             push!(splices, (i, take_branch(item)))
             changed = true

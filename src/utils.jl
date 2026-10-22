@@ -10,7 +10,7 @@
 
 ## Invalid values
 
-@noinline throw_invalidpacking(@nospecialize(T), field::Union{Symbol, Nothing}, value::Integer) =
+@noinline throw_invalidpacking(@nospecialize(T::Type), field::Union{Symbol, Nothing}, value::Integer) =
     throw(InvalidPacking(T, field, value))
 
 ## Compat

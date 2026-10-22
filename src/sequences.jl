@@ -669,7 +669,10 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
     T = Core.eval(state.mod, args[1])
     T isa DataType && T <: state.supertype && isprimitivetype(T) ||
         throw(ArgumentError("embed type must be a primitive $(state.supertype) subtype, got $T"))
-    ebits = nbits(T)
+    # Inferred, these calls would be invalidated by every new packed type
+    ebits = (@invokelatest nbits(T))::Int
+    pmin, pmax = (@invokelatest parsebounds(T))::Tuple{Int, Int}
+    wmin, wmax = (@invokelatest printbounds(T))::Tuple{Int, Int}
     epad = 8 * sizeof(T) - ebits
     option = get(nctx, :optional, nothing)
     claims = is_sentinel_unclaimed(nctx)
@@ -709,9 +712,9 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
     direct = ExprVarLine[fextract, writeex]
     vars = Pair{Symbol,Any}[fieldvar => :($(zero_int(T)))]
     getval = ExprVarLine[fextract]
-    pinfo = if printbounds(T)[1] == printbounds(T)[2]
+    pinfo = if wmin == wmax
         PrintExprs(; direct, vars, getval,
-                   getlen = ExprVarLine[:(pos += $(printbounds(T)[1]))],
+                   getlen = ExprVarLine[:(pos += $wmin)],
                    putval = ExprVarLine[copy(writeex)])
     else
         # Variable-length: call tobytes once in getval, reuse buf in putval
@@ -726,8 +729,7 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
                        :(pos += length($ebuf))])
     end
     SegmentOutput(
-        SegmentBounds(parsebounds(T)[1]:parsebounds(T)[2],
-                      printbounds(T)[1]:printbounds(T)[2],
+        SegmentBounds(pmin:pmax, wmin:wmax,
                       ebits + presbits, sentinel),
         SegmentCodegen(parse_exprs, seg_extract, pinfo, seg_impart),
         SegmentMeta(label, "embedded $(T)", string(T), T, argvar),

@@ -29,8 +29,10 @@ enough remaining bytes, it is folded away. When widening to a single register
 load reduces the chunk count, [[file:dataloading.org#wide-narrow-dual-paths][wide/narrow dual paths]] are emitted and branch
 folding selects the winner.
 
-*Prefix stripping* (~skip~) uses the same technique. Same-length prefixes share a
-length check, and prefixes are tried longest-first via an if/elseif chain.
+*Prefix stripping* (~skip~) uses the same technique for a single prefix. Several
+alternatives (e.g. =http://= and =https://=) go through the [[file:perfecthash.org][choice matcher]] instead,
+but only after a test of the input's first byte. Most inputs never carry the
+prefix at all: a bare identifier is rejected by that one load and compare.
 
 *Choice verification* uses word-sized comparisons after a [[file:perfecthash.org][perfect hash]] resolves a
 candidate. With an injective hash, bytes already validated by the hash window

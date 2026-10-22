@@ -1,8 +1,8 @@
 #+title: SWAR Digit Parsing
 
-For ~digits~ fields with base \le 16, the generated code uses SWAR (SIMD Within A
-Register) to validate and convert ASCII digit strings using word-sized
-arithmetic rather than byte-by-byte loops.
+For ~digits~ fields with base \le 16, and for fixed-width character sequences, the
+generated code uses SWAR (SIMD Within A Register) to validate and convert ASCII
+bytes using word-sized arithmetic rather than byte-by-byte loops.
 
 * Approach
 
@@ -115,17 +115,21 @@ For variable-width fields, we need to count how many consecutive digit bytes
 there are, starting from the LSB. A sentinel mask beyond ~maxdigits~ forces
 non-digit bits, capping the count.
 
-For base \le 10, the non-digit indicator has zero bytes for valid digits. The
-classic "haszero" trick detects zero bytes in a word:
+The nibble check above marks digits with /zero/ bytes, and finding the first
+non-zero byte takes a further "haszero" pass. Instead, we flag digits by range
+and set bit 7 of every non-digit byte directly:
 
 #+begin_example
-haszero(x) = (x - 0x01…) & ~x & 0x80…
+nondig = (((val + (0x80 - 0x30)…) ⊻ (val + (0x80 - 0x30 - base)…)) & ~val & 0x80…) ⊻ 0x80…
 #+end_example
 
-This sets bit 7 of each zero byte. XOR with =0x80…= inverts the sense, and
-~trailing_zeros >> 3~ gives us the consecutive digit count. For base 11--16 this
-is even simpler: the hex detection already sets bit 7 for non-digit bytes, so
-~trailing_zeros >> 3~ gives the count directly.
+The first sum sets bit 7 of each byte at or above ='0'=, the second of each byte
+past the last digit, so their XOR marks exactly the digits. Masking with the
+complement of ~val~ rejects non-ASCII bytes; their carries can disturb only the
+bytes after them, which lie beyond the count anyway. ~trailing_zeros(nondig) >> 3~
+then gives the count, just as it does for hex, whose detection already sets bit 7
+for non-digits. The shorter dependency chain matters here: a semantic version
+(=v1.2.3=) has three digit counts in series, and parses about 11% faster for it.
 
 * ASCII-to-integer reduction
 
@@ -155,19 +159,18 @@ backward or overread loads at no additional cost.
 
 * Strategy selection
 
-| Strategy        | Eligibility                          |
-|-----------------+--------------------------------------|
-| Scalar ~parseint~ | base > 16, or maxdigits > SWAR limit |
-| Fixed-width     | base \le 16, fixed, maxdigits \le 16     |
-| Variable-width  | base \le 16, variable, maxdigits \le 8   |
-| Grouped         | base \le 16, ~groups~ kwarg, with ~skip~   |
-| Hex charseq     | ~hex(N)~, fixed, any /N/                 |
+| Strategy           | Eligibility                                         |
+|--------------------+-----------------------------------------------------|
+| Scalar ~parseint~    | base > 16, or maxdigits > SWAR limit                |
+| Fixed-width        | base \le 16, fixed, maxdigits \le 16                    |
+| Variable-width     | base \le 16, variable, maxdigits \le 8                  |
+| Grouped            | base \le 16, ~groups~ kwarg, with ~skip~                  |
+| Character sequence | fixed width, ASCII ranges disjoint once case-folded |
 
-All fixed-width and grouped strategies use a unified chunking facility
-(~gen_swar_chunks~) that splits the byte range into register-sized pieces, runs
-the SWAR pipeline on each, and combines results. The accumulation mode differs
-by context: ~:mul_add~ for digit fields (positional value), ~:shift_or~ for hex
-charseqs (nibble-packed encoding).
+Fixed-width and grouped digit fields use a chunking facility (~gen_swar_chunks~)
+that splits the byte range into register-sized pieces, runs the SWAR pipeline on
+each, and combines their positional values. Character sequences have their own
+pipeline, below.
 
 ** Multi-chunk fixed-width
 
@@ -193,30 +196,84 @@ separators at any position.
 
 Groups larger than a register are automatically sub-chunked: a group of 12
 becomes chunks of 8 + 4 at the appropriate offsets. The same sub-chunking
-applies to hex charseq groups (e.g. UUID's 12-hex-digit final group).
+applies to grouped character sequences (e.g. UUID's 12-hex-digit final group).
 
-** Hex charseq SWAR
+** Character sequences
 
-~hex(N)~ charseq fields use the same SWAR hex validation and reduction as
-~digits(N, base=16)~, but accumulate via ~:shift_or~ to produce the nibble-packed
-charseq encoding rather than an integer value. This works for any /N/: fields
-wider than 8 are split into register-sized chunks automatically. The hex case
-variant (mixed/upper/lower) is determined from the resolved
-~casefold~/~upper~/~lower~ flags and passed through to the digit detection
-constants, which adjust the alpha range bounds accordingly (=a-f= for
-mixed/lower, =A-F= for upper).
+A PDB identifier such as =7QDH= is four characters drawn from two ranges, digits
+and letters, which an ~alphnum(4)~ field stores as their indices into those ranges:
+\lceil{}log_2 36\rceil{} = 6 bits apiece, first character highest (see [[file:bitpacking.org][bit packing]]). The
+scalar ~parsechars~ finds each index with a loop over the bytes, and a loop over
+the ranges within it. Fixed-width sequences instead take up to eight characters
+at a time through three register-wide steps: check each byte's range, subtract
+each range's offset to get the indices, then pack them.
+
+#+begin_example
+Load:      val = 0x48_44_51_37          ('7','Q','D','H', first byte lowest)
+Fold:      val | 0x20202020             → 0x68_64_71_37   (case-insensitive)
+
+Ranges:    in₀ ('0'..'9', indices 0..9)    → 0x00_00_00_80
+           in₁ ('a'..'z', indices 10..35)  → 0x80_80_80_00
+           (in₀ | in₁) & ~raw == 0x80808080   → every byte matches ✓
+
+Offsets:   0x30303030 + (in₁ >> 7) × 0x27  → 0x57_57_57_30
+Indices:   folded - offsets                → 0x11_0D_1A_07   (7, 26, 13, 17)
+
+Pack:      pairs   (7 << 6) | 26 = 474,   (13 << 6) | 17 = 849
+           whole   (474 << 12) | 849      = 0x1DA351
+#+end_example
+
+The range test is the one from digit counting, applied to each range /r/ =
+=lo:lo+len-1= in turn:
+
+#+begin_example
+inᵣ = ((val + (0x80 - lo)…) ⊻ (val + (0x80 - lo - len)…)) & 0x80…
+#+end_example
+
+Every byte must fall in some range. Masking the combined flags with the
+complement of the raw bytes fails any non-ASCII byte in its own lane, whatever
+its carries do to its neighbours, and a field spanning several registers checks
+all of them before a single branch. Folding mirrors ~parsechars~ exactly (every
+byte gets =| 0x20= when the field is case-insensitive), so the two paths always
+agree on what they accept.
+
+The offsets rely on every valid byte lying in exactly one range. A byte's index
+is the byte less its range's offset, ~lo - base~, where ~base~ is the first index
+the range covers. Starting from the least offset (here =0x30=, for digits), each
+other range adds its excess in the lanes its flags mark (the letters' =0x27=).
+Each subtraction then stays within its byte, provided every range starts at or
+above its first index (~base \le lo~).
+
+Packing the indices is a matter of reading them as digits in base \(2^{bpc}\). Up
+to 4 bits per character, this is exactly the digit reduction above, run on the
+indices rather than ASCII. Wider indices would overflow the reduction, which
+relies on the square of the base fitting in a byte, so we merge neighbouring
+lanes pairwise instead, as in the example. Either way, the zeroed padding of a
+short load reads as leading zero characters, and no alignment shifts are needed.
+Together, these make an ~alphnum(8)~ field nearly four times faster to parse than
+through ~parsechars~ (2.8 ns rather than 10.6 ns).
+
+Variable-width sequences, and those with ~skip~ but no ~groups~, still use
+~parsechars~. So do character sets with non-ASCII ranges, ranges that overlap once
+folded, or ranges starting below their first index.
 
 ** Variable-width (1--8 digits)
 
 Since we don't know the digit count until runtime, we first load the bytes and
 count them, then left-shift to high-align before the standard reduction runs.
-Two load paths are emitted, with static branch folding selecting one:
+When the context proves enough preceding bytes, a backward load takes the
+digits in one go. Otherwise we use the first of these that applies, checking at
+run time whatever the context can't prove:
 
-- Forward overread :: a single full-width load at ~pos~, then a branchless digit
-  count from the LSB.
+- Forward overread :: a single full-width load at ~pos~ when enough bytes remain,
+  then a branchless digit count from the LSB.
+- Backward :: a single full-width load ending at the last available byte when
+  enough bytes precede ~pos~, shifted down to the LSB.
 - Cascading sub-loads :: descending power-of-2 chunks (e.g. 4, 2, 1 for
   maxdigits=7), each conditionally loaded and digit-checked. Bytes accumulate
-  low-aligned, with a running count.
+  low-aligned, with a running count. The per-chunk exits make this cheaper than
+  loading every available byte and counting once (2.65 ns rather than 3.15 ns
+  for =Q42=).
 
 The reduction constants are precomputed for ~maxdigits~; zeroed low bytes beyond
 the actual count don't affect the result.

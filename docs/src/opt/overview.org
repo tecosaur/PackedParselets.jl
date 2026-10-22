@@ -68,7 +68,8 @@ objects are allocated on the hot path.
 
 + [[file:dataloading.org][Data loading]] :: register decomposition and load strategies
 + [[file:bitpacking.org][Bit-packing]] :: field encoding into the primitive type
-+ [[file:swar.org][SWAR digit parsing]] :: parallel digit validation and conversion
++ [[file:swar.org][SWAR digit parsing]] :: parallel validation and conversion of digits and
+  fixed-width character sequences
 + [[file:perfecthash.org][Perfect hashing]] :: ~choice~ matching
 + [[file:stringmatch.org][String matching]] :: literal and prefix matching
 + [[file:bufprint.org][Buffer printing]] :: direct-to-memory output (jeaiii, reverse-SWAR)

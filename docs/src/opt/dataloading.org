@@ -54,6 +54,13 @@ of multiple loads.
 Backward eligibility is determined by ~parsed_min~ (known at codegen time);
 forward overread eligibility depends on how the sentinels resolve.
 
+[[file:swar.org][Digit]] loads don't stop at what can be proven. When neither a backward load nor
+a forward overread is guaranteed, they check at run time for a single backward
+load (and, for variable-width fields, a single forward one too), falling back to
+exact sub-loads only when neither fits. The check is one predictable branch
+against several loads and shifts, and in practice a consumed prefix or some
+trailing content almost always provides the bytes.
+
 * Masked comparison
 
 For loads used in comparison (string matching, choice verification), each chunk

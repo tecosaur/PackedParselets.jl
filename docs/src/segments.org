@@ -93,7 +93,7 @@ Each character is packed into \lceil{}log_2(alphabet size)\rceil{} bits.
 
 All character sequence segments (~letters~, ~alphnum~, ~hex~, ~charset~)
 support the ~skip~ and ~groups~ keywords with the same semantics as
-~digits~: see above.
+~digits~: see above. Fixed-width sequences use [[file:opt/swar.org][SWAR parsing]].
 
 ** ~alphnum~
 

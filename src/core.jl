@@ -31,10 +31,10 @@ Return `(min_bytes, max_bytes)` for printing type `T`.
 function printbounds end
 
 """
-    parsebytes(::Type{T}, bytes::AbstractVector{UInt8}) -> (T_or_errcode, pos)
+    parsebytes(::Type{T}, bytes::AbstractVector{UInt8}[, start::Int]) -> (T_or_errcode, pos)
 
-Raw byte parser. Returns the parsed value and position on success,
-or an error code and position on failure.
+Raw byte parser, from `bytes[start]` (default 1). Returns the parsed value and
+the position after it on success, or an error code and position on failure.
 """
 function parsebytes end
 

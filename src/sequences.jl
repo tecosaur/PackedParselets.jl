@@ -681,14 +681,14 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
     eshifted = Symbol("$(fieldvar)_shifted")
     pack = emit_pack(state, T, eshifted, bitpos - presbits)
     parse_exprs = ExprVarLine[
-          :(($eresult, $epos) = $(GlobalRef(PackedParselets, :parsebytes))($T, @view data[pos:end])),
+          :(($eresult, $epos) = $(GlobalRef(PackedParselets, :parsebytes))($T, data, pos)),
           :(if !($eresult isa $T); $notfound end),
           :($eshifted = $(to_lsb(eresult))),
           pack]
     if claims
         push!(parse_exprs, emit_pack(state, Bool, true, bitpos))
     end
-    push!(parse_exprs, :(pos += $epos - 1))
+    push!(parse_exprs, :(pos = $epos))
     fextract = :($fieldvar = $(to_msb(emit_extract(state, bitpos - presbits, ebits, T))))
     argvar = gensym("arg_embed")
     argshifted = gensym("arg_embed_shifted")

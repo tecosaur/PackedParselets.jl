@@ -143,16 +143,16 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
     end
     if !isnothing(split_idx) && parsed_min > 0
         resolved[split_idx] = if split_idx > 1
-            :(nbytes - pos >= $(parsed_min - 1) || return ($errmsg, 1))
+            :(nbytes - pos >= $(parsed_min - 1) || return ($errmsg, start))
         else
-            :(nbytes >= $parsed_min || return ($errmsg, 1))
+            :(nbytes - start >= $(parsed_min - 1) || return ($errmsg, start))
         end
     elseif !isnothing(split_idx)
         deleteat!(resolved, split_idx)
     end
-    :(Base.@assume_effects :foldable :nothrow @inline function $(GlobalRef(M, :parsebytes))(::Type{$(esc(name))}, data::AbstractVector{UInt8})
+    :(Base.@assume_effects :foldable :nothrow @inline function $(GlobalRef(M, :parsebytes))(::Type{$(esc(name))}, data::AbstractVector{UInt8}, start::Int = 1)
           parsed = $(zero_parsed_expr(state))
-          pos = 1
+          pos = start
           nbytes = length(data)
           $(resolved...)
           (parsed, pos)

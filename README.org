@@ -57,8 +57,9 @@ working ~eval~ wrapper.
           optional(".", :prebuild(digits(max=99)))))
 #+end_src
 
-Six fields and two levels of optionals, packed into 5 bytes. Parsing takes 36--58
-cycles (7--11.5 ns), printing ~7 ns (zero-allocation into a pre-allocated buffer).
+Six fields and two levels of optionals, packed into 5 bytes. Parsing a mixed stream
+of versions takes 38--124 cycles (7.5--24.5 ns) each, from short releases to ones
+with prerelease tags, and printing ~7 ns (zero-allocation into a pre-allocated buffer).
 
 #+begin_src julia-repl
 julia> map(eval, values(maketype(...))) # Create `SemVer` type from DSL
@@ -102,8 +103,9 @@ that is
                        :tzmin(digits(2, max=59, pad=2)))))
 #+end_src
 
-The ten fields are packed into an 11-byte primitive type, that takes 31--54 cycles
-(6--10.5 ns) to parse, and ~20ns to write to pre-allocated memory.
+The ten fields are packed into an 11-byte primitive type, that takes 45--75 cycles
+(9--15 ns) to parse from a mixed stream, depending on the fraction and offset, and
+~20ns to write to pre-allocated memory.
 
 #+begin_src julia-repl
 julia> map(eval, values(maketype(...))) # Create `RFC3339` type from DSL

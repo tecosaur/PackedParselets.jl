@@ -683,7 +683,9 @@ function gen_digit_parse(state::ParserState, nctx::NodeCtx,
     fixedwidth = mindigits == maxdigits
     swar_limit = if fixedwidth 2 * sizeof(UInt) else ndigits(typemax(UInt128); base = base::Int) - 1 end
     use_swar = base <= 16 && maxdigits <= swar_limit && isnothing(skipbytes)
-    use_grouped_swar = !isnothing(groups) && base <= 16
+    # Fixed-width digits with separators anywhere parse like one group of them
+    use_grouped_swar = base <= 16 && !isnothing(skipbytes) &&
+        (!isnothing(groups) || fixedwidth && maxdigits <= 2 * sizeof(UInt))
     exprs = if use_grouped_swar
         gen_digit_swar_grouped(state, nctx, vocab, dspec)
     elseif !use_swar
@@ -832,9 +834,12 @@ end
 function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
                                 @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
     (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
-    (; base, maxdigits, dI, groups, skipbytes) = dspec
-    (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(groups, skipbytes)
-    swar_body = gen_swar_chunks(state, nctx, chunks, base, fnum, dI, fail_expr)
+    (; base, maxdigits, dI, skipbytes) = dspec
+    (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(something(dspec.groups, [maxdigits]), skipbytes)
+    # Ungrouped, separators may fall anywhere, so a non-digit leaves the registers for a scan
+    regs = gensym("regs")
+    swar_body = gen_swar_chunks(state, nctx, chunks, base, fnum, dI,
+                                if isnothing(dspec.groups); :($regs = false) else fail_expr end)
     scanned = Symbol("$(fieldvar)_scanned")
     bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     push!(swar_body, Expr(:(=), scanned, total_bytes))
@@ -845,11 +850,9 @@ function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
         :($bitsconsumed == $maxdigits || $fail_expr)]
     lencheck = emit_lengthcheck(state, nctx, total_bytes)
     result = ExprVarLine[
-        :(if $lencheck && $sep_check
-              $(swar_body...)
-          else
-              $(fallback...)
-          end)]
+        :($regs = $lencheck && $sep_check),
+        :(if $regs; $(swar_body...) end),
+        :(if !$regs; $(fallback...) end)]
     rangecheck != :() && push!(result, rangecheck)
     if !directvar; push!(result, :($fieldvar = $numexpr)) end
     result

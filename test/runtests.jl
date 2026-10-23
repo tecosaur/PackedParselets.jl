@@ -3270,7 +3270,7 @@ end # embed
 @testset "skip kwarg" begin
     @testset "digits with skip (ORCID-like)" begin
         iddef = :(@defpacked OrcidLike (:id(digits(16, skip="-"))))
-        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=6:6)
+        @test parsebytes_complexity(iddef) == (branches=3:6, branch_total=6, ops=6:35)
         eval(iddef)
         # Parse with hyphens
         @test parse(OrcidLike, "0000-0002-1825-0097").id == 21825_0097
@@ -3309,7 +3309,7 @@ end # embed
     end
     @testset "digits with multi-char skip" begin
         iddef = :(@defpacked MultiSkipDigits (:id(digits(8, skip="- "))))
-        @test parsebytes_complexity(iddef) == (branches=2:2, branch_total=2, ops=6:6)
+        @test parsebytes_complexity(iddef) == (branches=3:5, branch_total=5, ops=6:20)
         eval(iddef)
         @test parse(MultiSkipDigits, "1234-5678").id == 12345678
         @test parse(MultiSkipDigits, "1234 5678").id == 12345678
@@ -3320,7 +3320,7 @@ end # embed
     end
     @testset "digits skip with literal context" begin
         iddef = :(@defpacked SkipCtx ("ID:", :num(digits(4, skip="-")), "/end"))
-        @test parsebytes_complexity(iddef) == (branches=4:5, branch_total=5, ops=11:12)
+        @test parsebytes_complexity(iddef) == (branches=5:8, branch_total=8, ops=11:23)
         eval(iddef)
         @test parse(SkipCtx, "ID:1234/end").num == 1234
         @test parse(SkipCtx, "ID:12-34/end").num == 1234
@@ -3334,7 +3334,7 @@ end # skip kwarg
     @testset "uniform groups (ORCID-style)" begin
         # 16 digits in groups of 4 separated by hyphens
         iddef = :(@defpacked OrcidGrouped (:id(digits(16, skip="-", groups=4))))
-        @test parsebytes_complexity(iddef) == (branches=4:9, branch_total=10, ops=8:64)
+        @test parsebytes_complexity(iddef) == (branches=4:11, branch_total=11, ops=8:64)
         eval(iddef)
         @test parse(OrcidGrouped, "0000-0002-1825-0097").id == 21825_0097
         @test parse(OrcidGrouped, "0000000218250097").id == 21825_0097
@@ -3349,7 +3349,7 @@ end # skip kwarg
     @testset "uneven groups (phone-style)" begin
         # 10 digits in groups of 3-3-4
         iddef = :(@defpacked PhoneNum (:num(digits(10, skip="-", groups=(3, 3, 4)))))
-        @test parsebytes_complexity(iddef) == (branches=4:7, branch_total=8, ops=8:57)
+        @test parsebytes_complexity(iddef) == (branches=4:9, branch_total=9, ops=8:57)
         eval(iddef)
         @test parse(PhoneNum, "555-123-4567").num == 5551234567
         @test parse(PhoneNum, "5551234567").num == 5551234567

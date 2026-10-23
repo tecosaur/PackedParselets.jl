@@ -745,14 +745,15 @@ function swar_charset_spans(ranges::Vector{UnitRange{UInt8}}, casefold::Bool, ba
 end
 
 """
-    gen_swar_charseq(var, cT, chunks, spans, casefold, bpc, on_fail) -> Vector{ExprVarLine}
+    gen_swar_charseq(var, cT, chunks, spans, casefold, bpc, on_fail[, count]) -> Vector{ExprVarLine}
 
 Parse the characters at `chunks` (`(offset, count ≤ 8)` pairs) into `var::cT` as
-`parsechars` would, a register per chunk.
+`parsechars` would, a register per chunk. With `count = (lenvar, avail)`, instead parse
+the valid characters at `pos` in one chunk, at most `avail` of them, counting them in `lenvar`.
 """
 function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, Int}},
                           spans::Vector{Tuple{UInt8, Int, Int}}, casefold::Bool, bpc::Int,
-                          @nospecialize(on_fail))
+                          @nospecialize(on_fail), @nospecialize(count = nothing))
     exprs = ExprVarLine[:($var = zero($cT))]
     valid = nothing
     for (start, nd) in chunks
@@ -761,8 +762,12 @@ function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, I
         pad = width - nd
         # `b` in each character lane (a short load fills the high lanes)
         lanes(b) = (m = zero(sT); for i in pad:width-1; m |= sT(b) << 8i; end; m)
-        reg, folded, idx = gensym("chars"), gensym("folded"), gensym("indices")
-        push!(exprs, gen_swar_load(sT, reg, nd, false, start),
+        reg, folded, idx, cut = gensym("chars"), gensym("folded"), gensym("indices"), gensym("cut")
+        load(at) = :(htol(Base.unsafe_load(Ptr{$sT}(pointer(data, $at)))))
+        isnothing(count) || push!(exprs, :($cut = ((8 - $(last(count))) << 3) % UInt))
+        push!(exprs, if isnothing(count) gen_swar_load(sT, reg, nd, false, start)
+              else :($reg = if canreadback(data, pos, 7); $(load(:(pos + $(last(count)) - 8))) >>> $cut
+                            else $(load(:pos)) & (typemax(UInt64) >>> $cut) end) end,
               :($folded = $(if casefold; :($reg | $(lanes(0x20))) else reg end)))
         # A non-ASCII byte's carries may corrupt neighbouring flags, but it fails its own lane
         # Every valid lane lies in one range: offset by the least, plus its range's excess
@@ -778,6 +783,10 @@ function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, I
         chunkvalid = :($matched & ~$reg == $(lanes(0x80)))
         valid = if isnothing(valid) chunkvalid else :($valid & $chunkvalid) end
         push!(exprs, :($idx = $folded - $offsets))
+        if !isnothing(count)
+            push!(exprs, :($(first(count)) = trailing_zeros(~($matched & ~$reg) & $(lanes(0x80))) >> 3),
+                  :($idx <<= ((8 - $(first(count))) << 3) % UInt))
+        end
         # Packing reads indices as base-2^bpc digits (the zero padding lanes as leading
         # zeros); above 4 bits they overflow the reduction's lanes, so merge pairwise
         if bpc <= 4
@@ -795,7 +804,7 @@ function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, I
         end
         push!(exprs, :($var = ($var << $(bpc * nd)) | ($idx % $cT)))
     end
-    push!(exprs, :($valid || $on_fail))
+    isnothing(count) && push!(exprs, :($valid || $on_fail))
     exprs
 end
 

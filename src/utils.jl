@@ -21,6 +21,13 @@ end
 
 const unsafe_takestring = @static VERSION < v"1.12-" ? String : Base.unsafe_takestring
 
+## Load bounds
+
+# Whether a load may read `n` bytes before `data[pos]`; a `String`'s length word precedes its data
+canreadback(::AbstractVector{UInt8}, pos::Int, n::Int) = pos > n
+canreadback(::Base.CodeUnits{UInt8, <:Union{String, SubString{String}}}, pos::Int, n::Int) =
+    n <= sizeof(Int) || pos > n
+
 ## Character parsing
 
 """

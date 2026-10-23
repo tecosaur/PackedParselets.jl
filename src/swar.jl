@@ -166,19 +166,21 @@ A sentinel mask beyond `maxdigits` caps the count.
 function gen_swar_digitcount(T::DataType, var::Symbol, countvar::Symbol, base::Int, maxdigits::Int)
     nondig = gensym("nondig")
     hibits = T(0x80) * (T(0x01) * typemax(T) ÷ typemax(UInt8))
-    # Bit 7 marks each non-digit byte (a non-ASCII byte's carries only reach later lanes)
-    check_expr = if base <= 10
-        rep(b) = T(b) * (hibits >> 7)
-        :($nondig = ((($var + $(rep(0x50))) ⊻ ($var + $(rep(0x50 - base)))) & ~$var & $hibits) ⊻ $hibits)
-    else
-        gen_swar_nondigits(T, var, nondig, base)
-    end
-    result = ExprVarLine[check_expr]
+    result = ExprVarLine[gen_swar_nondig_flags(T, var, nondig, base)]
     if maxdigits < sizeof(T)
         push!(result, :($nondig |= $(~((one(T) << (8 * maxdigits)) - one(T)) & hibits)))
     end
     push!(result, :($countvar = trailing_zeros($nondig) >> 3))
     result
+end
+
+# Set bit 7 of each byte of `nondig` whose byte in `var` is not a base-`base` digit
+function gen_swar_nondig_flags(T::DataType, var::Symbol, nondig::Symbol, base::Int)
+    base > 10 && return gen_swar_nondigits(T, var, nondig, base)
+    hibits = T(0x80) * (T(0x01) * typemax(T) ÷ typemax(UInt8))
+    rep(b) = T(b) * (hibits >> 7)
+    # A non-ASCII byte's carries only reach later lanes
+    :($nondig = ((($var + $(rep(0x50))) ⊻ ($var + $(rep(0x50 - base)))) & ~$var & $hibits) ⊻ $hibits)
 end
 
 """
@@ -255,7 +257,7 @@ function gen_swar_hiload(state::ParserState, nctx::NodeCtx, var::Symbol, nd::Int
         shift = 8 * (sizeof(sT) - nd)
         Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
              :($var = htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos)))) << $shift),
-             Expr(:if, :(pos > $(sizeof(sT) - nd)),
+             Expr(:if, :(canreadback(data, pos, $(sizeof(sT) - nd))),
                   gen_swar_load(sT, var, nd, true), gen_swar_load(sT, var, nd, false)))
     else
         gen_swar_load(sT, var, nd, backward)
@@ -372,7 +374,7 @@ function gen_varload_chunks(sT::DataType, var::Symbol, countvar::Symbol,
     else
         ExprVarLine[nondig_raw]
     end
-    accum = :($var |= ($chunk_var % $sT) << ($countvar << 3))
+    accum = :($var |= ($chunk_var % $sT) << (($countvar << 3) & $(8 * sizeof(sT) - 1)))
     advance = :($countvar += $chunk)
     rest_exprs = gen_varload_chunks(sT, var, countvar, availvar, base, maxdigits, rest, nothing)
     if chunk == sizeof(sT) && !isnothing(done_label)
@@ -542,7 +544,8 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
     countcheck = if mindigits > 1; :($countvar >= $mindigits) else :(!iszero($countvar)) end
     swar_cast_var = if sT == dI; swar_var else :($swar_var % $dI) end
     varparse = ExprVarLine[
-        :($swar_var <<= ($(sizeof(sT)) - $countvar) << 3),
+        # Masked shifts skip Julia's out-of-range handling; a zero count fails regardless
+        :($swar_var <<= (($(sizeof(sT)) - $countvar) << 3) & $(8 * sizeof(sT) - 1)),
         parse_expr...,
         :($fnum = $swar_cast_var)]
     b = nctx[:current_branch]
@@ -574,16 +577,29 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
 end
 
 # Backward strategy for variable-width: single wide load ending at
-# pos + avail - 1, then right-shift to low-align. Branchless digit count.
+# pos + avail - 1, then right-shift to low-align.
 function gen_vardigit_backward(::ParserState, nctx::NodeCtx,
                                 @nospecialize(vocab), @nospecialize(dspec::NamedTuple), @nospecialize(vdjob), b::ParseBranch)
     (; sT, swar_var, countvar, availvar, avail_bound) = vdjob
-    (; base, mindigits, maxdigits) = dspec
+    (; base, mindigits) = dspec
+    shift, nondig = Symbol(availvar, :_shift), gensym("nondig")
+    hibits = sT(0x80) * (typemax(sT) ÷ typemax(UInt8))
+    # Digits usually fill what's available, counted by length; a loop counting the rest keeps
+    # this a branch, where counting in-register would become a cmov
     backload = ExprVarLine[
         :($swar_var = htol(Base.unsafe_load(
             Ptr{$sT}(pointer(data, pos + $availvar - $(sizeof(sT))))))),
-        :($swar_var >>>= ($(sizeof(sT)) - $availvar) << 3),
-        gen_swar_digitcount(sT, swar_var, countvar, base, maxdigits)...]
+        :($shift = (($(sizeof(sT)) - $availvar) << 3) & $(8 * sizeof(sT) - 1)),
+        :($swar_var >>>= $shift),
+        gen_swar_nondig_flags(sT, swar_var, nondig, base),
+        :(if iszero($nondig & ($hibits >>> $shift))
+              $countvar = $availvar
+          else
+              $countvar = 0
+              while $countvar < $availvar && byte2int(@inbounds(data[pos + $countvar]), $base) != 0xff
+                  $countvar += 1
+              end
+          end)]
     guard_n = Base.max(mindigits, 1)
     guard_check = Expr(:call, :__length_check, b.id, b.parsed_max, guard_n, guard_n, guard_n)
     ExprVarLine[:($availvar = $avail_bound),
@@ -609,7 +625,7 @@ function gen_vardigit_forward(state::ParserState, nctx::NodeCtx,
     cascade = ExprVarLine[:($countvar = 0), :($swar_var = zero($sT)),
                           :($availvar = $avail_bound), varload...]
     wide = Expr(:block, fwd_guarded...)
-    narrow = Expr(:if, :(pos > $(sizeof(sT) - 1)),
+    narrow = Expr(:if, :(canreadback(data, pos, $(sizeof(sT) - 1))),
                   Expr(:block, gen_vardigit_backward(state, nctx, vocab, dspec, vdjob, b)...),
                   Expr(:block, cascade...))
     ExprVarLine[Expr(:if, emit_lengthcheck(state, nctx, sizeof(sT)), wide, narrow)]

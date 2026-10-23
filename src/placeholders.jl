@@ -92,6 +92,10 @@ function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch})
                     r = :(min($n, nbytes - pos + 1))
                     arg.head, arg.args = r.head, r.args
                 end
+            elseif s === :__trailing_free
+                length(arg.args) == 3 || throw(sentinel_err(arg, 3))
+                _, branch_id, end_max = arg.args
+                expr.args[i] = branch_id == 1 && branches[1].parsed_max == end_max
             elseif s === :__branch_check
                 length(arg.args) == 3 || throw(sentinel_err(arg, 3))
                 if arg.args[2] === Bool

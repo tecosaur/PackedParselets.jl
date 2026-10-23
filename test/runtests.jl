@@ -520,7 +520,7 @@ end
     @test tryparse(VarDig, "100000") === nothing  # exceeds 5 digits
     # Large values exercise bufprint_decimal UInt64 chunking paths
     iddef = :(@defpacked BigDig (:n(digits(max=999_999_999_999_999_999))))
-    @test parsebytes_complexity(iddef) == (branches=4:13, branch_total=15, ops=18:75)
+    @test parsebytes_complexity(iddef) == (branches=5:15, branch_total=17, ops=18:75)
     eval(iddef)
     for v in (10_000_000_000,          # two-chunk (hi fits UInt32)
               1234567890123456,        # two-chunk
@@ -530,7 +530,7 @@ end
     @test_neverthrow PP.parsebytes(BigDig, ::Vector{UInt8})
     # Full UInt64 range
     iddef = :(@defpacked FullU64 (:n(digits(UInt64))))
-    @test parsebytes_complexity(iddef) == (branches=5:14, branch_total=16, ops=18:76)
+    @test parsebytes_complexity(iddef) == (branches=6:16, branch_total=18, ops=18:76)
     eval(iddef)
     for v in (UInt64(0), UInt64(42), typemax(UInt64))
         @test parse(FullU64, string(FullU64(v))) == FullU64(v)

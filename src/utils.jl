@@ -28,6 +28,11 @@ canreadback(::AbstractVector{UInt8}, pos::Int, n::Int) = pos > n
 canreadback(::Base.CodeUnits{UInt8, <:Union{String, SubString{String}}}, pos::Int, n::Int) =
     n <= sizeof(Int) || pos > n
 
+# The byte at `data[pos]`, or zero just past the end: a `String` ends in a NUL byte
+peekbyte(data::AbstractVector{UInt8}, pos::Int) = if pos <= length(data) @inbounds data[pos] else 0x00 end
+peekbyte(data::Base.CodeUnits{UInt8, <:Union{String, SubString{String}}}, pos::Int) =
+    unsafe_load(pointer(data, pos))
+
 ## Character parsing
 
 """
@@ -99,14 +104,28 @@ function byte2int(b::UInt8, base::Integer)
     end
 end
 
-function parseint(::Type{I}, bytes::AbstractVector{UInt8}, pos::Int, base::Integer,
+@inline function parseint(::Type{I}, bytes::AbstractVector{UInt8}, pos::Int, base::Integer,
                   maxlen::Integer, skip::NTuple{S, UInt8} = ()) where {I <: Unsigned, S}
     num = zero(I)
     nread = 0
     nbytes = length(bytes)
     endpos = min(pos + maxlen, nbytes + 1)
-    pos > nbytes && return if iszero(S); (0, zero(I)) else (0, zero(I), 0) end
+    pos >= endpos && return if iszero(S); (0, zero(I)) else (0, zero(I), 0) end
     startpos = pos
+    if iszero(S) && base == 10 && sizeof(I) >= 4
+        while pos + 7 < endpos && num <= (typemax(I) - 99999999) ÷ 100000000
+            x = htol(unsafe_load(Ptr{UInt64}(pointer(bytes, pos))))
+            iszero(x & (x + 0x0606060606060606) & 0xf0f0f0f0f0f0f0f0 ⊻ 0x3030303030303030) || break
+            x &= 0x0f0f0f0f0f0f0f0f
+            x = (x * 10 + x >> 8) & 0x00ff00ff00ff00ff
+            x = (x * 100 + x >> 16) & 0x0000ffff0000ffff
+            x = (x * 10000 + x >> 32) & 0x00000000ffffffff
+            num = num * I(100000000) + x % I
+            nread += 8
+            pos += 8
+        end
+        pos < endpos || return nread, num
+    end
     # `while true` is measurably faster than `while cond` (~4ns vs ~7ns)
     @inbounds while true
         b = bytes[pos]

@@ -533,7 +533,8 @@ function pattern_choice_multi!(exprs::PatternExprs,
         push!(arm_data, ChoiceArm(armvar, end_label, child, oexprs, arm_nctx, arm_props,
                                   seg_start+1:length(exprs.segments), bits_before, bits_after))
     end
-    state.bits = maximum(ad.bits_after for ad in arm_data)
+    state.bits = maximum(Int[ad.bits_after for ad in arm_data])
+    parent.parsed_min += minimum(Int[ad.child.parsed_min - ad.child.start_min for ad in arm_data])
     for (k, ad) in enumerate(arm_data)
         check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
         patch_optional_extracts!(exprs.segments, ad.seg_range, check)

@@ -150,7 +150,7 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
     elseif !isnothing(split_idx)
         deleteat!(resolved, split_idx)
     end
-    :(Base.@assume_effects :foldable :nothrow function $(GlobalRef(M, :parsebytes))(::Type{$(esc(name))}, data::AbstractVector{UInt8})
+    :(Base.@assume_effects :foldable :nothrow @inline function $(GlobalRef(M, :parsebytes))(::Type{$(esc(name))}, data::AbstractVector{UInt8})
           parsed = $(zero_parsed_expr(state))
           pos = 1
           nbytes = length(data)

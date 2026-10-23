@@ -2352,7 +2352,7 @@ end
             # the skip path, which must not reach the choice matcher.
             iddef = :(@defpacked CLskip (skip("cl", choice("", ":", "_")),
                        :id(digits(max=99))))
-            @test parsebytes_complexity(iddef) == (branches=8:14, branch_total=18, ops=20:44)
+            @test parsebytes_complexity(iddef) == (branches=7:18, branch_total=22, ops=19:48)
             eval(iddef)
             for sep in ("", ":", "_")
                 @test parse(CLskip, "cl$(sep)42").id == 42
@@ -2389,7 +2389,7 @@ end
         @testset "MultiSkip" begin
             iddef = :(@defpacked MultiSkip (:a(digits(2)),
                        skip(choice(" ", "/"), print="-"), :b(digits(2))))
-            @test parsebytes_complexity(iddef) == (branches=8:10, branch_total=10, ops=30:35)
+            @test parsebytes_complexity(iddef) == (branches=8:10, branch_total=10, ops=31:37)
             eval(iddef)
             a = parse(MultiSkip, "12-34")
             b = parse(MultiSkip, "12 34")
@@ -2403,7 +2403,7 @@ end
         @testset "SequentialSkip (two bare strings)" begin
             # Two sequential steps, each independently optional
             iddef = :(@defpacked SeqSkip (skip("http://", "www."), :host(letters(4))))
-            @test parsebytes_complexity(iddef) == (branches=7:9, branch_total=9, ops=32:38)
+            @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=29:41)
             eval(iddef)
             @test parse(SeqSkip, "http://www.abcd").host == "abcd"
             @test parse(SeqSkip, "http://abcd").host == "abcd"
@@ -2419,7 +2419,7 @@ end
         @testset "MixedSkip (choice then bare string)" begin
             iddef = :(@defpacked MixedSkip (skip(choice("http://", "https://"), "www."),
                        :host(letters(4))))
-            @test parsebytes_complexity(iddef) == (branches=7:13, branch_total=13, ops=32:48)
+            @test parsebytes_complexity(iddef) == (branches=5:16, branch_total=16, ops=29:50)
             eval(iddef)
             # All combinations: scheme × www × neither
             @test parse(MixedSkip, "https://www.abcd").host == "abcd"
@@ -2440,7 +2440,7 @@ end
             iddef = :(@defpacked SkipCP (:a(digits(2)),
                        skip(choice(".", "-", " "), print="."),
                        :b(digits(2))))
-            @test parsebytes_complexity(iddef) == (branches=7:9, branch_total=9, ops=28:32)
+            @test parsebytes_complexity(iddef) == (branches=7:9, branch_total=9, ops=29:35)
             eval(iddef)
             @test parse(SkipCP, "12.34").a == 12
             @test parse(SkipCP, "12-34").a == 12
@@ -2457,7 +2457,7 @@ end
             # Prefix-related options collide in every hash window -> linear path.
             iddef = :(@defpacked SkipPfx (skip(choice("ab", "abc", "abcd")),
                        :x(letters(1:4, lower=true))))
-            @test parsebytes_complexity(iddef) == (branches=4:11, branch_total=11, ops=15:28)
+            @test parsebytes_complexity(iddef) == (branches=4:11, branch_total=11, ops=14:28)
             eval(iddef)
             @test parse(SkipPfx, "abcdef").x == "ef"
             @test parse(SkipPfx, "abcxy").x == "xy"
@@ -2467,7 +2467,7 @@ end
             # No option is a prefix of another -> hash-eligible
             iddef = :(@defpacked SkipDisjoint (skip(choice("pxd", "rpxd", "abc")),
                        :x(letters(1:4, lower=true))))
-            @test parsebytes_complexity(iddef) == (branches=4:12, branch_total=12, ops=15:31)
+            @test parsebytes_complexity(iddef) == (branches=6:12, branch_total=12, ops=14:31)
             eval(iddef)
             @test parse(SkipDisjoint, "rpxdab").x == "ab"
             @test parse(SkipDisjoint, "pxdab").x == "ab"

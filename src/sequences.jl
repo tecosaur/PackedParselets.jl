@@ -170,10 +170,16 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     else
         Vector{ByteSet}[fill(digit_set, n) for n in mindigits:maxdigits]
     end
+    # Separators may fall anywhere, but grouped digits have one canonical layout
+    layout = if !isnothing(groups)
+        l = fill(digit_set, groups[1])
+        foreach(g -> append!(push!(l, ByteSet(first(skipbytes))), fill(digit_set, g)), groups[2:end])
+        l
+    end
     SegmentOutput(
         SegmentBounds(mindigits:parsed_max, printmin:printmax, dbits, sentinel),
         SegmentCodegen(pexprs, seg_extract, pinfo, seg_impart),
-        SegmentMeta(label, seg_desc, seg_shortform, :Integer, argvar),
+        SegmentMeta(label, seg_desc, seg_shortform, :Integer, argvar, layout),
         bytespans)
 end
 

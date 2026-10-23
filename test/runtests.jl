@@ -1095,7 +1095,7 @@ end
         @testset "LargeId" begin
             iddef = :(@defpacked LargeId (:a(digits(max=2^16-1)), "-",
                                           :b(digits(max=2^16-1))))
-            @test parsebytes_complexity(iddef) == (branches=9:23, branch_total=29, ops=55:121)
+            @test parsebytes_complexity(iddef) == (branches=9:23, branch_total=32, ops=55:121)
             eval(iddef)
             @test sizeof(LargeId) >= 4
             # All zeros
@@ -1581,7 +1581,7 @@ end
         @testset "SWAR variable forward-overread optional (trailing literal)" begin
             iddef = :(@defpacked SwarVarFwdOrOpt (:a(digits(max=99)),
                        optional(".", :b(digits(1:4))), "END"))
-            @test parsebytes_complexity(iddef) == (branches=5:17, branch_total=19, ops=24:80)
+            @test parsebytes_complexity(iddef) == (branches=5:17, branch_total=22, ops=24:80)
             eval(iddef)
             @test parse(SwarVarFwdOrOpt, "42.1END").a == 42
             @test parse(SwarVarFwdOrOpt, "42.1END").b == 1
@@ -1842,7 +1842,7 @@ end
         @testset "Compound" begin
             iddef = :(@defpacked Compound ("ID:", :major(digits(max=99)), ".",
                        :minor(digits(max=99))))
-            @test parsebytes_complexity(iddef) == (branches=8:10, branch_total=10, ops=61:65)
+            @test parsebytes_complexity(iddef) == (branches=9:13, branch_total=13, ops=63:75)
             eval(iddef)
             # Parsing
             @test parse(Compound, "ID:3.14") isa Compound
@@ -3757,7 +3757,7 @@ end
             # b could take 6 digits, but a's "12x" is the longer match here.
             iddef = :(@defpacked CascadeLongest (choice((:a(digits(2)), "x"), :b(digits(1:6))),
                        "x", :c(digits(1))))
-            @test parsebytes_complexity(iddef) == (branches=7:32, branch_total=34, ops=10:101)
+            @test parsebytes_complexity(iddef) == (branches=7:32, branch_total=37, ops=10:101)
             eval(iddef)
             @test parse(CascadeLongest, "12xx3").a == 12
             @test parse(CascadeLongest, "12xx3").c == 3

@@ -41,7 +41,7 @@ function maketype(@nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{Segme
                   casefold::Bool = true,
                   @nospecialize(globals::NamedTuple = (;)),
                   @nospecialize(global_kwargs::Tuple = ()))
-    root = ParseBranch(1, nothing, :root, 0, 0, 0, 0, 0, 0)
+    root = ParseBranch(1, nothing, :root, 0, 0, 0, 0, 0, 0, 0)
     state = ParserState(name, mod, 0, supertype,
                         globals, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
     nctx = NodeCtx(:current_branch, root)

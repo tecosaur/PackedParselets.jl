@@ -419,7 +419,7 @@ function pattern_choice_optional!(exprs::PatternExprs,
     child = ParseBranch(length(state.branches) + 1, parent, optvar,
                         parent.parsed_min, parent.parsed_max,
                         parent.parsed_min, parent.parsed_min,
-                        parent.print_min, parent.print_max)
+                        parent.print_min, parent.print_max, parent.parsed_min)
     push!(state.branches, child)
     nctx = NodeCtx(nctx, :current_branch, child)
     sentinel_ref = Ref{Union{Nothing, OptSentinel}}(nothing)
@@ -514,7 +514,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
         child = ParseBranch(length(state.branches) + 1, parent, armvar,
                             parent.parsed_min, parent.parsed_max,
                             parent.parsed_min, parent.parsed_min,
-                            parent.print_min, parent.print_max)
+                            parent.print_min, parent.print_max, parent.parsed_min)
         push!(state.branches, child)
         arm_nctx = NodeCtx(arm_nctx, :current_branch, child)
         seg_start = length(exprs.segments)
@@ -536,6 +536,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
     state.bits = maximum(Int[ad.bits_after for ad in arm_data])
     parent.parsed_min += minimum(Int[ad.child.parsed_min - ad.child.start_min for ad in arm_data])
     for (k, ad) in enumerate(arm_data)
+        ad.child.close_min = parent.parsed_min
         check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
         patch_optional_extracts!(exprs.segments, ad.seg_range, check)
         for (name, val) in ad.arm_props

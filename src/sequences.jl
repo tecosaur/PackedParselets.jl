@@ -547,8 +547,18 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
             parsechars($cT, data, pos, $scanlimit, $rangetuple, $cfold, $oneindexed, $skipbytes)),
             :(if $lenvar != $maxlen; $notfound end)]
     else
-        exprs = ExprVarLine[:(($lenvar, $charvar) =
-            parsechars($cT, data, pos, $scanlimit, $rangetuple, $cfold, $oneindexed))]
+        scan = :(($lenvar, $charvar) = parsechars($cT, data, pos, $scanlimit, $rangetuple, $cfold, $oneindexed))
+        # Short fields scan as quickly; zero, loaded past the end, must be no character
+        vspans = if variable && maxlen > 4 swar_charset_spans(ranges, cfold, 0) end
+        exprs = if isnothing(vspans) || any(((lo, n, _),) -> lo == 0 || cfold && lo <= 0x20 < lo + n, vspans)
+            ExprVarLine[scan]
+        else
+            avail = emit_lengthbound(state, nctx, Base.min(maxlen, 8))
+            ExprVarLine[:(if canreadback(data, pos, 7) || nbytes - pos + 1 >= 8
+                              $(gen_swar_charseq(charvar, cT, [(0, 8)], vspans, cfold, bpc, nothing, (lenvar, avail))...)
+                              $(if maxlen > 8; :($lenvar == 8 && $scan) end)
+                          else $scan end)]
+        end
         if !isnothing(option) && variable && iszero(minlen)
             push!(exprs, :($lenvar > 0 || $notfound))
         else

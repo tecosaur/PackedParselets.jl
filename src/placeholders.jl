@@ -36,9 +36,9 @@ function emit_static_lengthcheck(::ParserState, nctx::NodeCtx, n::Int)
     Expr(:call, :__static_length_check, b.id, b.parsed_max, n)
 end
 
-function emit_lengthbound(::ParserState, nctx::NodeCtx, n::Int)
+function emit_lengthbound(::ParserState, nctx::NodeCtx, n::Int, end_min::Union{Nothing, Int} = nothing)
     b = nctx[:current_branch]
-    Expr(:call, :__length_bound, b.id, b.parsed_max, n)
+    Expr(:call, :__length_bound, b.id, b.parsed_max, n, end_min)
 end
 
 ## Sentinel resolution helpers
@@ -54,6 +54,10 @@ function resolve_branch_check(b::ParseBranch)
         :(nbytes - pos + 1 >= $local_min)
     end
 end
+
+# The fewest bytes any successful parse has after `end_min`, a `parsed_min` within `b`
+bytes_after(b::ParseBranch, end_min::Int) =
+    b.parsed_min - end_min + if isnothing(b.parent) 0 else bytes_after(b.parent, b.close_min) end
 
 ## Length-check resolution
 
@@ -84,18 +88,21 @@ function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch})
                 _, branch_id, emission_max, n = arg.args
                 expr.args[i] = branches[branch_id].parsed_min - emission_max >= n
             elseif s === :__length_bound
-                length(arg.args) == 4 || throw(sentinel_err(arg, 4))
-                _, branch_id, emission_max, n = arg.args
-                if branches[branch_id].parsed_min - emission_max >= n
+                length(arg.args) == 5 || throw(sentinel_err(arg, 5))
+                _, branch_id, emission_max, n, end_min = arg.args
+                reserve = if isnothing(end_min) 0 else bytes_after(branches[branch_id], end_min) end
+                if branches[branch_id].parsed_min - emission_max >= n + reserve
                     expr.args[i] = n
                 else
-                    r = :(min($n, nbytes - pos + 1))
+                    # Short of the bytes that must follow, but still the byte its segment needs
+                    r = :(min($n, $(if reserve == 0; :(nbytes - pos + 1) else :(max(nbytes - pos + $(1 - reserve), 1)) end)))
                     arg.head, arg.args = r.head, r.args
                 end
-            elseif s === :__trailing_free
+            elseif s in (:__trailing_free, :__must_follow)
                 length(arg.args) == 3 || throw(sentinel_err(arg, 3))
-                _, branch_id, end_max = arg.args
-                expr.args[i] = branch_id == 1 && branches[1].parsed_max == end_max
+                _, branch_id, end_at = arg.args
+                expr.args[i] = if s === :__must_follow; bytes_after(branches[branch_id], end_at) > 0
+                else branch_id == 1 && branches[1].parsed_max == end_at end
             elseif s === :__branch_check
                 length(arg.args) == 3 || throw(sentinel_err(arg, 3))
                 if arg.args[2] === Bool

@@ -214,6 +214,7 @@ Per-branch byte counters for tracking parse/print bounds through optional nestin
 The root branch covers the required pattern; each `optional(...)` forks a child.
 `parsed_min`/`parsed_max` track cumulative input bytes consumed;
 `print_min`/`print_max` track cumulative output bytes produced.
+`close_min` is the parent's `parsed_min` where the branch's construct ends.
 Length-check sentinels reference these counters so that `resolve_sentinel_in_expr!`
 can fold static guarantees and emit minimal runtime checks.
 """
@@ -227,6 +228,7 @@ mutable struct ParseBranch
     parsed_max::Int
     print_min::Int
     print_max::Int
+    close_min::Int
 end
 
 """

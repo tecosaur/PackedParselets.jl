@@ -581,6 +581,7 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
     vdjob = (; sT, swar_var, countvar,
                availvar = Symbol("$(fieldvar)_avail"),
                avail_bound = emit_lengthbound(state, nctx, head),
+               end_min = b.parsed_min + mindigits,
                # Padded values usually come at full width, so at one length
                trailing_free = mindigits < sizeof(UInt) <= maxdigits && pad < maxdigits &&
                    Expr(:call, :__trailing_free, b.id, b.parsed_max + maxdigits))
@@ -609,31 +610,47 @@ end
 
 # Backward strategy for variable-width: single wide load ending at
 # pos + avail - 1, then right-shift to low-align.
-function gen_vardigit_backward(::ParserState, nctx::NodeCtx,
+function gen_vardigit_backward(state::ParserState, nctx::NodeCtx,
                                 @nospecialize(vocab), @nospecialize(dspec::NamedTuple), @nospecialize(vdjob), b::ParseBranch)
-    (; sT, swar_var, countvar, availvar, avail_bound) = vdjob
-    (; base, mindigits) = dspec
+    (; sT, swar_var, countvar, availvar, end_min) = vdjob
+    (; base, mindigits, maxdigits) = dspec
     shift, nondig = Symbol(availvar, :_shift), gensym("nondig")
     hibits = sT(0x80) * (typemax(sT) ÷ typemax(UInt8))
-    # Digits usually fill what's available, counted by length; a loop counting the rest keeps
-    # this a branch, where counting in-register would become a cmov
+    load = :(htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos + $availvar - $(sizeof(sT)))))))
+    lowshift = :((($(sizeof(sT)) - $availvar) << 3) & $(8 * sizeof(sT) - 1))
+    filled = :(iszero($nondig & ($hibits >>> $shift)))
+    scan = :(while $countvar < $availvar && byte2int(@inbounds(data[pos + $countvar]), $base) != 0xff
+                 $countvar += 1
+             end)
+    # Digits usually fill what's available short of the bytes that must follow, counted by
+    # length; a loop counting the rest keeps this a branch, where counting in-register
+    # would become a cmov, unless taking digits that run on into those bytes keeps it one
     backload = ExprVarLine[
-        :($swar_var = htol(Base.unsafe_load(
-            Ptr{$sT}(pointer(data, pos + $availvar - $(sizeof(sT))))))),
-        :($shift = (($(sizeof(sT)) - $availvar) << 3) & $(8 * sizeof(sT) - 1)),
+        :($swar_var = $load),
+        :($shift = $lowshift),
         :($swar_var >>>= $shift),
         gen_swar_nondig_flags(sT, swar_var, nondig, base),
-        :(if iszero($nondig & ($hibits >>> $shift))
+        :(if $(Expr(:call, :__must_follow, b.id, end_min))
+              if $filled && ($availvar == $maxdigits || byte2int(peekbyte(data, pos + $availvar), $base) == 0xff)
+                  $countvar = $availvar
+              else
+                  $countvar = trailing_zeros($nondig) >> 3
+                  if $countvar == $availvar
+                      $availvar = $(emit_lengthbound(state, nctx, maxdigits))
+                      $scan
+                      $availvar = $countvar
+                      $swar_var = $load >>> $lowshift
+                  end
+              end
+          elseif $filled
               $countvar = $availvar
           else
               $countvar = 0
-              while $countvar < $availvar && byte2int(@inbounds(data[pos + $countvar]), $base) != 0xff
-                  $countvar += 1
-              end
+              $scan
           end)]
     guard_n = Base.max(mindigits, 1)
     guard_check = Expr(:call, :__length_check, b.id, b.parsed_max, guard_n, guard_n, guard_n)
-    ExprVarLine[:($availvar = $avail_bound),
+    ExprVarLine[:($availvar = $(emit_lengthbound(state, nctx, maxdigits, end_min))),
                 :($guard_check || $(vocab.fail_expr)),
                 backload...]
 end

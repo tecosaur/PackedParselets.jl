@@ -536,7 +536,7 @@ selects the winner based on resolved length guarantees.
 function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
                                  @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
     (; fnum, fail_expr, fieldvar) = vocab
-    (; base, mindigits, maxdigits, dI) = dspec
+    (; base, mindigits, maxdigits, dI, pad) = dspec
     head = Base.min(maxdigits, sizeof(UInt))
     headspec = merge(dspec, (; mindigits = Base.min(mindigits, head), maxdigits = head))
     sT = register_type(head)
@@ -580,7 +580,10 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
     backward = b.parsed_min >= sizeof(sT) - 1
     vdjob = (; sT, swar_var, countvar,
                availvar = Symbol("$(fieldvar)_avail"),
-               avail_bound = emit_lengthbound(state, nctx, head))
+               avail_bound = emit_lengthbound(state, nctx, head),
+               # Padded values usually come at full width, so at one length
+               trailing_free = mindigits < sizeof(UInt) <= maxdigits && pad < maxdigits &&
+                   Expr(:call, :__trailing_free, b.id, b.parsed_max + maxdigits))
     load_and_count = if backward
         gen_vardigit_backward(state, nctx, vocab, headspec, vdjob, b)
     else
@@ -656,7 +659,11 @@ function gen_vardigit_forward(state::ParserState, nctx::NodeCtx,
     narrow = Expr(:if, :(canreadback(data, pos, $(sizeof(sT) - 1))),
                   Expr(:block, gen_vardigit_backward(state, nctx, vocab, dspec, vdjob, b)...),
                   Expr(:block, cascade...))
-    ExprVarLine[Expr(:if, emit_lengthcheck(state, nctx, sizeof(sT)), wide, narrow)]
+    fits = emit_lengthcheck(state, nctx, sizeof(sT))
+    # Digits ending the input reach its end, which a backward load serves at any length
+    vdjob.trailing_free === false ||
+        (fits = :($fits && (!$(vdjob.trailing_free) || !canreadback(data, pos, $(sizeof(sT) - 1)))))
+    ExprVarLine[Expr(:if, fits, wide, narrow)]
 end
 
 ## Top-level digit parse dispatch

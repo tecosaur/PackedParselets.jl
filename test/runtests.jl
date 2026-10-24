@@ -3791,6 +3791,29 @@ end
         @test tryparse(FourArm, "E01") === nothing
         check_roundtrips(FourArm, ("A00", "B00", "C00", "D00", "A99", "D99"))
     end
+    @testset "arms hashing out of order" begin
+        # The dispatch byte's hash orders these arms by a permutation that isn't its own inverse
+        @defpacked GeoArms (choice(seq("GSE", :series(digits(1:3))), seq("GSM", :sample(digits(1:3))),
+                                   seq("GPL", :platform(digits(1:3))), seq("GDS", :dataset(digits(1:3)))))
+        @test parse(GeoArms, "GSE1").series == 1
+        @test parse(GeoArms, "GSM22").sample == 22
+        @test parse(GeoArms, "GPL333").platform == 333
+        @test parse(GeoArms, "GDS4").dataset == 4
+        check_roundtrips(GeoArms, ("GSE1", "GSM22", "GPL333", "GDS4"))
+        # ...and scatters these through a table
+        @defpacked TableArms (choice(seq("q", :a(digits(1:3))), seq("Dg", :b(digits(1:3))),
+                                     seq("b", :c(digits(1:3))), seq("tpc", :d(digits(1:3)))))
+        for (s, f) in (("q42", :a), ("Dg42", :b), ("b42", :c), ("tpc42", :d))
+            @test getproperty(parse(TableArms, s), f) == 42
+        end
+        # ...and, past a shared first byte, orders these by their consecutive second bytes
+        @defpacked WindowArms (choice(seq(charset(1, 'A':'C', upper=true), "2", :a(letters(2))),
+                                      seq(charset(1, 'A':'C', upper=true), "0", :b(letters(2))),
+                                      seq(charset(1, 'A':'C', upper=true), "1", :c(letters(2)))))
+        for (s, f) in (("B2xy", :a), ("B0xy", :b), ("B1xy", :c))
+            @test getproperty(parse(WindowArms, s), f) == "xy"
+        end
+    end
     @testset "digit vs letter discrimination" begin
         iddef = :(@defpacked DigitLetterChoice (choice((:n(digits(3))), (letters(1), :m(digits(2))))))
         @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:63)

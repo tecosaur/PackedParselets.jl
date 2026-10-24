@@ -66,11 +66,8 @@ function gen_skip_step(state::ParserState, nctx::NodeCtx,
     cmatch = ChoiceMatch(refs, alts, casefold, fieldvar, cint, :none)
     matcher, _, _ = build_choice_matcher(state, nctx, cmatch)
     lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, refs))
-    # Inputs rarely start like an alternative: test the first byte before hashing
-    guard = nothing
-    for b in unique(UInt8[codeunit(r, 1) for r in refs])
-        guard = if isnothing(guard) gen_peek(b, casefold) else :($guard || $(gen_peek(b, casefold))) end
-    end
+    # Inputs rarely start like an alternative: test how they start before hashing
+    guard = gen_peek(refs, casefold)
     cond = if peek && peeks(minimum(ncodeunits, refs)); :($guard && $lencheck) else :($lencheck && $guard) end
     :(if $cond; $fieldvar = zero($cint); $(matcher...) end)
 end
@@ -86,25 +83,25 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segme
     parse, parsed_max = ExprVarLine[], 0
     arrangements = Vector{ByteSet}[]  # Cartesian product of per-step alternatives (+ empty)
     # The printed prefix is usually present, the others absent: a run of those shares one
-    # test of the folded first byte, unless the printed one after shares it so it'd pass
-    run, runbytes = ExprVarLine[], UInt8[]
+    # test of how they start, unless the printed one after shares a first byte so it'd pass
+    run, runalts, runstart = ExprVarLine[], String[], 0
     function flush!(next)
-        if length(run) > 1 && isdisjoint(runbytes, next)
-            first = gensym("firstbyte")
-            test = foldl((t, b) -> :($t || $first == $b), unique(runbytes)[2:end]; init = :($first == $(runbytes[1])))
-            push!(parse, :($first = peekbyte(data, pos) | 0x20), Expr(:if, test, Expr(:block, run...)))
+        if length(run) > 1 && isdisjoint(UInt8[codeunit(a, 1) | 0x20 for a in runalts], next)
+            fits = emit_static_lengthcheck(state, nctx, runstart + 4)
+            push!(parse, Expr(:if, gen_peek(runalts, casefold, fits), Expr(:block, run...)))
         else
             append!(parse, run)
         end
-        empty!(run); empty!(runbytes)
+        empty!(run); empty!(runalts)
     end
     for alts in steps
         absent = pval ∉ alts
+        absent && isempty(run) && (runstart = parsed_max)
         step = gen_skip_step(state, nctx, alts, casefold, absent)
         firsts = UInt8[codeunit(a, 1) | 0x20 for a in filter(!isempty, alts)]
         absent || flush!(firsts)
         isnothing(step) || push!(if absent run else parse end, step)
-        absent && append!(runbytes, firsts)
+        absent && append!(runalts, map(lowercase, filter(!isempty, alts)))
         parsed_max += maximum(ncodeunits, alts)
         extend_bytespans!(arrangements, push!(string_bytespans(alts, casefold), ByteSet[]))
     end
@@ -169,7 +166,7 @@ function gen_static_lchop(prefixes::Vector{String}, casefold::Bool, peek::Bool)
     for p in Iterators.reverse(ordered)
         nb = ncodeunits(p)
         cond = :(nbytes - pos + 1 >= $nb && $(conjoin(gen_string_match(p, casefold))))
-        peek && peeks(nb) && (cond = :($(gen_peek(codeunit(p, 1), casefold)) && $cond))
+        peek && peeks(nb) && (cond = :($(gen_peek([p], casefold)) && $cond))
         chain = if isnothing(chain) Expr(:if, cond, :(pos += $nb))
         else Expr(:elseif, cond, :(pos += $nb), chain) end
     end
@@ -180,8 +177,19 @@ end
 
 # A lone byte keeps its length test first, so its guarded load keeps it a branch
 peeks(nbytes::Int) = 1 < nbytes <= sizeof(UInt)
-gen_peek(b::UInt8, casefold::Bool) =
-    (c = pack_chunk(String([b]), RegisterChunk((0, 1, UInt8)), casefold, 1); :(peekbyte(data, pos) & $(c.mask) == $(c.value)))
+# Whether the input starts like any of `alts`: by their first byte, or the first four of long
+# ones, which "https" and "hsa0" don't share, at once where four bytes `fits`, else after the
+# first byte, sparing inputs whose length varies about it
+function gen_peek(alts::Vector{String}, casefold::Bool, fits = false)
+    test = nothing
+    for prefix in unique(String[if ncodeunits(a) > 4 a[1:4] else a[1:1] end for a in alts])
+        c = pack_chunk(prefix, RegisterChunk((0, 1, UInt8)), casefold, 1)
+        first, match = :(peekbyte(data, pos) & $(c.mask) == $(c.value)), conjoin(gen_string_match(prefix, casefold))
+        peek = if ncodeunits(prefix) == 1; first else Expr(:if, fits, match, :($first && nbytes - pos + 1 >= 4 && $match)) end
+        test = if isnothing(test) peek else :($test || $peek) end
+    end
+    test
+end
 
 """
     gen_string_match(str, casefold[, nbytes]) -> Vector{Expr}

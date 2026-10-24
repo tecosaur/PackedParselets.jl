@@ -260,24 +260,32 @@ keyword specifies what to emit on output (nothing if omitted).
 
 * Parsing cost
 
-What each segment adds to a parse, from back-to-back parses of ~String~ input on
-one performance core of an Intel i5-13600K (Julia 1.14) counted by the hardware:
-the cycles of a parse of the segment alone at the given width, less those of a
-parse of a single digit (about 3, mostly benchmark loop and the parser's fixed
-cost).
+What each segment adds to a parse, counted by the hardware on one performance
+core of an Intel i5-13600K (Julia 1.14). Each figure parses 1024 random valid
+~String~ inputs of the segment alone, in a never-repeating random order, less a
+parse of a single random digit (about 3 cycles, mostly benchmark loop and the
+parser's fixed cost). Variable widths take lengths uniformly across their range,
+and are per mean byte.
 
-| Segment                             | Width | Cycles/byte    |
-|-------------------------------------+-------+----------------|
-| Literal                             |    16 | ≈ 0.08         |
-| ~digits~, fixed width               |  8/16 | 0.45/0.5       |
-| ~digits~, variable width (≤ 8)      |   4/8 | 1.8/0.9        |
-| ~digits~, variable width (> 8)      |    16 | 0.95           |
-| ~hex~, ~letters~, fixed width       |    16 | 0.85--1.05     |
-| ~alphnum~, ~charset~, fixed width   |    16 | 1.25--1.3      |
-| Character sequences, variable width |  8/16 | 1.65--2.0/2.55 |
+| Segment                             | Width | Cycles/byte |
+|-------------------------------------+-------+-------------|
+| Literal                             |    16 | ≈ 0.1       |
+| ~digits~, fixed width               |  8/16 | 0.4/0.6     |
+| ~digits~, variable width            |  1--8 | 1.7         |
+|                                     | 1--16 | 3.9         |
+| ~hex~, ~letters~, fixed width       |    16 | 1.0         |
+| ~alphnum~, ~charset~, fixed width   |    16 | 1.3         |
+| Character sequences, variable width |  1--8 | 3.2         |
+|                                     | 1--16 | 5.4         |
 
-Choices and structural segments add a roughly constant number of
-cycles: a string ~choice~ 4--9 cycles and a structured choice about 5.5;
-a ~skip~ 2--3 cycles when absent and 6 for an ~"https://"~; an
-~optional~ about a cycle when absent and 4 when present; an ~embed~ the
-same as its fields inline.
+Where the length or option varies unpredictably, a mispredicted branch costs
+about 20 cycles, which dominates: a variable width beyond 8 bytes
+mispredicts about once a parse, while one within 8 bytes doesn't. Data whose
+lengths follow a pattern costs less.
+
+Choices and structural segments add a roughly constant number of cycles. A
+string ~choice~ of equal-length options adds about 5, and one of differing
+lengths about 20; a structured choice of two arms about 20. A ~skip~ adds about
+3 when absent, and 17 for a random mix of absent, ~"http://"~ and ~"https://"~.
+An ~optional~ adds about a cycle when absent, and about 17 when present half the
+time. An ~embed~ costs the same as its fields inline.

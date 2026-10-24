@@ -2631,7 +2631,7 @@ end
         @testset "LettersVar" begin
             iddef = :(@defpacked LettersVar (:prefix(letters(3:5, lower=true, casefold=false)),
                        :id(digits(max=9999))))
-            @test parsebytes_complexity(iddef) == (branches=7:9, branch_total=9, ops=46:88)
+            @test parsebytes_complexity(iddef) == (branches=7:9, branch_total=9, ops=46:89)
             eval(iddef)
             id3 = parse(LettersVar, "abc1")
             id5 = parse(LettersVar, "abcde1")

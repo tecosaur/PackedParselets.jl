@@ -560,9 +560,16 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
             ExprVarLine[scan]
         else
             avail = emit_lengthbound(state, nctx, Base.min(maxlen, 8))
+            # Characters filling a register run on into the next, which can read back into it
+            chars2, len2 = Symbol(charvar, 2), Symbol(lenvar, 2)
+            runon = if maxlen > 16; scan else :(begin
+                $(gen_swar_charseq(chars2, cT, [(8, 8)], vspans, cfold, bpc, nothing,
+                                   (len2, :($(emit_lengthbound(state, nctx, maxlen)) - 8)))...)
+                ($lenvar, $charvar) = (8 + $len2, ($charvar << ($bpc * $len2)) | $chars2)
+            end) end
             ExprVarLine[:(if canreadback(data, pos, 7) || nbytes - pos + 1 >= 8
                               $(gen_swar_charseq(charvar, cT, [(0, 8)], vspans, cfold, bpc, nothing, (lenvar, avail))...)
-                              $(if maxlen > 8; :($lenvar == 8 && $scan) end)
+                              $(if maxlen > 8; :($lenvar == 8 && $runon) end)
                           else $scan end)]
         end
         if !isnothing(option) && variable && iszero(minlen)

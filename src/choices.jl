@@ -242,20 +242,6 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
     minoptlen = minimum(ncodeunits, mopts)
     maxoptlen = maximum(ncodeunits, mopts)
     variable_len = minoptlen != maxoptlen
-    # Common suffix: when variable-length options share trailing bytes (aligned
-    # from the end), those bytes can be checked as a constant using pos+optlen
-    # addressing. When the suffix covers the entire length difference, no
-    # per-option tail verification is needed.
-    suffix_len = if variable_len
-        min(common_suffix_length(mopts, casefold), maxoptlen - minoptlen)
-    else
-        0
-    end
-    suffix_check = if suffix_len > 0
-        gen_suffix_check(mopts[1][end-suffix_len+1:end], casefold, suffix_len)
-    else
-        nothing
-    end
     # For injective hashes, skip bytes already validated by the hash window
     hash_skip = if ph.injective
         find_best_hash_skip(minoptlen, phoff, sizeof(ph.iT))
@@ -281,12 +267,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
     else
         nothing
     end
-    # Tail verification: skip when common suffix covers the entire length difference
-    tailcheck = if variable_len && suffix_len < maxoptlen - minoptlen
-        gen_tail_verify(mopts, casefold, minoptlen, fieldvar)
-    else
-        nothing
-    end
+    tailcheck = if variable_len; gen_tail_verify(mopts, casefold, minoptlen, nctx[:current_branch].parsed_min) end
     # Index resolution depends on hash kind
     nopts = length(mopts)
     resolve_i = if ph.kind === :direct
@@ -320,26 +301,24 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
         append!(body, ExprVarLine[:(optlen = $(optlens)[i]),
                                   :(found = $optlencheck)])
     end
-    # Stage 2: byte verification (backward, widened, normal, or suffix-only)
-    and_suffix(checks) = if isnothing(suffix_check) checks else :($checks && $suffix_check) end
+    # Stage 2: byte verification (backward, widened, normal, or tail-only)
+    and_tail(checks) = if isnothing(tailcheck) checks else :($checks && $tailcheck) end
     if use_backward
-        guard_append!(ExprVarLine[bve.destructure..., :(found = $(and_suffix(bve.checks)))])
+        guard_append!(ExprVarLine[bve.destructure..., :(found = $(and_tail(bve.checks)))])
     elseif use_wide_vt
         ve = gen_verify_exprs(vt, fieldvar)
         ve_wide = gen_verify_exprs(vt_wide, fieldvar)
-        wide_block = Expr(:block, ve_wide.destructure..., :(found = $(and_suffix(ve_wide.checks))))
-        narrow_block = Expr(:block, ve.destructure..., :(found = $(and_suffix(ve.checks))))
+        wide_block = Expr(:block, ve_wide.destructure..., :(found = $(and_tail(ve_wide.checks))))
+        narrow_block = Expr(:block, ve.destructure..., :(found = $(and_tail(ve.checks))))
         guard_append!(ExprVarLine[Expr(:if, emit_static_lengthcheck(state, nctx, wide_minlen),
                                        wide_block, narrow_block)])
     elseif !isempty(vt.chunks)
         ve = gen_verify_exprs(vt, fieldvar)
-        guard_append!(ExprVarLine[ve.destructure..., :(found = $(and_suffix(ve.checks)))])
-    elseif !isnothing(suffix_check)
-        guard_append!(ExprVarLine[:(found = $suffix_check)])
+        guard_append!(ExprVarLine[ve.destructure..., :(found = $(and_tail(ve.checks)))])
+    elseif !isnothing(tailcheck)
+        guard_append!(ExprVarLine[:(found = $tailcheck)])
     end
-    # Stage 3: per-option tail verification for variable-length options
-    !isnothing(tailcheck) && push!(body, tailcheck)
-    # Stage 4: advance pos and record the matched option
+    # Stage 3: advance pos and record the matched option
     coerced_i = if ph.kind === :direct && ph.iT === cint; :i else :(i % $cint) end
     action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end)),
                          record_match(cmatch, coerced_i)]
@@ -552,34 +531,6 @@ function find_best_hash_skip(optlen::Int, hash_offset::Int, hash_width::Int)
     end
 end
 
-## Common suffix
-# Longest suffix shared by all options, aligned from the end.
-function common_suffix_length(options::Vector{String}, casefold::Bool)
-    length(options) < 2 && return 0
-    minlen = minimum(ncodeunits, options)
-    ref = options[1]
-    reflen = ncodeunits(ref)
-    for k in 1:minlen
-        b = codeunit(ref, reflen - k + 1)
-        byte = if casefold; b | 0x20 else b end
-        all(options) do opt
-            ob = codeunit(opt, ncodeunits(opt) - k + 1)
-            (if casefold; ob | 0x20 else ob end) == byte
-        end || return k - 1
-    end
-    minlen
-end
-
-# Constant comparison for a shared suffix, addressed via pos+optlen.
-function gen_suffix_check(suffix::String, casefold::Bool, suffix_len::Int)
-    checks = Expr[]
-    for c in register_chunks(suffix_len)
-        (; value, mask) = pack_chunk(suffix, c, casefold)
-        push!(checks, gen_masked_compare(c.iT, :(pos + optlen - $(suffix_len - c.offset)), value, mask))
-    end
-    conjoin(checks)
-end
-
 ## Verification codegen
 #
 # `Any`/`Unsigned` vectors keep the type independent of the options
@@ -686,67 +637,47 @@ function gen_backward_verify(options::Vector{String}, casefold::Bool,
 end
 
 """
-    gen_tail_verify(options, casefold, minoptlen, prefix) -> Expr
+    gen_tail_verify(options, casefold, minoptlen, before) -> Expr
 
-Generate verification for the tail bytes (beyond `minoptlen`) of
-variable-length options. Uses register-sized comparisons when all
-non-empty tails have the same length, otherwise a codeunit loop.
+Generate a check of the tail bytes (beyond `minoptlen`) of variable-length options:
+one masked compare of the register ending at the option's end, when that stays
+within the option and the `before` bytes parsed ahead of it, otherwise a codeunit loop.
 """
-function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int, prefix::Symbol)
+function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int, before::Int)
     tails = String[opt[minoptlen+1:end] for opt in options]
     taillens = map(ncodeunits, tails)
-    has_empty = any(iszero, taillens)
-    distinct_taillens = unique(filter(!iszero, taillens))
-    body = if length(distinct_taillens) == 1
-        # Single tail length: register-sized comparison via gen_verify_exprs
-        chunks = register_chunks(only(distinct_taillens))
-        nonempty_tails = filter(!isempty, tails)
-        function chunk_mask(c)
-            mask = zero(c.iT)
-            for j in 0:c.width-1
-                folds = casefold && any(t -> codeunit(t, c.offset + j + 1) in UInt8('a'):UInt8('z'), nonempty_tails)
-                mask |= c.iT(if folds 0xDF else 0xFF end) << (8j)
-            end
-            mask
-        end
-        masks = Unsigned[chunk_mask(c) for c in chunks]
-        verify_table = Any[if isempty(tail)
-                               Tuple(Unsigned[zero(c.iT) for c in chunks])
-                           else
-                               Tuple(Unsigned[pack_bytes(tail, chunks[k].offset, chunks[k].width, chunks[k].iT) & masks[k]
-                                              for k in eachindex(chunks)])
-                           end
-                           for tail in tails]
-        tve = gen_verify_exprs(VerifyTable(verify_table, masks, chunks), Symbol(prefix, "_tail"); pos_offset = minoptlen)
-        ExprVarLine[tve.destructure..., :(found = $(tve.checks))]
+    maxtail = maximum(taillens)
+    # Letters compare casefolded, other bytes exactly, and bytes past a tail not at all
+    bytemask(t, j) = if j > ncodeunits(t) 0x00
+        elseif casefold && UInt8('a') <= (codeunit(t, j) | 0x20) <= UInt8('z') 0xDF
+        else 0xFF end
+    iT = register_type(maxtail)
+    width = sizeof(iT)
+    inreach(k) = before + ncodeunits(options[k]) >= width
+    if maxtail <= sizeof(UInt) && all(k -> taillens[k] == 0 || inreach(k), eachindex(options))
+        # A tail's bytes sit at the top of the register, compared in a UInt64
+        endmask(t) = (m = zero(UInt64); for j in 1:ncodeunits(t); m |= UInt64(bytemask(t, j)) << (8 * (width - ncodeunits(t) + j - 1)); end; m)
+        expected(t) = (pack_bytes(t, 0, ncodeunits(t), UInt64) << (8 * (width - ncodeunits(t)))) & endmask(t)
+        # One tail shared by every option with a tail compares as a constant
+        nonempty = filter(!isempty, tails)
+        shared = if allequal(nonempty) first(nonempty) end
+        masks, values = UInt64[], UInt64[]
+        for t in tails; push!(masks, endmask(something(shared, t))); push!(values, expected(something(shared, t))) end
+        pertail(v) = if isnothing(shared); :($(Tuple(v))[i]) else first(v) end
+        check = :($(gen_load(iT, :(pos + optlen - $width))) & $(pertail(masks)) == $(pertail(values)))
+        # An option without a tail needs no guard when its own last bytes pass, and
+        # needs a branch only when its register might reach before what's been parsed
+        passes(k) = taillens[k] > 0 || ncodeunits(options[k]) >= width &&
+            pack_bytes(options[k], ncodeunits(options[k]) - width, width, UInt64) & masks[k] == values[k]
+        if all(passes, eachindex(options)); check
+        elseif all(inreach, eachindex(options)); :((optlen == $minoptlen) | $check)
+        else :(optlen == $minoptlen || $check) end
     else
-        # Multiple tail lengths: codeunit loop over tail bytes. Tails are padded
-        # to one length so the tables are homogeneous (indexing a tuple of
-        # differently-sized tuples by `i` is a runtime field lookup), and bytes
-        # compare under a per-byte mask so casefolding spares non-letters.
-        maxtail = maximum(taillens)
-        masktable = Any[Tuple(UInt8[if j > ncodeunits(t) 0x00
-                                    elseif casefold && UInt8('a') <= (codeunit(t, j) | 0x20) <= UInt8('z') 0xDF
-                                    else 0xFF end
-                                    for j in 1:maxtail])
-                        for t in tails]
-        bytetable = Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & masktable[k][j] else 0x00 end for j in 1:maxtail])
-                        for (k, t) in enumerate(tails)]
-        ExprVarLine[:(tailbytes = $(Tuple(bytetable))[i]),
-                     :(tailmasks = $(Tuple(masktable))[i]),
-                     :(@inbounds(for j in 1:$(Tuple(taillens))[i]
-                           if data[pos + $minoptlen + j - 1] & tailmasks[j] != tailbytes[j]
-                               found = false
-                               break
-                           end
-                       end))]
+        # Tails are padded to one length so the tables are homogeneous (indexing a tuple
+        # of differently-sized tuples by `i` is a runtime field lookup)
+        masks = Tuple(Any[Tuple(UInt8[bytemask(t, j) for j in 1:maxtail]) for t in tails])
+        bytes = Tuple(Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & masks[k][j] else 0x00 end for j in 1:maxtail])
+                          for (k, t) in enumerate(tails)])
+        :(all(j -> @inbounds(data[pos + $minoptlen + j - 1]) & $masks[i][j] == $bytes[i][j], 1:$(Tuple(taillens))[i]))
     end
-    cond = if has_empty
-        :(found && optlen > $minoptlen)
-    else
-        :found
-    end
-    :(if $cond
-          $(body...)
-      end)
 end

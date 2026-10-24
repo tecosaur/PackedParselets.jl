@@ -558,15 +558,33 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
         tailcount, tailnum = gensym("tailcount"), gensym("tailnum")
         powers = Tuple(UInt64[UInt64(base)^k for k in 0:maxdigits - head])
         tailmax = :($(emit_lengthbound(state, nctx, maxdigits)) - $head)
-        # A tail too short for `parseint`'s registers needs only a few digits read
-        tailparse = if maxdigits - head >= 8
+        tailparse = if maxdigits - head > 8
             :(($tailcount, $tailnum) = parseint(UInt64, data, pos + $head, $base, $tailmax))
-        else
+        elseif pad > head
+            # Padded values usually come at full width, so a loop over a short tail is predicted
             digit = gensym("digit")
             :(($tailcount, $tailnum) = (0, zero(UInt64));
               while $tailcount < $tailmax && ($digit = byte2int(peekbyte(data, pos + $head + $tailcount), $base)) != 0xff
                   ($tailcount, $tailnum) = ($tailcount + 1, $tailnum * $base + $digit)
               end)
+        else
+            # One register ending where the tail may, reading back into the head; halved
+            # shifts take an empty tail to zero
+            tT = register_type(maxdigits - head)
+            w = sizeof(tT)
+            tail, tailshift, tailnondig = gensym("tail"), gensym("tailshift"), gensym("tailnondig")
+            quote
+                $tailcount = $tailmax
+                $tail = $(gen_load(tT, :(pos + $head + $tailcount - $w)))
+                $tailshift = (($w - $tailcount) << 2) & $(8w - 1)
+                $tail = ($tail >>> $tailshift) >>> $tailshift
+                $(gen_swar_nondig_flags(tT, tail, tailnondig, base))
+                $tailcount = trailing_zeros($tailnondig) >> 3
+                $tailshift = (($w - $tailcount) << 2) & $(8w - 1)
+                $tail = ($tail << $tailshift) << $tailshift
+                $(gen_swarparse(tT, tail, base, w)...)
+                $tailnum = $tail % UInt64
+            end
         end
         push!(varparse, :($numvar = $swar_var % $nT),
               :(if $countvar == $head

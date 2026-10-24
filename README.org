@@ -26,8 +26,8 @@ that provide their own macros and domain-specific behaviour.
 Fields are packed into the minimum number of bits: the semver example below fits
 in 5 bytes despite having six fields and two levels of optionals. The generated
 parser operates directly on bytes with no intermediate string allocations, no
-regular expressions, and no exceptions on the hot path. Digit and character
-segments parse at roughly 0.5--2.5 cycles per byte (see [[file:docs/src/segments.org::*Parsing cost][Parsing cost]]).
+regular expressions, and no exceptions on the hot path. Fixed-width digit and
+character segments parse at roughly 0.5--1.5 cycles per byte (see [[file:docs/src/segments.org::*Parsing cost][Parsing cost]]).
 
 From a single pattern you get:
 + A ~primitive type~ with optimal bit-width storage

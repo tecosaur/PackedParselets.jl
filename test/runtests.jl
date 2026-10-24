@@ -2364,7 +2364,7 @@ end
             # the skip path, which must not reach the choice matcher.
             iddef = :(@defpacked CLskip (skip("cl", choice("", ":", "_")),
                        :id(digits(max=99))))
-            @test parsebytes_complexity(iddef) == (branches=7:18, branch_total=22, ops=19:48)
+            @test parsebytes_complexity(iddef) == (branches=7:18, branch_total=22, ops=19:50)
             eval(iddef)
             for sep in ("", ":", "_")
                 @test parse(CLskip, "cl$(sep)42").id == 42
@@ -2415,7 +2415,7 @@ end
         @testset "SequentialSkip (two bare strings)" begin
             # Two sequential steps, each independently optional
             iddef = :(@defpacked SeqSkip (skip("http://", "www."), :host(letters(4))))
-            @test parsebytes_complexity(iddef) == (branches=5:13, branch_total=13, ops=29:41)
+            @test parsebytes_complexity(iddef) == (branches=5:15, branch_total=15, ops=29:45)
             eval(iddef)
             @test parse(SeqSkip, "http://www.abcd").host == "abcd"
             @test parse(SeqSkip, "http://abcd").host == "abcd"
@@ -2431,7 +2431,7 @@ end
         @testset "MixedSkip (choice then bare string)" begin
             iddef = :(@defpacked MixedSkip (skip(choice("http://", "https://"), "www."),
                        :host(letters(4))))
-            @test parsebytes_complexity(iddef) == (branches=5:16, branch_total=16, ops=29:51)
+            @test parsebytes_complexity(iddef) == (branches=5:18, branch_total=18, ops=29:55)
             eval(iddef)
             # All combinations: scheme × www × neither
             @test parse(MixedSkip, "https://www.abcd").host == "abcd"

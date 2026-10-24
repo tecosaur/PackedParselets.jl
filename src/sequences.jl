@@ -139,7 +139,7 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     valid = emit_validity_check(state, fieldvar, if directvar fnum else fieldvar end, vmin:vmax)
     pinfo = if isnothing(groups)
         digits_print_exprs(fextract, dT, fieldvar, fvalue, directvar, fnum,
-                           fixedwidth, maxdigits, pad, base, vmax, valid)
+                           mindigits, maxdigits, pad, base, vmax, valid)
     else
         grouped_digits_print(fextract, dT, fieldvar, fvalue, directvar, fnum,
                              groups, first(skipbytes), base, valid)
@@ -160,10 +160,9 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
     else
         maxdigits
     end
-    fixedpad = if fixedwidth maxdigits else 0 end
     nseps = if isnothing(groups) 0 else length(groups) - 1 end
-    printmin = max(ndigits(max(vmin, 1); base), pad, fixedpad) + nseps
-    printmax = max(ndigits(vmax; base), pad, fixedpad) + nseps
+    printmin = max(ndigits(max(vmin, 1); base), pad, mindigits) + nseps
+    printmax = max(ndigits(vmax; base), pad, mindigits) + nseps
     digit_set = digits_byteset(base)
     bytespans = if has_skip
         Vector{ByteSet}[]
@@ -185,12 +184,11 @@ end
 
 function digits_print_exprs(fextract::Expr, dT::DataType, fieldvar::Symbol, @nospecialize(fvalue),
                             directvar::Bool, fnum::Symbol,
-                            fixedwidth::Bool, maxdigits::Int, pad::Int, base::Int,
+                            mindigits::Int, maxdigits::Int, pad::Int, base::Int,
                             max::Integer, valid::Expr)
     printvar = if directvar fnum else fieldvar end
-    printpad = if fixedwidth && maxdigits > 1; maxdigits
-    elseif pad > 0; pad
-    else 0 end
+    # Short values print padded to the fewest digits the field parses
+    printpad = if mindigits > 1; Base.max(pad, mindigits) else pad end
     printex = :(printdigits(io, $printvar, $base, $printpad, $(ndigits(max; base))))
     # getval: extract bits → variable
     getval = ExprVarLine[fextract]

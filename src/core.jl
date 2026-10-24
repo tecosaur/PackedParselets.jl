@@ -371,12 +371,13 @@ end
 # Each element of the vector is one alternative (a sequence of ByteSets,
 # one per byte position). Extending with new alternatives forms the
 # Cartesian product: each existing alternative is concatenated with each
-# new alternative, producing all possible combined sequences.
+# new alternative, producing all possible combined sequences. Nested choices would
+# multiply these without bound, so past 1024 they describe only what came before.
 function extend_bytespans!(target::Vector{Vector{ByteSet}}, new::Vector{Vector{ByteSet}})
     isempty(new) && return
     if isempty(target)
         append!(target, new)
-    else
+    elseif length(target) * length(new) <= 1024
         combined = Vector{ByteSet}[]
         for prev in target, ext in new
             push!(combined, vcat(prev, ext))

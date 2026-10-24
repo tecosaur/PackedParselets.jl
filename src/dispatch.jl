@@ -293,9 +293,9 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::S
             sorted = sortperm_by(identity, arm_vals)
             vals = arm_vals[sorted]
             if vals[end] - vals[1] + 1 == narms
+                # A hash value's rank among them is an index into the arms by value
                 idx = :($hx - $(iT(vals[1]) - one(iT)))
-                ip = invperm(sorted)
-                return if ip == 1:narms idx else :(@inbounds $(Tuple(map(UInt8, ip)))[$idx]) end
+                return if sorted == 1:narms idx else :(@inbounds $(Tuple(map(UInt8, sorted)))[$idx]) end
             end
         end
         table = zeros(UInt8, maxval + 1)
@@ -358,8 +358,11 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Sym
     isnothing(ph) && return nothing
     fm = ph.foldmask % ph.iT
     hx = hashexpr(ph, if iszero(fm) reg else :($reg | $fm) end)
-    ip = invperm(ph.perm)
-    idx = if ip == 1:narms hx else :(@inbounds $(Tuple(map(UInt8, ip)))[$hx]) end
+    # Arms are found as a string choice's options are: by table, or in the hash's output order
+    idx = if ph.kind === :table
+        :(if $hx <= $(length(ph.table)); @inbounds($(Tuple(map(UInt8, ph.table)))[$hx]) else 0x00 end)
+    elseif ph.perm == 1:narms; hx
+    else :(@inbounds $(Tuple(map(UInt8, ph.perm)))[$hx]) end
     (; offset = ph.pos, iT = ph.iT, idx)
 end
 

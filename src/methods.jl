@@ -414,7 +414,7 @@ function rewrite_segment_captures!(segvars::Vector{Tuple{Int, Symbol}},
         i = expr.args[2]::Int
         if i > length(segvars)
             anon = iszero(segs[i].nbits)
-            precount = count(s -> s.nbits > 0, @view segs[1:i-1])
+            precount = 0; for j in 1:i-1; precount += segs[j].nbits > 0; end
             push!(segvars, (if anon; 0 else precount + 1 end, Symbol("seg$i")))
         end
         var = last(segvars[i])

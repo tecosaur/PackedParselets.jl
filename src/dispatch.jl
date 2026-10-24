@@ -211,13 +211,10 @@ end
 function arm_clear_bits(state::ParserState, bits_before::Int)
     arm_bits = state.bits - bits_before
     arm_bits > 1 || return ExprVarLine[]
-    mT = cardtype(arm_bits)
-    mask = typemax(mT) >> (8 * sizeof(mT) - arm_bits)
+    # Built in the packed type, which may be wider than any integer
+    mask = :(Core.Intrinsics.lshr_int(Core.Intrinsics.not_int(__cast_to_packed($UInt8, 0x00)), __packed_shift($arm_bits)))
     ExprVarLine[:(parsed = Core.Intrinsics.and_int(parsed,
-        Core.Intrinsics.not_int(
-            Core.Intrinsics.shl_int(
-                __cast_to_packed($mT, $mask),
-                __packed_shift($(state.bits))))))]
+        Core.Intrinsics.not_int(Core.Intrinsics.shl_int($mask, __packed_shift($(state.bits))))))]
 end
 
 function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx,
@@ -257,6 +254,8 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::S
         for (k, spans) in enumerate(arm_spans), alt in spans
             window = Vector{UInt8}[collect(set) for set in @view alt[pos:pos+bwidth-1]]
             any(isempty, window) && continue
+            # Thousands of values in a window are more than a table could tell apart
+            prod(Float64 ∘ length, window) > 4096 && return nothing
             # Every register value the window admits, by an odometer over each byte's candidates
             idx = ones(Int, bwidth)
             while true

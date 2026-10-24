@@ -785,8 +785,8 @@ function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, I
         load(at) = :(htol(Base.unsafe_load(Ptr{$sT}(pointer(data, $at)))))
         isnothing(count) || push!(exprs, :($cut = ((8 - $(last(count))) << 3) % UInt))
         push!(exprs, if isnothing(count) gen_swar_load(sT, reg, nd, false, start)
-              else :($reg = if canreadback(data, pos, 7); $(load(:(pos + $(last(count)) - 8))) >>> $cut
-                            else $(load(:pos)) & (typemax(UInt64) >>> $cut) end) end,
+              else :($reg = if canreadback(data, pos + $start, 7); $(load(:(pos + $start + $(last(count)) - 8))) >>> $cut
+                            else $(load(:(pos + $start))) & (typemax(UInt64) >>> $cut) end) end,
               :($folded = $(if casefold; :($reg | $(lanes(0x20))) else reg end)))
         # A non-ASCII byte's carries may corrupt neighbouring flags, but it fails its own lane
         # Every valid lane lies in one range: offset by the least, plus its range's excess

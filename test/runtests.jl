@@ -3863,7 +3863,7 @@ end
     @testset "duplicate field name across choice arms" begin
         iddef = :(@defpacked DupField (choice(seq("VCV", :id(digits(3))),
                                               seq("RCV", :id(digits(3))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:57)
+        @test parsebytes_complexity(iddef) == (branches=4:5, branch_total=5, ops=26:28)
         eval(iddef)
         @test parse(DupField, "VCV123").id == 123
         @test parse(DupField, "RCV456").id == 456

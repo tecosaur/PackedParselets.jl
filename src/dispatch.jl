@@ -391,6 +391,16 @@ function pattern_choice!(exprs::PatternExprs,
         pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms;
                               tag_field=fieldname, tag_values=tags)
     else
+        # Arms differing only in a leading literal are a string choice before what they share
+        heads, rest = Any[], nothing
+        for a in args
+            parts = if Meta.isexpr(a, :call) && first(a.args) === :seq; a.args[2:end] elseif Meta.isexpr(a, :tuple) a.args end
+            (parts isa Vector{Any} && length(parts) >= 2 && first(parts) isa String &&
+             first(parts) ∉ heads && something(rest, parts[2:end]) == parts[2:end]) || break
+            push!(heads, first(parts)); rest = parts[2:end]
+        end
+        length(heads) == length(args) &&
+            return pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, :seq, pushfirst!(rest, Expr(:call, :choice, heads...)))
         nonempty_arms = filter(a -> a !== "", args)
         if length(nonempty_arms) == 1 && length(args) == 2
             pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs,

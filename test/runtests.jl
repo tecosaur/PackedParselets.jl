@@ -1894,7 +1894,7 @@ end
     @testset "choice" begin
         @testset "PrefixChoice" begin
             iddef = :(@defpacked PrefixChoice (choice("alpha/", "beta/"), :id(digits(max=255))))
-            @test parsebytes_complexity(iddef) == (branches=7:11, branch_total=11, ops=40:47)
+            @test parsebytes_complexity(iddef) == (branches=7:11, branch_total=11, ops=40:48)
             eval(iddef)
             # Parsing
             a = parse(PrefixChoice, "alpha/42")
@@ -1993,7 +1993,7 @@ end
             iddef = :(@defpacked ManyChoiceVar (:method(choice("get", "put", "post", "head",
                                                                "delete", "patch", "options")),
                        "/", :id(digits(max=999))))
-            @test parsebytes_complexity(iddef) == (branches=8:15, branch_total=15, ops=46:56)
+            @test parsebytes_complexity(iddef) == (branches=8:14, branch_total=14, ops=46:56)
             eval(iddef)
             for m in ("get", "put", "post", "head", "delete", "patch", "options")
                 id = parse(ManyChoiceVar, "$m/42")
@@ -2090,7 +2090,7 @@ end
             iddef = :(@defpacked ManyChoiceOpt (:id(digits(max=999)),
                        optional("-", :tag(choice("draft", "final", "void",
                                                  "open", "shut")))))
-            @test parsebytes_complexity(iddef) == (branches=5:17, branch_total=19, ops=25:64)
+            @test parsebytes_complexity(iddef) == (branches=5:16, branch_total=18, ops=25:65)
             eval(iddef)
             for t in ("draft", "final", "void", "open", "shut")
                 id = parse(ManyChoiceOpt, "42-$t")
@@ -2133,7 +2133,7 @@ end
             # Tails "_x" / "" / "_yz" take the per-option tail table; '_' is a
             # non-letter that casefolding must leave untouched.
             iddef = :(@defpacked MixedTail (:k(choice("ab_x", "cd", "ef_yz")), :id(digits(2))))
-            @test parsebytes_complexity(iddef) == (branches=5:10, branch_total=10, ops=22:29)
+            @test parsebytes_complexity(iddef) == (branches=5:9, branch_total=9, ops=22:29)
             eval(iddef)
             @test parse(MixedTail, "ab_x12").k === :ab_x
             @test parse(MixedTail, "AB_X12").k === :ab_x
@@ -2149,10 +2149,10 @@ end
             @test parse_allocations(MixedTail, "ef_yz12") == 0
         end
 
-        @testset "SuffixChoice (common suffix optimisation)" begin
+        @testset "SuffixChoice (options sharing a suffix)" begin
             iddef = :(@defpacked SuffixChoice (:kind(choice("alpha/", "beta/", "delta/")),
                        :id(digits(max=999))))
-            @test parsebytes_complexity(iddef) == (branches=6:11, branch_total=11, ops=42:50)
+            @test parsebytes_complexity(iddef) == (branches=6:11, branch_total=11, ops=42:51)
             eval(iddef)
             for k in ("alpha/", "beta/", "delta/")
                 id = parse(SuffixChoice, "$(k)42")
@@ -2190,7 +2190,7 @@ end
         @testset "StringChoiceOpt (type=String, optional)" begin
             iddef = :(@defpacked StringChoiceOpt (:id(digits(max=99)),
                        optional("-", :tag(choice("rc", "dev", "final", type=String)))))
-            @test parsebytes_complexity(iddef) == (branches=5:18, branch_total=20, ops=18:56)
+            @test parsebytes_complexity(iddef) == (branches=5:16, branch_total=18, ops=18:57)
             eval(iddef)
             present = parse(StringChoiceOpt, "42-rc")
             @test present.tag == "rc"
@@ -2254,7 +2254,7 @@ end
         @testset "VarLenTail (variable-length, per-option tail verify)" begin
             iddef = :(@defpacked VarTail (:tag(choice("ab", "cde", "fghi")),
                        :id(digits(max=99))))
-            @test parsebytes_complexity(iddef) == (branches=6:12, branch_total=12, ops=40:49)
+            @test parsebytes_complexity(iddef) == (branches=6:10, branch_total=10, ops=40:49)
             eval(iddef)
             @test parse(VarTail, "ab42").tag === :ab
             @test parse(VarTail, "cde42").tag === :cde
@@ -2303,7 +2303,7 @@ end
             # non-casefold 0xFF mask path in gen_tail_verify
             iddef = :(@defpacked DigitTailV (:tag(choice("a1", "b", "c2")),
                        :id(digits(max=99))))
-            @test parsebytes_complexity(iddef) == (branches=6:10, branch_total=10, ops=37:41)
+            @test parsebytes_complexity(iddef) == (branches=6:9, branch_total=9, ops=37:43)
             eval(iddef)
             @test parse(DigitTailV, "a142").tag === :a1
             @test parse(DigitTailV, "b42").tag === :b
@@ -2419,7 +2419,7 @@ end
         @testset "MixedSkip (choice then bare string)" begin
             iddef = :(@defpacked MixedSkip (skip(choice("http://", "https://"), "www."),
                        :host(letters(4))))
-            @test parsebytes_complexity(iddef) == (branches=5:16, branch_total=16, ops=29:50)
+            @test parsebytes_complexity(iddef) == (branches=5:16, branch_total=16, ops=29:51)
             eval(iddef)
             # All combinations: scheme × www × neither
             @test parse(MixedSkip, "https://www.abcd").host == "abcd"
@@ -2467,7 +2467,7 @@ end
             # No option is a prefix of another -> hash-eligible
             iddef = :(@defpacked SkipDisjoint (skip(choice("pxd", "rpxd", "abc")),
                        :x(letters(1:4, lower=true))))
-            @test parsebytes_complexity(iddef) == (branches=6:12, branch_total=12, ops=14:31)
+            @test parsebytes_complexity(iddef) == (branches=6:11, branch_total=11, ops=14:33)
             eval(iddef)
             @test parse(SkipDisjoint, "rpxdab").x == "ab"
             @test parse(SkipDisjoint, "pxdab").x == "ab"
@@ -2539,7 +2539,7 @@ end
             iddef = :(@defpacked TrailingOpt (:id(digits(max=999)),
                        optional("-", :tag(choice("alpha", "beta", "rc")),
                                 :rev(digits(max=99)))))
-            @test parsebytes_complexity(iddef) == (branches=5:22, branch_total=24, ops=25:95)
+            @test parsebytes_complexity(iddef) == (branches=5:20, branch_total=22, ops=25:96)
             eval(iddef)
             bare = parse(TrailingOpt, "42")
             @test bare.id == 42

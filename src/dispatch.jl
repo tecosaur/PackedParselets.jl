@@ -80,6 +80,8 @@ function pattern_dispatch!(exprs::PatternExprs,
         def = getfield(state.segments, :literal)
         output = def.compile(state, nctx, exprs, def, Any[thing])
         process_segment_output!(exprs, state, nctx, :literal, output)
+    else
+        throw(ArgumentError("Expected a string, a segment, or a tuple of them in a pattern, got $(repr(thing))"))
     end
 end
 

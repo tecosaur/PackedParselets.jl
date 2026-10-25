@@ -27,7 +27,7 @@ Fields are packed into the minimum number of bits: the semver example below fits
 in 5 bytes despite having six fields and two levels of optionals. The generated
 parser operates directly on bytes with no intermediate string allocations, no
 regular expressions, and no exceptions on the hot path. Fixed-width digit and
-character segments parse at roughly 0.5--1.5 cycles per byte (see [[file:docs/src/segments.org::*Parsing cost][Parsing cost]]).
+character segments parse at 0.4--1.4 cycles per byte (see [[file:docs/src/segments.org::*Parsing cost][Parsing cost]]).
 
 From a single pattern you get:
 + A ~primitive type~ with optimal bit-width storage
@@ -58,7 +58,7 @@ working ~eval~ wrapper.
 #+end_src
 
 Six fields and two levels of optionals, packed into 5 bytes. Parsing a mixed stream
-of versions takes 38--124 cycles (7.5--24.5 ns) each, from short releases to ones
+of versions takes 40--115 cycles (8--23 ns) each, from short releases to ones
 with prerelease tags, and printing ~7 ns (zero-allocation into a pre-allocated buffer).
 
 #+begin_src julia-repl
@@ -105,7 +105,7 @@ that is
 
 The ten fields are packed into an 11-byte primitive type, that takes 45--75 cycles
 (9--15 ns) to parse from a mixed stream, depending on the fraction and offset, and
-~20ns to write to pre-allocated memory.
+~20 ns to write to pre-allocated memory.
 
 #+begin_src julia-repl
 julia> map(eval, values(maketype(...))) # Create `RFC3339` type from DSL

@@ -518,9 +518,42 @@ end
     iddef = :(@defpacked SegCharseq ("C-", :code(letters(3))))
     @test parsebytes_complexity(iddef) == (branches=3:3, branch_total=3, ops=34:34)
     eval(iddef)
-    cvals = PP.segments(parse(SegCharseq, "C-abc"))
-    @test any(v -> lowercase(v[2]) == "abc", cvals)
+    @test PP.segments(parse(SegCharseq, "C-abc")) == ("C-", "abc")
     @test_neverthrow PP.parsebytes(SegCharseq, ::Vector{UInt8})
+end
+
+@testset "segment layout" begin
+    @defpacked SegTree ("A", :x(digits(2)), choice(:head, :b => ("B", :y(digits(3))), :c => ("C", :z(letters(1)))),
+                        optional("-", choice(("P", :p(digits(1))), ("Q", :q(digits(1))))), :w(digits(1)))
+    # Each segment's position, laid out as `segments` documents
+    function place!(placed, layout, pos)
+        for s in layout
+            pos = if s isa PP.Segment
+                push!(placed, s => pos)
+                pos + s.nbits
+            else
+                maximum(opt -> if isnothing(opt) pos else place!(placed, opt, pos) end, s.options)
+            end
+        end
+        pos
+    end
+    placed = Pair{PP.Segment, Int}[]
+    @test place!(placed, PP.segments(SegTree), 0) == PP.nbits(SegTree)
+    @test [s.names for s in PP.segments(SegTree) if s isa PP.SegmentOptions] == [[:b, :c], [nothing, nothing]]
+    bits(v, pos, n) = parse(Int, bitstring(v)[pos+1:pos+n]; base = 2)
+    # Of 15 segments, three selectors among them, those in options not taken are `nothing`
+    for (str, arms, nheld) in (("A42B123-P57", [1, 1], 11), ("A07Cq3", [2], 6))
+        v = parse(SegTree, str)
+        texts = PP.segments(v)
+        @test length(texts) == length(placed) == 15 && count(!isnothing, texts) == nheld
+        @test join(something.(texts, "")) == str
+        held = [(s, pos, text) for ((s, pos), text) in zip(placed, texts) if !isnothing(text)]
+        for (s, pos, text) in held
+            s.kind === :digits && @test bits(v, pos, s.nbits) == parse(Int, text)
+            s.kind === :presence && @test bits(v, pos, s.nbits) == 1
+        end
+        @test [bits(v, pos, s.nbits) for (s, pos, _) in held if s.kind === :arm] == arms
+    end
 end
 
 @testset "variable-width digits" begin
@@ -620,7 +653,7 @@ end
     @defpacked ZeroDigits ("Z", :n(digits(max=99)))
     x = parse(ZeroDigits, "Z0")
     @test string(x) == "Z0"
-    @test PP.segments(x) == ((0, "Z"), (1, "0"))
+    @test PP.segments(x) == ("Z", "0")
 end
 
 # Packed values built from arbitrary bits (reinterpreted data, say) hold field values

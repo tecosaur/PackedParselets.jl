@@ -47,17 +47,23 @@ tobytes(buf::Memory{UInt8}, val) = tobytes(buf, val, 0)
 function segments end
 
 @doc """
-    segments(::Type{T}) -> Tuple{@NamedTuple{nbits, kind, label, desc, shortform}...}
+    segments(::Type{T}) -> Vector{Union{Segment, SegmentOptions}}
 
-Return the type-level segment schema (one entry per value-carrying segment,
-excluding zero-bit segments like literals).
+The layout of `T`'s pattern, in order: each element a [`Segment`](@ref), or the
+[`SegmentOptions`](@ref) of a choice. Each element takes the next bits of the packed
+value, from the most significant: a segment its `nbits`, and options as many as the
+widest of them, their bits overlapping.
+A choice's options follow the segment selecting one (`kind = :arm`). An optional's
+are its contents and `nothing`, its contents ending with a segment marking them
+present (`kind = :presence`) unless a segment's zero value marks absence instead.
 """ segments(::Type)
 
 @doc """
-    segments(val::T) -> Tuple{Tuple{Int, String}...}
+    segments(val::T) -> Tuple{Vararg{Union{String, Nothing}}}
 
-Return instance-level segment values as `(index, formatted_string)` pairs,
-where `index` corresponds to the position in the schema tuple.
+The printed text of each segment of `segments(T)`, in order, including those within
+options, or `nothing` for those `val` doesn't hold: a choice took the option whose
+segments aren't `nothing`, or, when only its `:arm` segment isn't, its empty option.
 """ segments(::Any)
 
 ## Bit-sizing
@@ -287,6 +293,7 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     append!(exprs.print.getlen, getlen)
     append!(exprs.print.putval, putval)
     argvar = something(meta.argvar, :_)
+    push!(exprs.layout, Segment((bounds.nbits, kind, meta.label, meta.desc, meta.shortform)))
     push!(exprs.segments, ValueSegment(
         bounds.nbits, kind, meta.label, meta.desc, meta.shortform,
         meta.argtype, argvar,

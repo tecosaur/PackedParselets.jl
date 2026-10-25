@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # PackedParselets: parser compiler for bit-packed primitive types.
-#
-# Generates optimised parsers, printers, and accessors from declarative
-# pattern specifications.
 
 module PackedParselets
 

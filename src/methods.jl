@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Final-stage codegen: assemble complete method definitions from the
-# accumulated PatternExprs (parse, print, segments, properties) produced
-# by pattern walking.
-#
-# Each `assemble_*` function emits one or more method definitions for the
-# generated type. `assemble_type` is the orchestrator that wires them all
-# into a single `:toplevel` block.
+# Final-stage codegen: assemble method definitions from the walked PatternExprs.
 
 ## Top-level entry point
 
@@ -57,15 +51,6 @@ end
 
 ## Assembly
 
-"""
-    assemble_type(exprs, state) -> (NamedTuple, ParserState)
-
-Assemble all method definitions for the generated type as a `NamedTuple`
-of expression components.
-
-Runs finalize hooks from the segment registry, collecting their outputs
-in the `hookdata` field.
-"""
 function assemble_type(exprs::PatternExprs, state::ParserState)
     (; name, segments) = state
     numbits = 8 * cld(state.bits, 8)
@@ -116,8 +101,7 @@ function assemble_type(exprs::PatternExprs, state::ParserState)
                        Core.Intrinsics.ult_int(a, b)),
         hookdata = Expr(:block, hookdata...),
     )
-    # Qualify bare references to PackedParselets runtime functions so that
-    # generated code works when eval'd in any module.
+    # Inlining our globals' values lets the code run in whichever module evals it
     for v in values(typeparts)
         v isa Expr || continue
         Base.remove_linenums!(v)
@@ -245,7 +229,6 @@ function assemble_properties(grouped::Vector{Pair{Symbol, Vector{Union{Symbol, V
         prop_exprs = if length(vals) == 1
             resolve_extract(only(vals), segs)
         else
-            # Build nested if-elseif chain from guarded extract entries.
             entries = Vector{ExprVarLine}[resolve_extract(val, segs) for val in vals]
             filter!(!isempty, entries)
             ExprVarLine[chain_guarded(entries)]
@@ -437,8 +420,7 @@ end
 
 ## Segment-set stripping
 
-# Remove `__segment_printed = N` markers from expression trees.
-# Used when print expressions are reused for buffer output or properties.
+# Remove `__segment_printed = N` markers from expression trees
 function strip_segsets!(expr::ExprVarLine)
     expr isa Expr || return expr
     remove = Int[]
@@ -456,19 +438,9 @@ end
 
 ## Buffer printing
 
-"""
-    rewrite_bufprint!(pexprs)
-
-Rewrite `print(io, ...)`, `printchars(io, ...)` and `printdigits(io, ...)` calls in
-`pexprs` into direct `Memory{UInt8}` buffer operations (`bufprint`, `unpackchars!`,
-`bufprint_static`), avoiding IO overhead in the generated `tobytes` method.
-
-Recurses into nested expressions. Modifies `pexprs` in place.
-"""
+# Rewrite `io` print calls into writes to `buf`, for the `tobytes` method
 function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
-    # Top-level: collect IO calls for splice replacement (applied in reverse to preserve indices).
-    # Nested calls recurse into sub-expression args, which are never top-level
-    # vector elements and so are safe from the outer splice.
+    # Spliced in reverse to preserve indices; nested calls are rewritten in their own `args`
     splices = Tuple{Int, Vector{Any}}[]
     for (i, expr) in enumerate(pexprs)
         if Meta.isexpr(expr, :call) && length(expr.args) >= 3 && expr.args[2] == :io
@@ -652,9 +624,9 @@ end
 function inline_global(@nospecialize(x), mod::Module, bound::Set{Symbol})
     if x isa Expr
         ref = module_path_ref(x)
-        isnothing(ref) ? inline_globals!(x, mod, bound) : inline_global(ref, mod, bound)
+        if isnothing(ref) inline_globals!(x, mod, bound) else inline_global(ref, mod, bound) end
     elseif x isa GlobalRef
-        isconst(x.mod, x.name) ? getglobal(x.mod, x.name) : x
+        if isconst(x.mod, x.name) getglobal(x.mod, x.name) else x end
     elseif x isa Symbol && x ∉ bound && !startswith(String(x), '#') &&
             isdefined(mod, x) && isconst(mod, x)
         getglobal(mod, x)

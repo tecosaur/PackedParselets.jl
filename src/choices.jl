@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Choice pattern handler and its codegen: perfect hashing, matcher assembly,
-# and register-sized verification.
-
 # Below these option counts the unrolled linear matcher, which LLVM often turns into
 # a switch, measured as fast or faster than a bucketed hash on varied input. Mixed
 # lengths cost the hash path a length lookup and a bytewise tail check.
@@ -12,14 +9,6 @@ const BUCKETED_MIN_VARIABLE_OPTIONS = 16
 
 ## Choice pattern handler
 
-"""
-    compile_choice(state, nctx, def, options) -> SegmentOutput
-
-Handle a `choice(...)` pattern node.
-
-Validates options, builds a matcher (via perfect hashing or linear scan),
-then delegates to `compile_choice_value` or `compile_choice_fixed`.
-"""
 function compile_choice(state::ParserState, nctx::NodeCtx, ::PatternExprs,
                         ::SegmentDef, options::Vector{Any})
     all(o -> o isa String, options) || throw(ArgumentError("Expected all options to be strings for choice"))
@@ -53,7 +42,6 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
     mopts = if casefold; map(lowercase, sopts) else sopts end
     cmatch = ChoiceMatch(mopts, sopts, casefold, fieldvar, cint, if isnothing(target); :index else :flag end)
     matcher, mopts, sopts = build_choice_matcher(state, nctx, cmatch)
-    # Length-guarded match wrapper
     notfound = build_fail_expr!(state, nctx, "Expected one of $(join(sopts, ", "))")
     lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, sopts))
     guarded = if allowempty
@@ -77,14 +65,6 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
        guarded, target, claims, valtype)
 end
 
-"""
-    compile_choice_value(state, nctx, ctx) -> SegmentOutput
-
-Produce a `SegmentOutput` for a value-storing choice: the selected index is
-packed into the bit stream and extracted as a `Symbol` or `String` property.
-Handles the `allowempty` case by guarding print and extract expressions on
-a presence check, and claims a zero-encoding sentinel when available.
-"""
 function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(ctx))
     (; sopts, fieldvar, option, allowempty, cbits, cint, guarded, claims, valtype) = ctx
     bitpos = state.bits + cbits
@@ -95,7 +75,6 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
           emit_pack(state, cint, fieldvar, bitpos)]
     fextract = :($fieldvar = $(emit_extract(state, bitpos, cbits)))
     present = :(!iszero($fieldvar))
-    # Once present, the index selects from the options tuple
     valid = emit_validity_check(state, fieldvar, fieldvar, 1:length(sopts))
     opttuple = Tuple(sopts)
     printexpr = :(print(io, @inbounds $opttuple[$fieldvar]))
@@ -105,7 +84,6 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
     else
         :(pos += $(GlobalRef(Base, :ncodeunits))(@inbounds $opttuple[$fieldvar]))
     end
-    # When allowempty without an enclosing optional, guard on presence
     emptyguard = allowempty && isnothing(option)
     guard(ex) = if emptyguard; :(if $present; $ex end) else ex end
     # Index checked, as statements rewrite_bufprint! can still reach the print in
@@ -159,13 +137,7 @@ function choice_value_codegen(state::ParserState, valtype::Symbol, sopts::Vector
     (extract_value, impart_core, argtype)
 end
 
-"""
-    compile_choice_fixed(state, nctx, ctx) -> SegmentOutput
-
-Produce a `SegmentOutput` for a fixed-output choice: the parsed option is not
-stored; the segment always prints the single `target` string. Allocates no
-bits and emits zero-width print/extract codegen.
-"""
+# A choice with `is = target`: the parsed option isn't stored, and `target` is always printed
 function compile_choice_fixed(::ParserState, nctx::NodeCtx, @nospecialize(ctx))
     (; sopts, fieldvar, allowempty, cint, guarded, target) = ctx
     pexprs = ExprVarLine[:($fieldvar = zero($cint)), guarded]
@@ -189,16 +161,7 @@ end
 
 ## Matcher assembly
 
-"""
-    build_choice_matcher(state, nctx, cmatch::ChoiceMatch) -> (matcher, mopts, sopts)
-
-Build parse-time matcher expressions for a choice node.
-
-Uses perfect hashing when available (with optional hash-skip optimisation
-for injective hashes and widened verify tables when they reduce chunk count),
-then a bucketed hash for larger option sets, and falls back to linear scan.
-May reorder options to match hash output order.
-"""
+# Returns the options too, as matching may reorder them
 function build_choice_matcher(state::ParserState, nctx::NodeCtx, cmatch::ChoiceMatch)
     (; mopts, casefold) = cmatch
     ph = find_window_hash(mopts, casefold, 1)
@@ -226,7 +189,6 @@ end
 
 function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cmatch::ChoiceMatch)
     (; casefold, fieldvar, cint) = cmatch
-    # Reorder options to match hash output order
     mopts = cmatch.mopts[ph.perm]
     sopts = cmatch.sopts[ph.perm]
     optlens = Tuple(map(ncodeunits, mopts))
@@ -247,7 +209,6 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
     vt = gen_verify_table(mopts, casefold, hash_skip)
     parsed_min = nctx[:current_branch].parsed_min
     tailcheck = if variable_len; gen_tail_verify(mopts, casefold, minoptlen, parsed_min) end
-    # Index resolution depends on hash kind
     nopts = length(mopts)
     resolve_i = if isempty(ph.table)
         boundscheck = if nopts == 1
@@ -265,10 +226,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
                       end),
                     :(found = !iszero(i))]
     end
-    # Assemble the guarded block: resolve index, verify bytes, then act.
-    # Each stage can set `found = false`; subsequent stages are guarded on it.
-    # `guard_append!` nests new statements inside `if found` when prior
-    # stages might have cleared the flag.
+    # Any stage may clear `found`, so `guard_append!` nests each later one under `if found`
     parts = ExprVarLine[resolve_i...]
     body = ExprVarLine[]
     guard_append!(stmts) =
@@ -466,12 +424,8 @@ function classify_window(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask
     (2nopts + hi + count(!iszero, table2), HashPlan(pos, iT, foldmask, hash, 0, collect(1:nopts), table, table2, injective))
 end
 
-"""
-    find_best_hash_skip(optlen, hash_offset, hash_width) -> Union{Tuple{Int,Int}, Nothing}
-
-Find the byte removal within the hash window that minimises the total
-number of register-sized loads needed to verify the remaining bytes.
-"""
+# The `(offset, width)` span of the hash window to leave unverified that most
+# reduces register loads, if any does
 function find_best_hash_skip(optlen::Int, hash_offset::Int, hash_width::Int)
     nloads(n) = n ÷ sizeof(Int) + count_ones(n % sizeof(Int))
     baseline = nloads(optlen)
@@ -518,8 +472,7 @@ function gen_verify_table(options::Vector{String}, casefold::Bool,
     chunks = if isnothing(skip)
         register_chunks(nbytes)
     else
-        # Split into chunks covering [0, gap) and [gap+width, total),
-        # with right-side offsets adjusted to original string positions
+        # Right-side chunks are offset back to their positions in the option
         gap_offset, gap_width = skip
         left = register_chunks(gap_offset)
         right = register_chunks(minlen - gap_offset - gap_width)

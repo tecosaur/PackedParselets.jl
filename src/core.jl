@@ -1,11 +1,6 @@
 # SPDX-FileCopyrightText: © 2026 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# State-mutation helpers and codegen utilities for pattern compilation.
-#
-# Small helpers that every pattern handler calls to track bits, bytes,
-# errors, and segments.
-
 ## Generic functions (overridden by generated methods)
 
 """
@@ -67,21 +62,10 @@ where `index` corresponds to the position in the schema tuple.
 
 ## Bit-sizing
 
-"""
-    cardbits(n::Integer) -> Int
-
-Return the number of bits needed to represent `n` distinct values (i.e. `ceil(log2(n))`
-computed via leading zeros).
-"""
+# Bits needed to represent `n` distinct values: `ceil(log2(n))`
 cardbits(n::Integer) = 8 * sizeof(n) - leading_zeros(max(n, 1) - 1)
 
-"""
-    cardtype(minbits::Int) -> DataType
-
-Return the smallest unsigned integer type that can hold `minbits` bits.
-
-Returns `Nothing` for zero bits. Supports up to 128 bits (`UInt128`).
-"""
+# Smallest unsigned type holding `minbits` bits (`Nothing` for zero); at most `UInt128`
 Base.@assume_effects :foldable function cardtype(minbits::Int)
     iszero(minbits) && return Nothing
     logtypesize = 1 + 8 * sizeof(minbits) - leading_zeros(cld(minbits, 8) - 1)
@@ -101,7 +85,7 @@ function sortperm_by(key, v::AbstractVector, rev::Bool = false)
         j = i
         while j > 1
             a, b = key(v[perm[j - 1]]), key(v[perm[j]])
-            (rev ? isless(a, b) : isless(b, a)) || break
+            (if rev isless(a, b) else isless(b, a) end) || break
             perm[j - 1], perm[j] = perm[j], perm[j - 1]
             j -= 1
         end
@@ -111,14 +95,7 @@ end
 
 ## State mutation helpers
 
-"""
-    register_errmsg!(state::ParserState, msg::String) -> Int
-
-Register a compile-time error message and return its 1-based index.
-
-The index is used as an error code in the generated `parsebytes` function,
-mapped back to the message string at `parse` time.
-"""
+# The returned index is the error code `parsebytes` returns, mapped back to `msg` by `parse`
 function register_errmsg!(state::ParserState, msg::String)
     push!(state.errconsts, msg)
     length(state.errconsts)
@@ -126,17 +103,8 @@ end
 
 ## Optional codegen wrapping
 
-"""
-    optional_wrap(option, argvar, extract_setup, extract_value, impart_body)
-        -> (extract::Vector{ExprVarLine}, impart::Vector{Expr})
-
-Apply the standard required/optional split for value-carrying segments.
-
-In required context (`option === nothing`), returns extract and impart as-is.
-In optional context, wraps the extract value in a presence guard (`if true`)
-resolved later by `patch_optional_extracts!`, and wraps impart in an
-`isnothing` guard on the constructor argument.
-"""
+# Within an optional, the extract's `if true` guard is a placeholder that
+# `patch_optional_extracts!` replaces with the presence check.
 function optional_wrap(@nospecialize(option::Union{Nothing, Symbol}), argvar::Symbol,
                        extract_setup::Vector{ExprVarLine}, @nospecialize(extract_value::ExprVarLine),
                        impart_body::Vector{Expr})
@@ -230,14 +198,7 @@ end
 
 ## Form string assembly
 
-"""
-    segments_formstring(segments) -> String
-
-Join segment shortforms into a compact pattern notation like
-`"SN<0-9 × 4>[-<0-9 × 2>[-<0-9 × 1>]]"`, used in parse error messages
-to show the expected form. Optional segments are wrapped in square brackets,
-with proper nesting for nested optionals.
-"""
+# The expected form shown in parse errors, e.g. `"SN<0-9 × 4>[-<0-9 × 2>[-<0-9 × 1>]]"`
 function segments_formstring(segments::Vector{ValueSegment})
     io = IOBuffer()
     scopes = ParseBranch[]
@@ -254,13 +215,10 @@ function segments_formstring(segments::Vector{ValueSegment})
     String(take!(io))
 end
 
-# Diff the active scope stack against `target`'s ancestor chain,
-# closing brackets for scopes we're leaving and opening brackets
-# for scopes we're entering.
+# Close brackets for scopes left and open them for scopes entered on the way to `target`
 function transition_scopes!(io::IO, scopes::Vector{ParseBranch}, target::Union{Nothing, ParseBranch})
     current = if isempty(scopes) nothing else last(scopes) end
     target === current && return
-    # Build ancestor chain for target scope (outermost first), short of the root
     chain = ParseBranch[]
     s = target
     while !isnothing(s) && !isnothing(s.parent)
@@ -268,13 +226,11 @@ function transition_scopes!(io::IO, scopes::Vector{ParseBranch}, target::Union{N
         s = s.parent
     end
     reverse!(chain)
-    # Find how many levels of the current stack match
     shared = 0
     for i in 1:min(length(scopes), length(chain))
         scopes[i] === chain[i] || break
         shared = i
     end
-    # Close scopes we're leaving, open scopes we're entering
     for _ in shared+1:length(scopes)
         print(io, ']')
     end
@@ -309,25 +265,13 @@ is_sentinel_unclaimed(nctx::NodeCtx) =
     (ref = get(nctx, :optional_sentinel, nothing)) !== nothing && ref[] === nothing
 
 ## SegmentOutput processing
-#
-# Bridge between the SegmentOutput return type and the existing
-# PatternExprs/ParserState mutation model. Handlers return SegmentOutput;
-# this function performs all the side effects they used to do inline.
 
-"""
-    process_segment_output!(exprs, state, nctx, kind, output)
-
-Process a `SegmentOutput` returned by a segment handler, performing all
-framework-level state mutations: expression accumulation, bit allocation,
-sentinel claiming, byte bounds tracking, and segment registration.
-"""
 function process_segment_output!(exprs::PatternExprs, state::ParserState,
                                  nctx::NodeCtx, kind::Symbol, output::SegmentOutput)
     (; bounds, codegen, meta) = output
     option = get(nctx, :optional, nothing)
     append!(exprs.parse, codegen.parse)
     bounds.nbits > 0 && (state.bits += bounds.nbits)
-    # Claim sentinel from this segment if the enclosing optional needs one
     if !isnothing(bounds.sentinel) && is_sentinel_unclaimed(nctx)
         nctx[:optional_sentinel][] = OptSentinel((state.bits + bounds.sentinel.offset, bounds.sentinel.width))
     end
@@ -336,7 +280,6 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     b.parsed_max += last(bounds.parsed)
     b.print_min += first(bounds.printed)
     b.print_max += last(bounds.printed)
-    # Route print expressions: getval hoisted to oprint_detect inside optionals
     (; direct, vars, getval, getlen, putval) = codegen.print
     append!(exprs.print.direct, direct)
     append!(exprs.print.vars, vars)
@@ -353,12 +296,9 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     extend_bytespans!(exprs.bytespans, output.bytespans)
 end
 
-# Bytespans represent alternative byte sequences that a pattern can match.
-# Each element of the vector is one alternative (a sequence of ByteSets,
-# one per byte position). Extending with new alternatives forms the
-# Cartesian product: each existing alternative is concatenated with each
-# new alternative, producing all possible combined sequences. Nested choices would
-# multiply these without bound, so past 1024 they describe only what came before.
+# Each bytespan is one alternative byte sequence the pattern can match; extending takes
+# the Cartesian product. Nested choices would multiply these without bound, so past
+# 1024 they describe only what came before.
 function extend_bytespans!(target::Vector{Vector{ByteSet}}, new::Vector{Vector{ByteSet}})
     isempty(new) && return
     if isempty(target)

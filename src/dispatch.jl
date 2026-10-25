@@ -89,14 +89,6 @@ end
 
 copyexprs(exprs::AbstractVector) = ExprVarLine[if e isa Expr copy(e) else e end for e in exprs]
 
-"""
-    pattern_field!(exprs, state, nctx, node, args)
-
-Handle a `QuoteNode` field-capture node (`:major(digits(4))`). Opens a
-`:fieldvar` scope, walks children, then assembles a property expression —
-a direct segment label for single-value captures, or an IOBuffer
-reconstruction for multi-segment fields.
-"""
 function pattern_field!(exprs::PatternExprs,
                         state::ParserState, nctx::NodeCtx,
                         node::QuoteNode,
@@ -146,9 +138,7 @@ function resolve_extract(val::Union{Symbol, Vector{ExprVarLine}},
     end
 end
 
-# Build an optimal nested if-elseif chain from guarded extract entries.
-# Entries sharing the same outermost guard are grouped into a single
-# branch, with inner content recursively chained.
+# Entries sharing an outermost guard with the one before share its branch
 function chain_guarded(entries)
     groups = Tuple{Any, Vector}[]
     for v in entries
@@ -156,8 +146,11 @@ function chain_guarded(entries)
         if !Meta.isexpr(gexpr, :if)
             push!(groups, (nothing, [v]))
         else
-            body = Meta.isexpr(gexpr.args[2], :block) ?
-                filter(a -> !(a isa LineNumberNode), gexpr.args[2].args) : Any[gexpr.args[2]]
+            body = if Meta.isexpr(gexpr.args[2], :block)
+                filter(a -> !(a isa LineNumberNode), gexpr.args[2].args)
+            else
+                Any[gexpr.args[2]]
+            end
             inner = ExprVarLine[v[1:end-1]..., body...]
             guard = gexpr.args[1]
             if !isempty(groups) && string(first(last(groups))) == string(guard)
@@ -210,7 +203,6 @@ function arm_clear_bits(from::Int, to::Int)
         Core.Intrinsics.not_int(Core.Intrinsics.shl_int($mask, __packed_shift($to)))))]
 end
 
-# Walk `arm` into its own accumulator, in a branch forked from the current one
 function walk_arm!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx, @nospecialize(arm),
                    armvar::Symbol, end_label::Symbol, @nospecialize(sentinel), props::Vector)
     parent = nctx[:current_branch]
@@ -338,8 +330,7 @@ function find_choice_dispatch(arm_spans::Vector{Vector{Vector{ByteSet}}}, reg::S
     nothing
 end
 
-# Extract canonical byte prefixes from arm bytespans and delegate to
-# find_window_hash for direct arithmetic dispatch over table lookups.
+# Hash each arm's leading bytes that are fixed (or differ only by case) like a string choice's options
 function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Symbol)
     casefold = false
     prefixes = String[]
@@ -376,17 +367,7 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Sym
     (; offset = ph.pos, iT = ph.iT, idx)
 end
 
-"""
-    pattern_choice!(exprs, state, nctx, arms)
-
-Unified handler for choice and optional branching. `arms` is a list of pattern
-nodes to try in order; `""` as an arm matches zero bytes (the optional absent
-case).
-
-Two paths:
-- Single pattern + `""` → sentinel-claiming optional (bit-efficient)
-- Multiple arms → explicit discriminant with dispatch or cascading try-rewind
-"""
+# A `""` arm matches zero bytes: the absent case of an optional
 function pattern_choice!(exprs::PatternExprs,
                          state::ParserState, nctx::NodeCtx,
                          args::Vector{Any})
@@ -419,13 +400,7 @@ function pattern_choice!(exprs::PatternExprs,
     end
 end
 
-"""
-    pattern_choice_optional!(exprs, state, nctx, arm)
-
-Handle single-arm-plus-empty optional via sentinel claiming. Walks the arm in
-a child branch, steals a zero-encoding sentinel from a value segment (or
-allocates a presence bit), then emits guarded parse/print with pos rewind.
-"""
+# Absence is marked by claiming a value segment's zero encoding, or else a presence bit
 function pattern_choice_optional!(exprs::PatternExprs,
                                   state::ParserState, nctx::NodeCtx,
                                   @nospecialize(arm))
@@ -451,7 +426,6 @@ function pattern_choice_optional!(exprs::PatternExprs,
     push!(exprs.parse, :($savedpos = pos))
     append!(exprs.parse, arm_attempt(popt, optvar, end_label, child, oexprs.parse))
     push!(exprs.parse, :(if !$optvar; pos = $savedpos; $(arm_clear_bits(bits_before, state.bits)...) end))
-    # Print: hoist extraction + condition, wrap bodies in if
     cond_assign = :($optvar = $check)
     for field in (:direct, :getval)
         append!(getfield(exprs.print, field), odetect)
@@ -479,14 +453,6 @@ struct ChoiceArm
     bits_after::Int
 end
 
-"""
-    pattern_choice_multi!(exprs, state, nctx, arms)
-
-Handle multi-arm structured choice with an explicit packed discriminant.
-Walks each arm into its own accumulator, selects between table-driven
-dispatch (when `find_choice_dispatch` finds a distinguishing byte window)
-or cascading try-rewind, and emits separate print blocks per arm.
-"""
 function pattern_choice_multi!(exprs::PatternExprs,
                                state::ParserState, nctx::NodeCtx,
                                arms::Vector{Any};
@@ -544,8 +510,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
         emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data, arm_base,
                             "" in arms, discrim_bits)
     end
-    # Emit per-arm print blocks. Separate `if` blocks (not if/elseif) so
-    # rewrite_bufprint! can reach print calls inside each arm.
+    # Separate `if` blocks (not if/elseif) so rewrite_bufprint! can reach each arm's prints
     discrim_extract = emit_extract(state, discrim_pos, discrim_bits)
     # An arm prints only on its own discriminant, so any other would print nothing
     tagvar = if isnothing(tag_field); :discriminant else Symbol(:attr_, tag_field) end
@@ -555,17 +520,14 @@ function pattern_choice_multi!(exprs::PatternExprs,
     for (k, ad) in enumerate(arm_data)
         odetect = ad.odetect
         cond = :($discrim_extract == $(discrim_type(k)))
-        # direct: self-contained (odetect + direct inside if)
         append!(exprs.print.direct, odetect)
         push!(exprs.print.direct, :(if $cond; $(ad.oexprs.print.direct...) end))
-        # split path: everything inside the if (no hoisting for choice arms)
         append!(exprs.print.vars, ad.oexprs.print.vars)
         push!(exprs.print.getval, :(if $cond; $(odetect...); $(ad.oexprs.print.getval...) end))
         push!(exprs.print.getlen, :(if $cond; $(ad.oexprs.print.getlen...) end))
         push!(exprs.print.putval, :(if $cond; $(ad.oexprs.print.putval...) end))
     end
-    # Propagate bytespans upward so parent sequences can dispatch on our content.
-    # A choice contributes the union of all arm alternatives.
+    # Propagated so an enclosing choice can dispatch on this one's content
     all_alts = reduce(vcat, arm_spans)
     extend_bytespans!(exprs.bytespans, all_alts)
     # Tagged choice: the tag is just a property contributed by every arm
@@ -613,7 +575,7 @@ function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::Nod
 end
 
 """
-    emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data, has_empty, discrim_bits)
+    emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data, arm_base, has_empty, discrim_bits)
 
 Emit try-and-rewind parsing for choice arms without a dispatch window, selecting
 the arm that consumes the most input (ties to the earliest in source order).

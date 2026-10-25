@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # String-oriented pattern handlers and their codegen helpers.
-#
-# Compile handlers: compile_literal (required literal), compile_skip (prefix stripping)
-# Codegen helpers: gen_literal_mismatch, gen_static_lchop, gen_string_match
 
 ## SegmentOutput-returning handlers
 
@@ -122,15 +119,8 @@ end
 
 ## Codegen: literal mismatch
 
-"""
-    gen_literal_mismatch(state, nctx, str, casefold) -> Expr
-
-Emit an expression that is `true` when `data` at `pos` does not match `str`.
-
-When widening to a single register load reduces the chunk count, emits both
-wide and narrow paths gated by `emit_static_lengthcheck`, so that
-`fold_static_branches!` can pick the winner.
-"""
+# Where a wider load needs fewer chunks, both widths are emitted under a static
+# length check for `fold_branches!` to choose between
 function gen_literal_mismatch(state::ParserState, nctx::NodeCtx,
                               str::String, casefold::Bool)
     wide_n = widened(ncodeunits(str))
@@ -155,7 +145,6 @@ Expects `data`, `pos`, `nbytes` in scope.
 """
 function gen_static_lchop(prefixes::Vector{String}, casefold::Bool, peek::Bool)
     ordered = prefixes[sortperm_by(ncodeunits, prefixes, true)]
-    # Built from the shortest (innermost) out
     chain = nothing
     for p in Iterators.reverse(ordered)
         nb = ncodeunits(p)
@@ -188,12 +177,10 @@ end
 """
     gen_string_match(str, casefold[, nbytes]) -> Vector{Expr}
 
-Emit register-sized match checks for `str` against `data` at `pos`.
-Each returned expression evaluates to `true` when its chunk matches.
+Emit one check per register-sized chunk of `str` against `data` at `pos`.
 
-When `nbytes > ncodeunits(str)`, chunks are widened and overflow bytes
-are masked to `0x00`, enabling fewer loads when subsequent pattern nodes
-guarantee the extra bytes are readable.
+With `nbytes > ncodeunits(str)`, chunks widen with the overflow bytes masked
+to `0x00`: only valid when those extra bytes are known to be readable.
 """
 function gen_string_match(str::String, casefold::Bool, nbytes::Int = ncodeunits(str))
     strlen = ncodeunits(str)

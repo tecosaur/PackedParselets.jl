@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Pattern handlers for value-carrying sequences: digits, character sequences
-# (letters, alphnum, hex, charset), and embedded packed types. These
-# return SegmentOutput and let process_segment_output! handle framework mutations.
+# Value-carrying segment handlers; `process_segment_output!` applies their SegmentOutput.
 
 ## Kwargs: skip, groups, exclude
 
@@ -198,7 +196,6 @@ function grouped_digits_print(d::DigitSpec, fextract::Expr, valid::Expr)
 end
 
 # Branchless digit count: min + (x >= base^min) + (x >= base^(min+1)) + ...
-# Thresholds that exceed the variable's type range are omitted (always false).
 function gen_digit_count(var, maxdigits::Int, base::Int=10, mindigits::Int=1,
                          maxval::Integer=Int128(base)^maxdigits - 1)
     count = mindigits
@@ -274,7 +271,6 @@ function charseq_impart_exprs(state::ParserState, @nospecialize(cspec::NamedTupl
        lenbase, bitpos, lenbits) = cspec
     kindstr = String(kind)
     nvals = sum(length, ranges)
-    # Input validation and char/len extraction
     body = if numeric
         maxval = nvals^maxlen - 1
         exprs = Expr[
@@ -304,7 +300,6 @@ function charseq_impart_exprs(state::ParserState, @nospecialize(cspec::NamedTupl
         end
         exprs
     end
-    # Packing (shared between numeric and string modes)
     push!(body, emit_pack(state, cT, charvar, bitpos - lenbits))
     if variable
         lenpack = if iszero(lenbase)
@@ -319,9 +314,7 @@ end
 
 ## Character sequences (letters, alphnum, hex, charset)
 
-# Named charset canonical ranges.
-# letters/alphnum include both cases (case-preserving by default).
-# hex is single-case lowercase by default.
+# letters/alphnum preserve case by default; hex is lowercase
 const NAMED_CHARSETS = (
     letters = (UInt8('A'):UInt8('Z'), UInt8('a'):UInt8('z')),
     alphnum = (UInt8('0'):UInt8('9'), UInt8('A'):UInt8('Z'), UInt8('a'):UInt8('z')),
@@ -379,18 +372,6 @@ function parse_charset_ranges(args::Vector)
     ranges
 end
 
-"""
-    resolve_charseq_flags(state, nctx, kind, ranges) -> (Vector{UnitRange{UInt8}}, cfold::Bool)
-
-Resolve `upper`/`lower`/`casefold` flags and transform character ranges.
-
-- `upper=true`: collapse letter ranges to uppercase, `cfold` from casefold flag
-- `lower=true` or `casefold=true`: collapse letter ranges to lowercase, `cfold` from casefold flag
-- No flags, `casefold=false`: ranges unchanged, `cfold=false`
-
-Letter ranges (subsets of A-Z or a-z) are shifted to the target case and deduplicated.
-Non-letter ranges pass through unchanged.
-"""
 function resolve_charseq_flags(::ParserState, nctx::NodeCtx, kind::Symbol, ranges)
     upper = get(nctx, :upper, false)::Bool
     lower = get(nctx, :lower, false)::Bool
@@ -538,7 +519,6 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         end
         push!(parse_exprs, lenpack, emit_pack(state, lT, lenoffset, bitpos))
     end
-    # printchars/chars2string share the same arg pattern
     extracts = ExprVarLine[:($charvar = $(emit_extract(state, bitpos - lenbits, charbits)))]
     if variable
         push!(extracts, if iszero(lenbase)
@@ -555,7 +535,6 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     printexprs = if isnothing(groups)
         ExprVarLine[:(printchars(io, $(charargs.args...)))]
     else
-        # Precompute the bit shift for each group (chars remaining after it)
         shifts = Int[(sum(groups) - done) * bpc for done in cumsum(groups)]
         emit_grouped(groups, first(skipbytes)) do gi, gsize
             gexpr = if iszero(shifts[gi]) charvar else :($charvar >> $(shifts[gi])) end

@@ -1,14 +1,9 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Placeholder sentinel emission, resolution, and AST post-processing.
-#
-# During pattern walking, length checks and type casts are emitted as
-# placeholder sentinel calls (e.g. `__length_check`, `__cast_to_packed`)
-# since the final byte counts and type sizes aren't known yet. After
-# the full pattern has been walked, `resolve_sentinel_in_expr!`,
-# `fold_static_branches!`, and `implement_casting!` replace these
-# sentinels with concrete expressions or compile-time constants.
+# Length checks and casts are emitted as placeholder calls (`__length_check`,
+# `__cast_to_packed`, ...) while walking, since byte bounds and the packed size are
+# only final afterwards; the passes here then replace them.
 
 ## Sentinel emission
 
@@ -117,7 +112,6 @@ function fold_branches!(items::AbstractVector)
     changed = false
     for (i, item) in enumerate(items)
         item isa Expr || continue
-        # Normalize `!Bool` → `Bool` so the next check handles both
         if item.head in (:if, :elseif) &&
                Meta.isexpr(item.args[1], :call, 2) &&
                item.args[1].args[1] === :! && item.args[1].args[2] isa Bool

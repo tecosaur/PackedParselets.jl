@@ -172,6 +172,31 @@ SegmentDef(name, compile, kwargs) = SegmentDef(name, compile, kwargs, nothing)
 const OptSentinel = @NamedTuple{position::Int, nbits::Int}
 
 """
+    ParseBranch
+
+Per-branch byte counters for tracking parse/print bounds through optional nesting.
+
+The root branch covers the required pattern; each `optional(...)` forks a child.
+`parsed_min`/`parsed_max` track cumulative input bytes consumed;
+`print_min`/`print_max` track cumulative output bytes produced.
+`close_min` is the parent's `parsed_min` where the branch's construct ends.
+Length-check sentinels reference these counters so that `resolve_sentinel_in_expr!`
+can fold static guarantees and emit minimal runtime checks.
+"""
+mutable struct ParseBranch
+    const id::Int
+    const parent::Union{Nothing, ParseBranch}
+    const scope::Symbol
+    const start_min::Int
+    const start_max::Int
+    parsed_min::Int
+    parsed_max::Int
+    print_min::Int
+    print_max::Int
+    close_min::Int
+end
+
+"""
     ValueSegment
 
 Schema for a single value-carrying pattern node in the packed representation.
@@ -186,7 +211,7 @@ struct ValueSegment
     argvar::Symbol                        # gensym used as parameter placeholder in impart
     extract::Vector{ExprVarLine}          # bits → typed value (last expr is the value)
     impart::Vector{Expr}                   # argvar → packed bits (validate + encode + orshift)
-    condition::Union{Nothing, Symbol}     # optional scope gensym, nothing if required
+    condition::Union{Nothing, ParseBranch}  # the optional branch holding it, nothing if required
 end
 
 """
@@ -235,31 +260,6 @@ function DigitSpec(fieldvar::Symbol, base::Int, mindigits::Int, maxdigits::Int, 
     fnum = Symbol("$(fieldvar)_num")
     DigitSpec(fieldvar, base, mindigits, maxdigits, vmin, vmax, pad, claims, skipbytes, exclude, groups,
               dbits, cardtype(cardbits(vmax + 1)), cardtype(dbits), direct, fnum, if direct fnum else fieldvar end)
-end
-
-"""
-    ParseBranch
-
-Per-branch byte counters for tracking parse/print bounds through optional nesting.
-
-The root branch covers the required pattern; each `optional(...)` forks a child.
-`parsed_min`/`parsed_max` track cumulative input bytes consumed;
-`print_min`/`print_max` track cumulative output bytes produced.
-`close_min` is the parent's `parsed_min` where the branch's construct ends.
-Length-check sentinels reference these counters so that `resolve_sentinel_in_expr!`
-can fold static guarantees and emit minimal runtime checks.
-"""
-mutable struct ParseBranch
-    const id::Int
-    const parent::Union{Nothing, ParseBranch}
-    const scope::Symbol
-    const start_min::Int
-    const start_max::Int
-    parsed_min::Int
-    parsed_max::Int
-    print_min::Int
-    print_max::Int
-    close_min::Int
 end
 
 """

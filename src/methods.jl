@@ -139,7 +139,7 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
     end
     while fold_branches!(resolved) end
     # The root's minimum length is checked upfront, and a checksum's verdict returns
-    formstr = segments_formstring(segments, state.branches)
+    formstr = segments_formstring(segments)
     errmsg = register_errmsg!(state, string(
         "Expected at least ", parsed_min, " bytes",
         if isempty(formstr) "" else string(", must match the form '", formstr, "'") end))
@@ -290,7 +290,7 @@ function assemble_constructor(segs::Vector{ValueSegment},
         push!(argbindings, :($(seg.argvar) = $aname))
         append!(encode_exprs, seg.impart)
     end
-    scope_checks = constructor_scope_checks(args, segs, state)
+    scope_checks = constructor_scope_checks(args, segs)
     targetsize = cld(state.bits, 8)
     for expr in encode_exprs
         implement_casting!(expr, name, targetsize)
@@ -306,17 +306,10 @@ end
 
 # Validate optional scope nesting: a child scope's args must not be
 # specified when the parent scope's args are nothing.
-function constructor_scope_checks(args::Vector{Tuple{Symbol, Int}},
-                                  segs::Vector{ValueSegment},
-                                  state::ParserState)
-    scope_parents = Dict{Symbol, Symbol}()
-    for b in state.branches
-        b.scope === :root && continue
-        scope_parents[b.scope] = b.parent.scope
-    end
-    # Scopes in order of first appearance, so the checks don't follow gensym hashing
-    scopes = Symbol[]
-    scope_args = Dict{Symbol, Vector{Int}}()
+function constructor_scope_checks(args::Vector{Tuple{Symbol, Int}}, segs::Vector{ValueSegment})
+    # Scopes in order of first appearance, so the checks don't follow hashing
+    scopes = ParseBranch[]
+    scope_args = Dict{ParseBranch, Vector{Int}}()
     for (idx, (_, si)) in enumerate(args)
         scope = segs[si].condition
         isnothing(scope) && continue
@@ -326,9 +319,7 @@ function constructor_scope_checks(args::Vector{Tuple{Symbol, Int}},
     checks = Expr[]
     for scope in scopes
         cidxs = scope_args[scope]
-        parent_scope = get(scope_parents, scope, nothing)
-        isnothing(parent_scope) && continue
-        pidxs = get(scope_args, parent_scope, nothing)
+        pidxs = get(scope_args, scope.parent, nothing)
         isnothing(pidxs) && continue
         parg = args[first(pidxs)][1]
         carg = args[first(cidxs)][1]

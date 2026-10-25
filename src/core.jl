@@ -242,23 +242,18 @@ end
 ## Form string assembly
 
 """
-    segments_formstring(segments, branches) -> String
+    segments_formstring(segments) -> String
 
 Join segment shortforms into a compact pattern notation like
 `"SN<0-9 × 4>[-<0-9 × 2>[-<0-9 × 1>]]"`, used in parse error messages
 to show the expected form. Optional segments are wrapped in square brackets,
 with proper nesting for nested optionals.
 """
-function segments_formstring(segments::Vector{ValueSegment}, branches::Vector{ParseBranch})
-    scope_parent = Dict{Symbol, Symbol}()
-    for b in branches
-        b.scope === :root && continue
-        scope_parent[b.scope] = b.parent.scope
-    end
+function segments_formstring(segments::Vector{ValueSegment})
     io = IOBuffer()
-    scopes = Symbol[]
+    scopes = ParseBranch[]
     for seg in segments
-        transition_scopes!(io, scopes, seg.condition, scope_parent)
+        transition_scopes!(io, scopes, seg.condition)
         isempty(seg.shortform) && continue
         if seg.kind in (:literal, :skip)
             print(io, seg.shortform)
@@ -273,16 +268,15 @@ end
 # Diff the active scope stack against `target`'s ancestor chain,
 # closing brackets for scopes we're leaving and opening brackets
 # for scopes we're entering.
-function transition_scopes!(io::IO, scopes::Vector{Symbol}, target::Union{Nothing, Symbol},
-                            scope_parent::Dict{Symbol, Symbol})
+function transition_scopes!(io::IO, scopes::Vector{ParseBranch}, target::Union{Nothing, ParseBranch})
     current = if isempty(scopes) nothing else last(scopes) end
     target === current && return
-    # Build ancestor chain for target scope (root-first)
-    chain = Symbol[]
+    # Build ancestor chain for target scope (outermost first), short of the root
+    chain = ParseBranch[]
     s = target
-    while !isnothing(s)
+    while !isnothing(s) && !isnothing(s.parent)
         push!(chain, s)
-        s = get(scope_parent, s, nothing)
+        s = s.parent
     end
     reverse!(chain)
     # Find how many levels of the current stack match
@@ -361,7 +355,7 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     push!(exprs.segments, ValueSegment(
         bounds.nbits, kind, meta.label, meta.desc, meta.shortform,
         meta.argtype, argvar,
-        codegen.extract, codegen.impart, option))
+        codegen.extract, codegen.impart, if !isnothing(option) nctx[:current_branch] end))
     push!(exprs.print.direct, :(__segment_printed = $(length(exprs.segments))))
     push!(state.segment_outputs, kind => output)
     extend_bytespans!(exprs.bytespans, output.bytespans)

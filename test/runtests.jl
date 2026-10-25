@@ -3671,6 +3671,11 @@ end
         @test PP.parsebounds(ArmBounds) == (7, 8)
         @test PP.printbounds(ArmBounds) == (7, 8)
         check_roundtrips(ArmBounds, ("A1234-56", "Babc-56", "CC12-56"))
+        @test_throws "form '[A<0-9 × 4>][B<a-z × 3>][CC<0-9 × 2>]-<0-9 × 2>'" parse(ArmBounds, "")
+    end
+    @testset "error forms bracket each optional once" begin
+        eval(:(@defpacked FormNest ("v", digits(1), optional(".", digits(1), optional("-", digits(2))))))
+        @test_throws "form 'v<0-9 × 1>[.<0-9 × 1>[-<0-9 × 2>]]'" parse(FormNest, "")
     end
     @testset "keywords within a tuple arm" begin
         eval(:(@defpacked ArmKw (choice(("A", :x(digits(2)), base=16), ("B", :y(digits(3)))))))

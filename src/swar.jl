@@ -886,8 +886,18 @@ function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
     lencheck = emit_lengthcheck(state, nctx, total_bytes)
     result = ExprVarLine[
         :($regs = $lencheck && $sep_check),
-        :(if $regs; $(swar_body...) end),
-        :(if !$regs; $(fallback...) end)]
+        :(if $regs; $(swar_body...) end)]
+    # Grouped digits often come without their separators
+    if !isnothing(dspec.groups)
+        compact = gen_swar_chunks(state, nctx, grouped_chunks_and_check([maxdigits], skipbytes).chunks,
+                                  base, fnum, dI, :($regs = false))
+        push!(result, :(if !$regs && $(emit_lengthcheck(state, nctx, maxdigits))
+                            $regs = true
+                            $(compact...)
+                            $scanned = $maxdigits
+                        end))
+    end
+    push!(result, :(if !$regs; $(fallback...) end))
     rangecheck != :() && push!(result, rangecheck)
     if !directvar; push!(result, :($fieldvar = $numexpr)) end
     result

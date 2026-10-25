@@ -320,7 +320,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
     end
     # Stage 3: advance pos and record the matched option
     coerced_i = if ph.kind === :direct && ph.iT === cint; :i else :(i % $cint) end
-    action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end)),
+    action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end); keepbranch()),
                          record_match(cmatch, coerced_i)]
     guard_append!(action)
     push!(parts, :(if found; $(body...) end))
@@ -353,6 +353,7 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, cmatch::ChoiceM
         body = quote
             $(record_match(cmatch, :($(i % cint))))
             pos += $n
+            keepbranch()
         end
         chain = if isnothing(chain)
             Expr(:if, :($fit && !$nomatch), body)

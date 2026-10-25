@@ -412,3 +412,6 @@ Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt
     end
     pos
 end
+
+# Keeps the branch it's in from becoming a conditional move
+@inline keepbranch() = Base.llvmcall("call void asm sideeffect \"\", \"\"()\nret void", Cvoid, Tuple{})

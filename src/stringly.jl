@@ -167,8 +167,8 @@ function gen_static_lchop(prefixes::Vector{String}, casefold::Bool, peek::Bool)
         nb = ncodeunits(p)
         cond = :(nbytes - pos + 1 >= $nb && $(conjoin(gen_string_match(p, casefold))))
         peek && peeks(nb) && (cond = :($(gen_peek([p], casefold)) && $cond))
-        chain = if isnothing(chain) Expr(:if, cond, :(pos += $nb))
-        else Expr(:elseif, cond, :(pos += $nb), chain) end
+        chain = if isnothing(chain) Expr(:if, cond, :(pos += $nb; keepbranch()))
+        else Expr(:elseif, cond, :(pos += $nb; keepbranch()), chain) end
     end
     chain
 end

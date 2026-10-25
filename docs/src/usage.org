@@ -49,8 +49,8 @@ For a type ~T~ created by ~maketype~:
 | ~nbits(T)~                   | Logical bit width                            |
 | ~parsebounds(T)~             | =(min_bytes, max_bytes)= for parsing          |
 | ~printbounds(T)~             | =(min_bytes, max_bytes)= for output           |
-| ~segments(T)~                | Type-level schema: tuple of ~NamedTuple~s    |
-| ~segments(::T)~              | Instance values: tuple of ~(index, string)~  |
+| ~segments(T)~                | Layout: segments, choices and optionals      |
+| ~segments(::T)~              | Each segment's text, or ~nothing~ if absent  |
 
 ~parsebytes~ returns either an instance of ~T~ (on success) or an
 integer error index (on failure), paired with the byte position

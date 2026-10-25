@@ -104,7 +104,7 @@ function pattern_field!(exprs::PatternExprs,
     isempty(new_value_segs) && throw(ArgumentError("Field $(node.value) does not capture any value"))
     all_segs = @view exprs.segments[initial_segs+1:end]
     all_exclusive = length(new_value_segs) > 1 &&
-        length(new_value_segs) == length(all_segs) &&
+        all(s -> s.nbits > 0, all_segs) &&
         all(s -> !isnothing(s.condition), new_value_segs) &&
         allunique(Any[s.condition for s in new_value_segs])
     if all_exclusive
@@ -217,10 +217,16 @@ function walk_arm!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx, @nosp
     nctx = NodeCtx(nctx, :oprint_detect, odetect)
     nctx = NodeCtx(nctx, :optional_sentinel, sentinel)
     nctx = NodeCtx(nctx, :current_branch, child)
-    oexprs = PatternExprs(ExprVarLine[], PrintExprs(), exprs.segments, props, Vector{ByteSet}[])
+    oexprs = PatternExprs(ExprVarLine[], PrintExprs(), exprs.segments, props, Vector{ByteSet}[], Layout())
     arm === "" || pattern_dispatch!(oexprs, state, nctx, arm)
     child, oexprs, odetect
 end
+
+# The segment of `nbits` that select a choice's arm or mark an optional present, which prints nothing
+selector(nbits::Int, label::Symbol, desc::String) =
+    SegmentOutput(SegmentBounds(0:0, 0:0, nbits, nothing),
+                  SegmentCodegen(ExprVarLine[], ExprVarLine[], PrintExprs(), Expr[]),
+                  SegmentMeta(label, desc, "", nothing, nothing), Vector{ByteSet}[])
 
 # Parse an arm where its branch's length check allows; failing within, it jumps to `end_label`
 function arm_attempt(@nospecialize(popt), armvar::Symbol, end_label::Symbol, child::ParseBranch,
@@ -412,11 +418,12 @@ function pattern_choice_optional!(exprs::PatternExprs,
     seg_start = length(exprs.segments)
     bits_before = state.bits
     child, oexprs, odetect = walk_arm!(exprs, state, nctx, arm, optvar, end_label, sentinel_ref, exprs.properties)
-    if sentinel_ref[] === nothing
-        flag_nbits = (state.bits += 1)
-        push!(oexprs.parse, emit_pack(state, Bool, optvar, flag_nbits))
-        sentinel_ref[] = OptSentinel((flag_nbits, 1))
+    if isnothing(sentinel_ref[])
+        process_segment_output!(oexprs, state, nctx, :presence, selector(1, gensym(:optional), "present"))
+        push!(oexprs.parse, emit_pack(state, Bool, optvar, state.bits))
+        sentinel_ref[] = OptSentinel((state.bits, 1))
     end
+    push!(exprs.layout, SegmentOptions([oexprs.layout, nothing], [nothing, nothing]))
     sentinel = sentinel_ref[]
     check = :(!iszero($(emit_extract(state, sentinel.position, sentinel.nbits))))
     patch_optional_extracts!(exprs.segments, seg_start+1:length(exprs.segments), check)
@@ -467,7 +474,8 @@ function pattern_choice_multi!(exprs::PatternExprs,
     discrim_bits = cardbits(narms + 1)
     discrim_type = cardtype(discrim_bits)
     discrim_pos = state.bits + discrim_bits
-    state.bits += discrim_bits
+    process_segment_output!(exprs, state, nctx, :arm,
+                            selector(discrim_bits, something(tag_field, gensym(:choice)), "one of $narms options"))
     arm_base = state.bits
     arm_data = ChoiceArm[]
     for (k, arm) in enumerate(arms)
@@ -485,6 +493,9 @@ function pattern_choice_multi!(exprs::PatternExprs,
                                   seg_start+1:length(exprs.segments), bits_after))
     end
     state.bits = maximum(Int[ad.bits_after for ad in arm_data])
+    push!(exprs.layout, SegmentOptions([if arm === ""; nothing else ad.oexprs.layout end for (arm, ad) in zip(arms, arm_data)],
+                                       if isnothing(tag_values) fill(nothing, narms)
+                                       else Symbol[Symbol(if t isa QuoteNode t.value else t end) for t in tag_values] end))
     # Each arm starts where the choice does, so the choice spans their extremes
     parent.parsed_min += minimum(Int[ad.child.parsed_min - ad.child.start_min for ad in arm_data])
     parent.parsed_max += maximum(Int[ad.child.parsed_max - ad.child.start_min for ad in arm_data])

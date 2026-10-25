@@ -93,8 +93,8 @@ function assemble_type(exprs::PatternExprs, state::ParserState)
         print = assemble_print(exprs.print, state, name),
         propertynames = :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(Symbol[first(p) for p in props]))),
         properties = assemble_properties(props, exprs.segments, state, name),
-        segments_type = assemble_segments_type(exprs.segments, state, name),
-        segments_value = assemble_segments_value(exprs.segments, exprs.print, state, name),
+        segments_type = assemble_segments_type(exprs.layout, name),
+        segments_value = assemble_segments_value(length(exprs.segments), exprs.print, name),
         constructor = assemble_constructor(exprs.segments, props, state, name),
         show = assemble_show(props, name),
         isless = :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
@@ -341,58 +341,30 @@ end
 
 ## segments
 
-function assemble_segments_type(segs::Vector{ValueSegment}, ::ParserState, name::Symbol)
-    isempty(segs) && return :()
-    infos = Expr(:tuple)
-    for s in segs
-        s.nbits > 0 && push!(infos.args, (; s.nbits, s.kind, s.label, s.desc, s.shortform))
-    end
-    :(function $(GlobalRef(PackedParselets, :segments))(::Type{$(esc(name))})
-          $infos
-      end)
-end
+assemble_segments_type(layout::Layout, name::Symbol) =
+    :($(GlobalRef(PackedParselets, :segments))(::Type{$(esc(name))}) = $layout)
 
-function assemble_segments_value(segs::Vector{ValueSegment}, print::PrintExprs,
-                                  ::ParserState, name::Symbol)
-    isempty(segs) && return :()
-    M = PackedParselets
-    svars = Tuple{Int, Symbol}[]
-    pexprs2 = map(copy, print.direct)
-    resolve_print_markers!(pexprs2)
-    for expr in pexprs2
-        rewrite_segment_captures!(svars, segs, expr)
-    end
-    :(function $(GlobalRef(M, :segments))(val::$(esc(name)))
+function assemble_segments_value(nsegs::Int, print::PrintExprs, name::Symbol)
+    texts = Symbol[Symbol("seg", i) for i in 1:nsegs]
+    pexprs = copyexprs(print.direct)
+    resolve_print_markers!(pexprs)
+    foreach(rewrite_segment_captures!, pexprs)
+    :(function $(GlobalRef(PackedParselets, :segments))(val::$(esc(name)))
           io = IOBuffer()
-          $(Expr(:(=), Expr(:tuple, (s for (_, s) in svars)...), Expr(:tuple, ("" for _ in svars)...)))
-          $(pexprs2...)
-          $(Expr(:tuple, (Expr(:tuple, i, s) for (i, s) in svars)...))
+          $(Expr(:(=), Expr(:tuple, texts...), Expr(:tuple, fill(nothing, nsegs)...)))
+          $(pexprs...)
+          $(Expr(:tuple, texts...))
       end)
 end
 
-# Replace `__segment_printed = i` markers with `segN = takestring!(io)`,
-# building up the (segment_index, varname) list as we go.
-function rewrite_segment_captures!(segvars::Vector{Tuple{Int, Symbol}},
-                                   segs::Vector{ValueSegment},
-                                   expr::ExprVarLine)
-    expr isa Expr || return expr
+# Replace each `__segment_printed = i` marker with `seg$i = takestring!(io)`
+function rewrite_segment_captures!(@nospecialize(expr))
+    expr isa Expr || return
     if Meta.isexpr(expr, :(=)) && first(expr.args) === :__segment_printed
-        i = expr.args[2]::Int
-        if i > length(segvars)
-            anon = iszero(segs[i].nbits)
-            precount = 0; for j in 1:i-1; precount += segs[j].nbits > 0; end
-            push!(segvars, (if anon; 0 else precount + 1 end, Symbol("seg$i")))
-        end
-        var = last(segvars[i])
-        expr.args[1:2] = :($var = takestring!(io)).args
+        expr.args[1:2] = :($(Symbol("seg", expr.args[2])) = takestring!(io)).args
     else
-        for arg in expr.args
-            if arg isa Expr
-                rewrite_segment_captures!(segvars, segs, arg)
-            end
-        end
+        foreach(rewrite_segment_captures!, expr.args)
     end
-    expr
 end
 
 ## Property-segment resolution

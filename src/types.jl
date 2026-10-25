@@ -209,12 +209,33 @@ struct ValueSegment
 end
 
 """
+    Segment
+
+A segment of a packed type's layout, as `segments(T)` gives it: its `nbits`, the
+`kind` of pattern node it comes from, and its `label`, `desc`ription and `shortform`.
+"""
+const Segment = @NamedTuple{nbits::Int, kind::Symbol, label::Symbol, desc::String, shortform::String}
+
+"""
+    SegmentOptions
+
+A choice within a packed type's layout, between `options`: each a layout of its own,
+or `nothing` when empty, and named by the tag in `names`, where it has one.
+"""
+struct SegmentOptions
+    options::Vector{Union{Vector{Union{Segment, SegmentOptions}}, Nothing}}
+    names::Vector{Union{Symbol, Nothing}}
+end
+const Layout = Vector{Union{Segment, SegmentOptions}}
+
+"""
     PatternExprs
 
 Accumulator for the expression vectors built during pattern walking.
 
 Choice/optional arms construct instances that share `segments` and `properties`
-with the parent while owning separate `parse`, `print`, and `bytespans` vectors.
+with the parent while owning separate `parse`, `print`, `bytespans`, and `layout`
+vectors.
 """
 struct PatternExprs
     parse::Vector{ExprVarLine}
@@ -222,8 +243,9 @@ struct PatternExprs
     segments::Vector{ValueSegment}
     properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}}
     bytespans::Vector{Vector{ByteSet}}
+    layout::Layout
 end
-PatternExprs() = PatternExprs([], PrintExprs(), [], [], [])
+PatternExprs() = PatternExprs([], PrintExprs(), [], [], [], [])
 
 # A digit field's values and how they're stored: `dI` holds a value, `dT` its encoding,
 # which offsets values by `vmin`, and by one more when zero is claimed to mark absence

@@ -309,9 +309,8 @@ end
 A hash of the register window at byte `pos` (loaded as `iT`, OR-ed with `foldmask`
 when casefolding) that identifies each of a choice's options, from `find_window_hash`.
 
-- `kind`: `:direct` (the hash less `offset` is the option index), `:table`
-  (index = `table[hash]`), or `:bucketed` (up to two candidates per slot, the second
-  in `table2`)
+- `table`: the option index of each hash value, or empty when the hash less `offset`
+  is the option index; `table2` holds a second candidate per slot, when there are any
 - `perm`: option order matching the indices
 - `injective`: the hash alone distinguishes every window value (identity family),
   so the window's bytes need no further verification
@@ -323,7 +322,6 @@ struct HashPlan
     hash::WindowHash
     offset::Int
     perm::Vector{Int}
-    kind::Symbol
     table::Vector{Int}
     table2::Vector{Int}
     injective::Bool

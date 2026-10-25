@@ -2081,8 +2081,8 @@ end
                        "DL", "DM", "DS", "ET", "FL", "GL", "GR", "GT", "HC", "IR", "IT",
                        "LG", "LO", "MA", "MM", "MS", "NA", "NI", "OH", "OS", "PF", "PL",
                        "RO", "SC", "SD", "SE", "SI", "SY"]
-            @test isnothing(PP.find_window_hash(PP.classify_hash, lowercase.(classes), true))
-            @test PP.find_window_hash(PP.classify_bucketed, lowercase.(classes), true).kind === :bucketed
+            @test isnothing(PP.find_window_hash(lowercase.(classes), true, 1))
+            @test !isempty(PP.find_window_hash(lowercase.(classes), true, 2).table2)
             iddef = :(@defpacked BucketedChoice (:cls(choice($(classes...))), :id(digits(max=99))))
             @test parsebytes_complexity(iddef) == (branches=8:12, branch_total=12, ops=38:46)
             eval(iddef)

@@ -4113,6 +4113,8 @@ end
     # Unknown pattern node
     @test_throws ArgumentError PP.maketype(PP.CORE_SEGMENTS, @__MODULE__, :Bad,
         Expr(:call, :nonexistent_node, 42))
+    # A bare number in a pattern
+    @test_throws "got 42" PP.maketype(PP.CORE_SEGMENTS, @__MODULE__, :Bad1, :(("A", 42)))
     # digits: no width and no max
     @test_throws ArgumentError PP.maketype(PP.CORE_SEGMENTS, @__MODULE__, :Bad2,
         :(:x(digits())))

@@ -111,17 +111,6 @@ end
 
 ## State mutation helpers
 
-function inc_parsed!(nctx::NodeCtx, dmin, dmax)
-    b = nctx[:current_branch]
-    b.parsed_min += dmin
-    b.parsed_max += dmax
-end
-function inc_print!(nctx::NodeCtx, dmin, dmax)
-    b = nctx[:current_branch]
-    b.print_min += dmin
-    b.print_max += dmax
-end
-
 """
     register_errmsg!(state::ParserState, msg::String) -> Int
 
@@ -342,8 +331,11 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     if !isnothing(bounds.sentinel) && is_sentinel_unclaimed(nctx)
         nctx[:optional_sentinel][] = OptSentinel((state.bits + bounds.sentinel.offset, bounds.sentinel.width))
     end
-    inc_parsed!(nctx, first(bounds.parsed), last(bounds.parsed))
-    inc_print!(nctx, first(bounds.printed), last(bounds.printed))
+    b = nctx[:current_branch]
+    b.parsed_min += first(bounds.parsed)
+    b.parsed_max += last(bounds.parsed)
+    b.print_min += first(bounds.printed)
+    b.print_max += last(bounds.printed)
     # Route print expressions: getval hoisted to oprint_detect inside optionals
     (; direct, vars, getval, getlen, putval) = codegen.print
     append!(exprs.print.direct, direct)

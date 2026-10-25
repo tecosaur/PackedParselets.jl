@@ -269,6 +269,8 @@ Global mutable state for pattern compilation (bit width, branches, errors).
 
 - `supertype`: abstract supertype for the generated primitive type
 - `globals`: domain-specific keyword arguments for finalize hooks to read
+- `segments`: the registry of segment definitions patterns may use
+- `kwnames`: every keyword a pattern may set, the segments' and the globals'
 """
 mutable struct ParserState
     const name::Symbol
@@ -276,6 +278,8 @@ mutable struct ParserState
     bits::Int
     const supertype::Type
     const globals::NamedTuple
+    const segments::NamedTuple
+    const kwnames::Vector{Symbol}
     const branches::Vector{ParseBranch}
     const errconsts::Vector{String}
     const segment_outputs::Vector{Pair{Symbol, SegmentOutput}}

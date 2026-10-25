@@ -21,20 +21,19 @@ const CORE_SEGMENTS = (
 
 function pattern_dispatch!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
-                           @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                            @nospecialize(node), args::Vector{Any})
     if node isa QuoteNode
-        pattern_field!(exprs, state, nctx, segments, global_kwargs, node, args)
+        pattern_field!(exprs, state, nctx, node, args)
     elseif node === :seq
         for arg in args
-            pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, arg)
+            pattern_dispatch!(exprs, state, nctx, arg)
         end
     elseif node === :optional
-        pattern_optional!(exprs, state, nctx, segments, global_kwargs, args)
+        pattern_optional!(exprs, state, nctx, args)
     elseif node === :choice && any(a -> !(a isa String), args)
-        pattern_choice!(exprs, state, nctx, segments, global_kwargs, args)
-    elseif haskey(segments, node)
-        def = getfield(segments, node)
+        pattern_choice!(exprs, state, nctx, args)
+    elseif haskey(state.segments, node)
+        def = getfield(state.segments, node)
         output = def.compile(state, nctx, exprs, def, args)
         process_segment_output!(exprs, state, nctx, node, output)
     else
@@ -44,33 +43,27 @@ end
 
 function pattern_dispatch!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
-                           @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                            @nospecialize(thing))
-    all_kws = Symbol[]
-    for i in 1:length(segments), kw in getfield(segments, i).kwargs
-        push!(all_kws, kw)
-    end
-    append!(all_kws, global_kwargs)
     if Meta.isexpr(thing, :tuple)
         args = Any[]
         for arg in thing.args
             if Meta.isexpr(arg, :(=), 2)
                 kwname, kwval = arg.args
-                kwname ∈ all_kws ||
-                    throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(all_kws, ", "))"))
+                kwname ∈ state.kwnames ||
+                    throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(state.kwnames, ", "))"))
                 nctx = NodeCtx(nctx, kwname, kwval)
             else
                 push!(args, arg)
             end
         end
-        pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, :seq, args)
+        pattern_dispatch!(exprs, state, nctx, :seq, args)
     elseif Meta.isexpr(thing, :call)
         name = first(thing.args)
         args = Any[]
-        nkeys = if name isa Symbol && haskey(segments, name)
-            getfield(segments, name).kwargs
+        nkeys = if name isa Symbol && haskey(state.segments, name)
+            getfield(state.segments, name).kwargs
         else
-            all_kws
+            state.kwnames
         end
         for arg in thing.args[2:end]
             if Meta.isexpr(arg, :kw, 2)
@@ -82,9 +75,9 @@ function pattern_dispatch!(exprs::PatternExprs,
                 push!(args, arg)
             end
         end
-        pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, name, args)
+        pattern_dispatch!(exprs, state, nctx, name, args)
     elseif thing isa String
-        def = getfield(segments, :literal)
+        def = getfield(state.segments, :literal)
         output = def.compile(state, nctx, exprs, def, Any[thing])
         process_segment_output!(exprs, state, nctx, :literal, output)
     end
@@ -95,7 +88,7 @@ end
 copyexprs(exprs::AbstractVector) = ExprVarLine[if e isa Expr copy(e) else e end for e in exprs]
 
 """
-    pattern_field!(exprs, state, nctx, segments, global_kwargs, node, args)
+    pattern_field!(exprs, state, nctx, node, args)
 
 Handle a `QuoteNode` field-capture node (`:major(digits(4))`). Opens a
 `:fieldvar` scope, walks children, then assembles a property expression —
@@ -104,7 +97,6 @@ reconstruction for multi-segment fields.
 """
 function pattern_field!(exprs::PatternExprs,
                         state::ParserState, nctx::NodeCtx,
-                        @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                         node::QuoteNode,
                         args::Vector{Any})
     isnothing(get(nctx, :fieldvar, nothing)) || throw(ArgumentError("Fields may not be nested"))
@@ -112,7 +104,7 @@ function pattern_field!(exprs::PatternExprs,
     initial_segs = length(exprs.segments)
     initialprints = length(exprs.print.direct)
     for arg in args
-        pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, arg)
+        pattern_dispatch!(exprs, state, nctx, arg)
     end
     new_value_segs = filter(s -> !isnothing(s.argtype), @view exprs.segments[initial_segs+1:end])
     isempty(new_value_segs) && throw(ArgumentError("Field $(node.value) does not capture any value"))
@@ -217,14 +209,13 @@ function arm_clear_bits(state::ParserState, bits_before::Int)
         Core.Intrinsics.not_int(Core.Intrinsics.shl_int($mask, __packed_shift($(state.bits))))))]
 end
 
-function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx,
-                          @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}), @nospecialize(arm))
+function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx, @nospecialize(arm))
     if Meta.isexpr(arm, :tuple)
         for a in arm.args
-            pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, a)
+            pattern_dispatch!(oexprs, state, nctx, a)
         end
     else
-        pattern_dispatch!(oexprs, state, nctx, segments, global_kwargs, arm)
+        pattern_dispatch!(oexprs, state, nctx, arm)
     end
 end
 
@@ -366,7 +357,7 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Sym
 end
 
 """
-    pattern_choice!(exprs, state, nctx, segments, global_kwargs, arms)
+    pattern_choice!(exprs, state, nctx, arms)
 
 Unified handler for choice and optional branching. `arms` is a list of pattern
 nodes to try in order; `""` as an arm matches zero bytes (the optional absent
@@ -378,7 +369,6 @@ Two paths:
 """
 function pattern_choice!(exprs::PatternExprs,
                          state::ParserState, nctx::NodeCtx,
-                         @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                          args::Vector{Any})
     # Detect tagged choice: choice(:fieldname, tag1 => arm1, tag2 => arm2, ...)
     tagged = length(args) >= 2 && args[1] isa QuoteNode &&
@@ -387,7 +377,7 @@ function pattern_choice!(exprs::PatternExprs,
         fieldname = args[1].value::Symbol
         tags = Any[a.args[2] for a in @view args[2:end]]
         arms = Any[a.args[3] for a in @view args[2:end]]
-        pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms;
+        pattern_choice_multi!(exprs, state, nctx, arms;
                               tag_field=fieldname, tag_values=tags)
     else
         # Arms differing only in a leading literal are a string choice before what they share
@@ -399,19 +389,18 @@ function pattern_choice!(exprs::PatternExprs,
             push!(heads, first(parts)); rest = parts[2:end]
         end
         length(heads) == length(args) &&
-            return pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, :seq, pushfirst!(rest, Expr(:call, :choice, heads...)))
+            return pattern_dispatch!(exprs, state, nctx, :seq, pushfirst!(rest, Expr(:call, :choice, heads...)))
         nonempty_arms = filter(a -> a !== "", args)
         if length(nonempty_arms) == 1 && length(args) == 2
-            pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs,
-                                     only(nonempty_arms))
+            pattern_choice_optional!(exprs, state, nctx, only(nonempty_arms))
         else
-            pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, args)
+            pattern_choice_multi!(exprs, state, nctx, args)
         end
     end
 end
 
 """
-    pattern_choice_optional!(exprs, state, nctx, segments, global_kwargs, arm)
+    pattern_choice_optional!(exprs, state, nctx, arm)
 
 Handle single-arm-plus-empty optional via sentinel claiming. Walks the arm in
 a child branch, steals a zero-encoding sentinel from a value segment (or
@@ -419,7 +408,6 @@ allocates a presence bit), then emits guarded parse/print with pos rewind.
 """
 function pattern_choice_optional!(exprs::PatternExprs,
                                   state::ParserState, nctx::NodeCtx,
-                                  @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                                   @nospecialize(arm))
     popt = get(nctx, :optional, nothing)
     optvar = gensym("optional")
@@ -440,7 +428,7 @@ function pattern_choice_optional!(exprs::PatternExprs,
     bits_before = state.bits
     oexprs = PatternExprs(ExprVarLine[], PrintExprs(),
                           exprs.segments, exprs.properties, Vector{ByteSet}[])
-    walk_choice_arm!(oexprs, state, nctx, segments, global_kwargs, arm)
+    walk_choice_arm!(oexprs, state, nctx, arm)
     if sentinel_ref[] === nothing
         flag_nbits = (state.bits += 1)
         push!(oexprs.parse, emit_pack(state, Bool, optvar, flag_nbits))
@@ -491,7 +479,7 @@ struct ChoiceArm
 end
 
 """
-    pattern_choice_multi!(exprs, state, nctx, segments, global_kwargs, arms)
+    pattern_choice_multi!(exprs, state, nctx, arms)
 
 Handle multi-arm structured choice with an explicit packed discriminant.
 Walks each arm into its own accumulator, selects between table-driven
@@ -500,7 +488,6 @@ or cascading try-rewind, and emits separate print blocks per arm.
 """
 function pattern_choice_multi!(exprs::PatternExprs,
                                state::ParserState, nctx::NodeCtx,
-                               @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                                arms::Vector{Any};
                                tag_field::Union{Nothing, Symbol}=nothing,
                                tag_values::Union{Nothing, Vector{Any}}=nothing)
@@ -535,7 +522,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
         arm_props = Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}[]
         oexprs = PatternExprs(ExprVarLine[], PrintExprs(),
                               exprs.segments, arm_props, Vector{ByteSet}[])
-        arm !== "" && walk_choice_arm!(oexprs, state, arm_nctx, segments, global_kwargs, arm)
+        arm !== "" && walk_choice_arm!(oexprs, state, arm_nctx, arm)
         bits_after = state.bits
         dval = gensym("discrim")
         push!(oexprs.parse, :($dval = $(discrim_type(k))))
@@ -749,12 +736,11 @@ end
 
 function pattern_optional!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
-                           @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}}), @nospecialize(global_kwargs::Tuple{Vararg{Symbol}}),
                            args::Vector{Any})
     arm = if all(a -> a isa String, args)
         Expr(:call, :choice, join(Vector{String}(args)), "")
     else
         Expr(:tuple, args...)
     end
-    pattern_choice!(exprs, state, nctx, segments, global_kwargs, Any[arm, ""])
+    pattern_choice!(exprs, state, nctx, Any[arm, ""])
 end

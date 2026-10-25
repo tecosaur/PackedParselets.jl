@@ -1,13 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Register-loading and byte-comparison primitives for pattern codegen.
-#
-# Three layers:
-#   1. Register decomposition: break byte counts into typed register chunks
-#   2. Packing: encode compile-time string data into register values with masks
-#   3. Codegen: emit Expr nodes that load from data and compare at runtime
-
 ## Register decomposition
 
 const REGISTER_TYPES = let types = DataType[UInt8]
@@ -31,12 +24,7 @@ end
 
 const RegisterChunk = @NamedTuple{offset::Int, width::Int, iT::DataType}
 
-"""
-    register_chunks(nbytes::Int) -> Vector{RegisterChunk}
-
-Decompose `nbytes` into a sequence of descending power-of-2 register-sized
-chunks covering the byte range.
-"""
+# Descending power-of-2 register chunks covering `nbytes`
 function register_chunks(nbytes::Int)
     chunks = RegisterChunk[]
     off, remaining = 0, nbytes
@@ -79,13 +67,8 @@ end
 
 Compute a masked register value for comparing `chunk` against `str`.
 
-For each byte position in the chunk: valid bytes get mask `0xFF` (exact match)
-or `0xDF` (case-insensitive alpha when `casefold` is true), and overflow bytes
-(beyond `valid`) get mask `0x00`. The returned `value` is already AND-ed with
-the mask.
-
-This encapsulates the recurring `build_chunk_mask` + `pack_bytes & mask` pattern
-used across string matching, choice verification, and tail checking.
+Bytes within `valid` get mask `0xFF` (exact match) or `0xDF` (letters, when
+`casefold`); bytes beyond it get `0x00`. The returned `value` is already masked.
 """
 function pack_chunk(str::String, chunk::RegisterChunk,
                     casefold::Bool, valid::Int = min(chunk.width, ncodeunits(str) - chunk.offset))

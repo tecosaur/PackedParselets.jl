@@ -1,12 +1,6 @@
 # SPDX-FileCopyrightText: © 2026 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Core types for the PackedParselets compilation pipeline.
-#
-# All data structures used during compilation: type aliases, segment
-# handler types (SegmentOutput, SegmentDef), pattern walking state
-# (PatternExprs, ParserState, ParseBranch), and value segment schema.
-
 ## Type aliases
 
 const ExprVarLine = Union{Expr, Symbol, LineNumberNode}
@@ -35,10 +29,10 @@ Byte and bit budget declared by a segment handler.
 - `sentinel`: optional sentinel spec for absence encoding (`nothing` = no sentinel)
 """
 struct SegmentBounds
-    parsed::UnitRange{Int}       # bytes consumed from input (min:max)
-    printed::UnitRange{Int}      # bytes produced in output (min:max)
-    nbits::Int                   # bits to allocate (0 for non-value segments)
-    sentinel::Union{Nothing, SentinelSpec}  # absence sentinel location, or nothing
+    parsed::UnitRange{Int}
+    printed::UnitRange{Int}
+    nbits::Int
+    sentinel::Union{Nothing, SentinelSpec}
 end
 
 """
@@ -76,10 +70,10 @@ Expression vectors produced by a segment handler.
 - `impart`: user argument -> raw value for bit-packing (for the constructor)
 """
 struct SegmentCodegen
-    parse::Vector{ExprVarLine}        # input bytes -> value var
-    extract::Vector{ExprVarLine}      # raw bits -> user-facing value (full extract for segments)
-    print::PrintExprs                 # output expression bundle
-    impart::Vector{Expr}               # user arg -> raw value for packing
+    parse::Vector{ExprVarLine}
+    extract::Vector{ExprVarLine}
+    print::PrintExprs
+    impart::Vector{Expr}
 end
 
 """
@@ -95,12 +89,12 @@ Metadata describing a segment for introspection and error messages.
 - `context`: handler-specific data for finalize hooks (nothing by default)
 """
 struct SegmentMeta
-    label::Symbol                # field name or gensym for anonymous
-    desc::String                 # human-readable description
-    shortform::String            # compact pattern notation for error messages
-    argtype::Union{Symbol, DataType, Nothing}  # type annotation for constructor, or nothing
-    argvar::Union{Nothing, Symbol} # parameter placeholder in impart
-    context::Any                 # handler-specific data for finalize hooks
+    label::Symbol
+    desc::String
+    shortform::String
+    argtype::Union{Symbol, DataType, Nothing}
+    argvar::Union{Nothing, Symbol}
+    context::Any
 end
 SegmentMeta(label, desc, shortform, argtype, argvar) =
     SegmentMeta(label, desc, shortform, argtype, argvar, nothing)
@@ -202,13 +196,13 @@ end
 Schema for a single value-carrying pattern node in the packed representation.
 """
 struct ValueSegment
-    nbits::Int                            # bits consumed in packed representation
-    kind::Symbol                          # :digits, :choice, :letters, :alphnum, :hex, :charset, :literal, :skip
+    nbits::Int
+    kind::Symbol                          # segment registry name, e.g. :digits
     label::Symbol                         # attr_fieldname (inside field) or gensym (anonymous)
-    desc::String                          # human-readable description
-    shortform::String                     # compact pattern notation for error messages
-    argtype::Union{Symbol, DataType, Nothing}  # type annotation for constructor, or nothing (non-parameterisable)
-    argvar::Symbol                        # gensym used as parameter placeholder in impart
+    desc::String
+    shortform::String
+    argtype::Union{Symbol, DataType, Nothing}  # nothing when not a constructor parameter
+    argvar::Symbol                        # parameter placeholder in impart
     extract::Vector{ExprVarLine}          # bits → typed value (last expr is the value)
     impart::Vector{Expr}                   # argvar → packed bits (validate + encode + orshift)
     condition::Union{Nothing, ParseBranch}  # the optional branch holding it, nothing if required

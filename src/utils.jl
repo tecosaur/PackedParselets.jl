@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 TEC <contact@tecosaur.net>
 # SPDX-License-Identifier: MPL-2.0
 
-# Runtime functions called by code generated from pattern compilation.
-#
-# Three families:
-# - Parsing: parseint, parsechars (digit/character scanning from byte vectors)
-# - IO printing: printchars, chars2string (character unpacking to IO/String)
-# - Buffer printing: bufprint (direct Memory{UInt8} output)
+# Runtime functions called by generated code.
 
 ## Invalid values
 
@@ -19,7 +14,7 @@
     takestring!(io::IO) = String(take!(io))
 end
 
-const unsafe_takestring = @static VERSION < v"1.12-" ? String : Base.unsafe_takestring
+const unsafe_takestring = @static if VERSION < v"1.12-"; String else Base.unsafe_takestring end
 
 ## Load bounds
 
@@ -36,14 +31,12 @@ peekbyte(data::Base.CodeUnits{UInt8, <:Union{String, SubString{String}}}, pos::I
 ## Character parsing
 
 """
-    parsechars(::Type{P}, bytes, pos, maxlen, ranges, casefold[, oneindexed]) -> (Int, P)
+    parsechars(::Type{P}, bytes, pos, maxlen, ranges, casefold[, oneindexed, skip]) -> (Int, P[, Int])
 
-Scan up to `maxlen` bytes from `bytes` at `pos`, mapping each to a 0-based
-index via the given byte `ranges` and packing MSB-first into `P`.
+Scan up to `maxlen` characters from `bytes` at `pos`, mapping each to an index
+over the concatenated `ranges` and packing MSB-first into `P`.
 
-Ranges map contiguously: the first covers indices 0:length(r1)-1, the
-second continues from there, etc. When `casefold` is true, input bytes
-are lowercased before matching. Returns `(chars_consumed, packed_value)`.
+Returns `(chars_consumed, packed_value)`, plus the bytes scanned when `skip` is given.
 """
 function parsechars(::Type{P}, bytes::AbstractVector{UInt8}, pos::Int, maxlen::Int,
                     ranges::NTuple{N, UnitRange{UInt8}},
@@ -190,11 +183,6 @@ end
     last(last(ranges)) + 0x01 + idx
 end
 
-"""
-    printchars(io::IO, packed::Unsigned, nchars, ranges[, oneindexed])
-
-Unpack `nchars` characters from `packed` and write them to `io`.
-"""
 function printchars(io::IO, packed::P, nchars::Int,
                     ranges::NTuple{N, UnitRange{UInt8}},
                     oneindexed::Bool = false) where {P <: Unsigned, N}
@@ -218,11 +206,6 @@ the widths no value can have.
 """
 printdigits(io::IO, num::Integer, base::Int, pad::Int, ::Int) = print(io, string(num; base, pad = Base.max(pad, 1)))
 
-"""
-    chars2string(packed::Unsigned, nchars, ranges[, oneindexed]) -> String
-
-Unpack `nchars` characters from `packed` into a `String`.
-"""
 function chars2string(packed::P, nchars::Int,
                       ranges::NTuple{N, UnitRange{UInt8}},
                       oneindexed::Bool = false) where {P <: Unsigned, N}
@@ -239,7 +222,7 @@ function bufprint(buf::Memory{UInt8}, pos::Int, str::String)
     pos + n
 end
 
-# Radix-100 digit pair table for two-at-a-time decimal output.
+# Digit pairs, tens digit in the low byte for a little-endian UInt16 store
 const RADIX100 = Tuple(UInt16(UInt8('0') + i % 10) << 8 | UInt16(UInt8('0') + i ÷ 10)
                        for i in 0:99)
 
@@ -341,8 +324,7 @@ end
 
 # Only values wider than a UInt32 come here, so wider than any padding that sends them
 @noinline function bufprint_decimal64(buf::Memory{UInt8}, pos::Int, num::UInt64)
-    # Split into ≤8-digit UInt32 chunks via divrem by 10^8.
-    # UInt64 max ≈ 1.8×10^19 → at most three chunks (4+8+8 digits).
+    # UInt64 max ≈ 1.8×10^19: at most three chunks of 10^8 (4+8+8 digits)
     hi, lo = divrem(num, UInt64(100_000_000))
     if hi <= typemax(UInt32)
         pos = bufprint_decimal32(buf, pos, hi % UInt32, 0)

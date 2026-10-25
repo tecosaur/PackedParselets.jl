@@ -69,7 +69,7 @@ function exprclean!(expr::Expr)
         return exprclean!(first(expr.args))
     elseif expr.head in (:symbolicgoto, :symboliclabel)
         # Julia <1.12 expands these macros along with the rest
-        mac = Symbol(expr.head === :symbolicgoto ? "@goto" : "@label")
+        mac = Symbol(if expr.head === :symbolicgoto; "@goto" else "@label" end)
         return Expr(:macrocall, mac, LineNumberNode(0, Symbol("")), expr.args[1])
     elseif expr.head == :escape
         return if first(expr.args) isa Expr

@@ -74,7 +74,7 @@ function choice_setup(state::ParserState, nctx::NodeCtx, options::Vector{Any})
     valtype in (:Symbol, :String) ||
         throw(ArgumentError("choice type must be Symbol or String, got $valtype"))
     (; sopts, fieldvar, option, allowempty, cbits, cint,
-       guarded, matcher, target, claims, valtype)
+       guarded, target, claims, valtype)
 end
 
 """
@@ -167,12 +167,8 @@ stored; the segment always prints the single `target` string. Allocates no
 bits and emits zero-width print/extract codegen.
 """
 function compile_choice_fixed(::ParserState, nctx::NodeCtx, @nospecialize(ctx))
-    (; sopts, fieldvar, allowempty, cint, guarded, matcher, target) = ctx
-    pexprs = if any(isempty, sopts)
-        ExprVarLine[matcher]
-    else
-        ExprVarLine[:($fieldvar = zero($cint)), guarded]
-    end
+    (; sopts, fieldvar, allowempty, cint, guarded, target) = ctx
+    pexprs = ExprVarLine[:($fieldvar = zero($cint)), guarded]
     pmin = if allowempty 0 else minimum(ncodeunits, sopts) end
     tlen = ncodeunits(target)
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
@@ -205,14 +201,14 @@ May reorder options to match hash output order.
 """
 function build_choice_matcher(state::ParserState, nctx::NodeCtx, cmatch::ChoiceMatch)
     (; mopts, casefold) = cmatch
-    ph = find_window_hash(classify_hash, mopts, casefold)
+    ph = find_window_hash(mopts, casefold, 1)
     minbucketed = if allequal(map(ncodeunits, mopts))
         BUCKETED_MIN_FIXED_OPTIONS
     else
         BUCKETED_MIN_VARIABLE_OPTIONS
     end
     if isnothing(ph) && length(mopts) >= minbucketed
-        ph = find_window_hash(classify_bucketed, mopts, casefold)
+        ph = find_window_hash(mopts, casefold, 2)
     end
     if !isnothing(ph)
         build_hash_matcher(state, nctx, ph, cmatch)
@@ -249,28 +245,11 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
         nothing
     end
     vt = gen_verify_table(mopts, casefold, hash_skip)
-    # Try backward-aligned single-register verify when prior parsed content provides safety
-    b = nctx[:current_branch]
-    bvc = backward_verify_chunk(minoptlen)
-    use_backward = !isnothing(bvc) && !variable_len && b.parsed_min >= bvc.padding
-    bve = if use_backward
-        gen_backward_verify(mopts, casefold, minoptlen, bvc, fieldvar, hash_skip)
-    else
-        nothing
-    end
-    # Try widening the verify table when it reduces chunk count (skipped when backward is available)
-    wide_minlen = min(nextpow(2, minoptlen), sizeof(UInt) * cld(minoptlen, sizeof(UInt)))
-    use_wide_vt = !use_backward && isnothing(hash_skip) && wide_minlen > minoptlen &&
-        length(register_chunks(wide_minlen)) < length(vt.chunks)
-    vt_wide = if use_wide_vt
-        gen_verify_table(mopts, casefold, nothing, wide_minlen)
-    else
-        nothing
-    end
-    tailcheck = if variable_len; gen_tail_verify(mopts, casefold, minoptlen, nctx[:current_branch].parsed_min) end
+    parsed_min = nctx[:current_branch].parsed_min
+    tailcheck = if variable_len; gen_tail_verify(mopts, casefold, minoptlen, parsed_min) end
     # Index resolution depends on hash kind
     nopts = length(mopts)
-    resolve_i = if ph.kind === :direct
+    resolve_i = if isempty(ph.table)
         boundscheck = if nopts == 1
             :(i == 1)
         else
@@ -301,30 +280,29 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
         append!(body, ExprVarLine[:(optlen = $(optlens)[i]),
                                   :(found = $optlencheck)])
     end
-    # Stage 2: byte verification (backward, widened, normal, or tail-only)
-    and_tail(checks) = if isnothing(tailcheck) checks else :($checks && $tailcheck) end
-    if use_backward
-        guard_append!(ExprVarLine[bve.destructure..., :(found = $(and_tail(bve.checks)))])
-    elseif use_wide_vt
-        ve = gen_verify_exprs(vt, fieldvar)
-        ve_wide = gen_verify_exprs(vt_wide, fieldvar)
-        wide_block = Expr(:block, ve_wide.destructure..., :(found = $(and_tail(ve_wide.checks))))
-        narrow_block = Expr(:block, ve.destructure..., :(found = $(and_tail(ve.checks))))
-        guard_append!(ExprVarLine[Expr(:if, emit_static_lengthcheck(state, nctx, wide_minlen),
-                                       wide_block, narrow_block)])
+    # Stage 2: byte verification: backward-aligned in one register when what's parsed
+    # before covers the read, else widened when that takes fewer registers
+    verify(ve) = ExprVarLine[ve.destructure..., :(found = $(if isnothing(tailcheck) ve.checks else :($(ve.checks) && $tailcheck) end))]
+    bvc = backward_verify_chunk(minoptlen)
+    wide_n = widened(minoptlen)
+    if !isnothing(bvc) && !variable_len && parsed_min >= bvc.padding
+        guard_append!(verify(gen_backward_verify(mopts, casefold, minoptlen, bvc, fieldvar, hash_skip)))
+    elseif isnothing(hash_skip) && !isnothing(wide_n)
+        wide = gen_verify_exprs(gen_verify_table(mopts, casefold, nothing, wide_n), fieldvar)
+        guard_append!(ExprVarLine[Expr(:if, emit_static_lengthcheck(state, nctx, wide_n),
+                                       Expr(:block, verify(wide)...), Expr(:block, verify(gen_verify_exprs(vt, fieldvar))...))])
     elseif !isempty(vt.chunks)
-        ve = gen_verify_exprs(vt, fieldvar)
-        guard_append!(ExprVarLine[ve.destructure..., :(found = $(and_tail(ve.checks)))])
+        guard_append!(verify(gen_verify_exprs(vt, fieldvar)))
     elseif !isnothing(tailcheck)
         guard_append!(ExprVarLine[:(found = $tailcheck)])
     end
     # Stage 3: advance pos and record the matched option
-    coerced_i = if ph.kind === :direct && ph.iT === cint; :i else :(i % $cint) end
+    coerced_i = if isempty(ph.table) && ph.iT === cint; :i else :(i % $cint) end
     action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end); keepbranch()),
                          record_match(cmatch, coerced_i)]
     guard_append!(action)
     push!(parts, :(if found; $(body...) end))
-    if ph.kind === :bucketed
+    if !isempty(ph.table2)
         # A slot holds up to two options: when the first fails to verify, try the second.
         retry = copyexprs(body)
         push!(parts, :(if !found && 1 <= hi <= $(length(ph.table2))
@@ -416,19 +394,17 @@ function hashexpr(ph::HashPlan, x)
 end
 
 """
-    find_window_hash(classify, options::Vector{String}, casefold::Bool) -> Union{HashPlan, Nothing}
+    find_window_hash(options::Vector{String}, casefold::Bool, depth::Int) -> Union{HashPlan, Nothing}
 
 Search register-sized byte windows over `options`, under the `hash_candidates`
-families, for the cheapest hash that `classify` accepts:
-- `classify_hash`: a minimal perfect hash, cost-ranked direct+injective (0) >
-  direct (1) > small table > large table. Injective (identity-family) results let
-  `find_best_hash_skip` elide verification bytes the hash covers.
-- `classify_bucketed`: up to two options per slot (`kind = :bucketed`), for sets
-  too large for a perfect hash to be found.
+families, for the cheapest hash that puts at most `depth` options in each slot,
+cost-ranked direct+injective (0) > direct (1) > small table > large table. Injective
+(identity-family) results let `find_best_hash_skip` elide verification bytes the
+hash covers. A depth of two serves sets too large for a perfect hash to be found.
 
 Returns `nothing` when no hash is accepted.
 """
-function find_window_hash(classify::F, options::Vector{String}, casefold::Bool) where {F}
+function find_window_hash(options::Vector{String}, casefold::Bool, depth::Int)
     nopts = length(options)
     iszero(nopts) && return nothing
     minlen = minimum(ncodeunits, options)
@@ -456,10 +432,9 @@ function find_window_hash(classify::F, options::Vector{String}, casefold::Bool) 
             for (; hash, injective) in hash_candidates(nopts, iT)
                 hvals = UInt64[hashvalue(hash, v, iT) for v in values]
                 any(iszero, hvals) && continue
-                classified = classify(hvals, pos, iT, foldmask, hash, injective)
+                classified = classify_window(hvals, pos, iT, foldmask, hash, injective, depth)
                 isnothing(classified) && continue
                 cost, plan = classified
-                cost += plan.kind === :direct && !injective
                 if cost < bestcost
                     best, bestcost = plan, cost
                 end
@@ -470,40 +445,25 @@ function find_window_hash(classify::F, options::Vector{String}, casefold::Bool) 
     best
 end
 
-function classify_hash(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask::UInt64,
-                       hash::WindowHash, injective::Bool; max_tablelen::Int = 4 * length(hvals))
+# A plan for hash values `hvals` putting at most `depth` options in a slot, and its cost:
+# direct when they're consecutive, so the hash less an offset is the option index, else
+# by `table`, and `table2` for the second option in a slot
+function classify_window(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask::UInt64,
+                         hash::WindowHash, injective::Bool, depth::Int)
     nopts = length(hvals)
-    allunique(hvals) || return nothing
     sorted_indices = sortperm_by(identity, hvals)
     lo, hi = Int(hvals[first(sorted_indices)]), Int(hvals[last(sorted_indices)])
-    # Direct: consecutive values, so the hash less an offset is the option index
-    if hi - lo + 1 == nopts
-        return (0, HashPlan(pos, iT, foldmask, hash, lo - 1, sorted_indices, :direct,
-                            Int[], Int[], injective))
+    if hi - lo + 1 == nopts && allunique(hvals)
+        return (Int(!injective), HashPlan(pos, iT, foldmask, hash, lo - 1, sorted_indices, Int[], Int[], injective))
     end
-    # Table lookup (original order, no permutation needed)
-    hi > max_tablelen && return nothing
-    table = zeros(Int, hi)
+    hi > 4nopts && return nothing
+    table, table2 = zeros(Int, hi), zeros(Int, if depth > 1 hi else 0 end)
     for (i, h) in enumerate(hvals)
-        table[h] = i
-    end
-    (2 * nopts + hi, HashPlan(pos, iT, foldmask, hash, 0, collect(1:nopts), :table,
-                              table, Int[], injective))
-end
-
-function classify_bucketed(hvals::Vector{UInt64}, pos::Int, iT::DataType, foldmask::UInt64,
-                           hash::WindowHash, injective::Bool; max_tablelen::Int = 4 * length(hvals))
-    nopts = length(hvals)
-    maxval = Int(maximum(hvals))
-    maxval > max_tablelen && return nothing
-    table, table2 = zeros(Int, maxval), zeros(Int, maxval)
-    for (i, h) in enumerate(hvals)
-        slots = if iszero(table[h]) table elseif iszero(table2[h]) table2 else return nothing end
+        slots = if iszero(table[h]) table elseif depth > 1 && iszero(table2[h]) table2 else return nothing end
         slots[h] = i
     end
-    # Each second candidate is a potential extra verify
-    (2 * nopts + maxval + count(!iszero, table2),
-     HashPlan(pos, iT, foldmask, hash, 0, collect(1:nopts), :bucketed, table, table2, injective))
+    # Each second option is a potential extra verify
+    (2nopts + hi + count(!iszero, table2), HashPlan(pos, iT, foldmask, hash, 0, collect(1:nopts), table, table2, injective))
 end
 
 """

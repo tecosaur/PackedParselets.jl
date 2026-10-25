@@ -363,12 +363,12 @@ function try_perfect_hash_dispatch(arm_spans, narms::Int, min_len::Int, reg::Sym
         push!(prefixes, String(bytes))
     end
     allunique(prefixes) || return nothing
-    ph = find_window_hash(classify_hash, prefixes, casefold)
+    ph = find_window_hash(prefixes, casefold, 1)
     isnothing(ph) && return nothing
     fm = ph.foldmask % ph.iT
     hx = hashexpr(ph, if iszero(fm) reg else :($reg | $fm) end)
     # Arms are found as a string choice's options are: by table, or in the hash's output order
-    idx = if ph.kind === :table
+    idx = if !isempty(ph.table)
         :(if $hx <= $(length(ph.table)); @inbounds($(Tuple(map(UInt8, ph.table)))[$hx]) else 0x00 end)
     elseif ph.perm == 1:narms; hx
     else :(@inbounds $(Tuple(map(UInt8, ph.perm)))[$hx]) end

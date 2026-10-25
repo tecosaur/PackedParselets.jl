@@ -133,16 +133,10 @@ wide and narrow paths gated by `emit_static_lengthcheck`, so that
 """
 function gen_literal_mismatch(state::ParserState, nctx::NodeCtx,
                               str::String, casefold::Bool)
-    litlen = ncodeunits(str)
-    wide_n = min(nextpow(2, litlen), sizeof(UInt) * cld(litlen, sizeof(UInt)))
-    use_wide = wide_n > litlen && length(register_chunks(wide_n)) < length(register_chunks(litlen))
-    if use_wide
-        wide_mm = negate_match(gen_string_match(str, casefold, wide_n))
-        narrow_mm = negate_match(gen_string_match(str, casefold))
-        Expr(:if, emit_static_lengthcheck(state, nctx, wide_n), wide_mm, narrow_mm)
-    else
-        negate_match(gen_string_match(str, casefold))
-    end
+    wide_n = widened(ncodeunits(str))
+    narrow_mm = negate_match(gen_string_match(str, casefold))
+    isnothing(wide_n) && return narrow_mm
+    Expr(:if, emit_static_lengthcheck(state, nctx, wide_n), negate_match(gen_string_match(str, casefold, wide_n)), narrow_mm)
 end
 
 ## Prefix stripping

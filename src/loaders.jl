@@ -50,6 +50,12 @@ function register_chunks(nbytes::Int)
     chunks
 end
 
+# A wider read covering `nbytes` in fewer registers, when there is one
+function widened(nbytes::Int)
+    n = min(nextpow(2, nbytes), sizeof(UInt) * cld(nbytes, sizeof(UInt)))
+    if n > nbytes && length(register_chunks(n)) < length(register_chunks(nbytes)) n end
+end
+
 # Returns (; iT, padding) when a backward-aligned register load reduces chunk
 # count for nbytes verification, nothing when already power-of-2 aligned.
 function backward_verify_chunk(nbytes::Int)

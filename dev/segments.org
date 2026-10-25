@@ -267,16 +267,14 @@ parse of a single random digit (about 3 cycles, mostly benchmark loop and the
 parser's fixed cost). Variable widths take lengths uniformly across their range,
 and are per mean byte.
 
-| Segment                             | Width | Cycles/byte |
-|-------------------------------------+-------+-------------|
-| Literal                             |    16 | ≈ 0.1       |
-| ~digits~, fixed width               |  8/16 | 0.4/0.6     |
-| ~digits~, variable width            |  1--8 | 1.7         |
-|                                     | 1--16 | 3.9         |
-| ~hex~, ~letters~, fixed width       |    16 | 0.9--1.1    |
-| ~alphnum~, ~charset~, fixed width   |    16 | 1.3         |
-| Character sequences, variable width |  1--8 | 3.2         |
-|                                     | 1--16 | 5.4         |
+| Segment                             |      Width | Cycles/byte |
+|-------------------------------------+------------+-------------|
+| Literal                             |         16 | ≈ 0.1       |
+| ~digits~, fixed width               |       8/16 | 0.4/0.6     |
+| ~digits~, variable width            | 1--8/1--16 | 1.7/3.9     |
+| ~hex~, ~letters~, fixed width       |         16 | 0.9--1.1    |
+| ~alphnum~, ~charset~, fixed width   |         16 | 1.3         |
+| Character sequences, variable width | 1--8/1--16 | 3.2/5.4     |
 
 Where the length or option varies unpredictably, a mispredicted branch costs
 about 20 cycles, which dominates: a variable width beyond 8 bytes

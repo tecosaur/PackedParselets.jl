@@ -50,7 +50,7 @@ function maketype(@nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{Segme
     nctx = NodeCtx(:current_branch, root)
     nctx = NodeCtx(nctx, :casefold, casefold)
     exprs = PatternExprs()
-    push!(exprs.parse, Expr(:call, :__branch_check, root.id, nothing))
+    push!(exprs.parse, Expr(:call, :__root_check))
     pattern_dispatch!(exprs, state, nctx, pattern)
     assemble_type(exprs, state)
 end
@@ -128,30 +128,24 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
         expr isa Expr && resolve_sentinel_in_expr!(expr, state.branches)
     end
     while fold_branches!(resolved) end
-    # Resolve __checksum_gate sentinel
-    gate_idx = findfirst(resolved) do e
-        Meta.isexpr(e, :call) && first(e.args) === :__checksum_gate
-    end
-    if !isnothing(gate_idx)
-        ok_sym, checkpos_sym = resolved[gate_idx].args[2:3]
-        resolved[gate_idx] = :($ok_sym || return (parsed, -$checkpos_sym))
-    end
-    # Replace the root __branch_check sentinel with an upfront minimum-length check
+    # The root's minimum length is checked upfront, and a checksum's verdict returns
     formstr = segments_formstring(segments, state.branches)
     errmsg = register_errmsg!(state, string(
         "Expected at least ", parsed_min, " bytes",
         if isempty(formstr) "" else string(", must match the form '", formstr, "'") end))
-    split_idx = findfirst(resolved) do e
-        Meta.isexpr(e, :call) && first(e.args) === :__branch_check && e.args[2] == 1
-    end
-    if !isnothing(split_idx) && parsed_min > 0
-        resolved[split_idx] = if split_idx > 1
-            :(nbytes - pos >= $(parsed_min - 1) || return ($errmsg, start))
-        else
-            :(nbytes - start >= $(parsed_min - 1) || return ($errmsg, start))
+    root = 0
+    for (i, e) in enumerate(resolved)
+        Meta.isexpr(e, :call) || continue
+        if first(e.args) === :__checksum_gate
+            resolved[i] = :($(e.args[2]) || return (parsed, -$(e.args[3])))
+        elseif first(e.args) === :__root_check
+            root = i
         end
-    elseif !isnothing(split_idx)
-        deleteat!(resolved, split_idx)
+    end
+    if parsed_min > 0
+        resolved[root] = :(nbytes - pos >= $(parsed_min - 1) || return ($errmsg, start))
+    else
+        deleteat!(resolved, root)
     end
     :(Base.@assume_effects :foldable :nothrow @inline function $(GlobalRef(M, :parsebytes))(::Type{$(esc(name))}, data::AbstractVector{UInt8}, start::Int = 1)
           parsed = $(zero_parsed_expr(state))

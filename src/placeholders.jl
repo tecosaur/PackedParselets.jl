@@ -10,25 +10,20 @@
 # `fold_static_branches!`, and `implement_casting!` replace these
 # sentinels with concrete expressions or compile-time constants.
 
-## Sentinel shape validation
-
-sentinel_err(expr::Expr, nargs::Int) =
-    ArgumentError("Malformed $(first(expr.args)) sentinel: expected $(nargs - 1) args, got $(length(expr.args) - 1) in $(repr(expr))")
-
 ## Sentinel emission
 
 """
-    emit_lengthcheck(state, nctx, n_expr[, n_min, n_max]) -> Expr
+    emit_lengthcheck(state, nctx, n_expr[, n_max]) -> Expr
 
 Emit a `__length_check` sentinel that will be resolved after pattern walking.
 
 Resolves to `true` when the branch's static byte guarantee covers `n_max`,
-or to a runtime `nbytes - pos + 1 >= n_expr` check otherwise. `n_min` and
-`n_max` default to `n_expr` for fixed-width segments.
+or to a runtime `nbytes - pos + 1 >= n_expr` check otherwise. `n_max` defaults
+to `n_expr` for fixed-width segments.
 """
-function emit_lengthcheck(::ParserState, nctx::NodeCtx, n_expr, n_min::Int=n_expr, n_max::Int=n_min)
+function emit_lengthcheck(::ParserState, nctx::NodeCtx, n_expr, n_max::Int=n_expr)
     b = nctx[:current_branch]
-    Expr(:call, :__length_check, b.id, b.parsed_max, n_min, n_max, n_expr)
+    Expr(:call, :__length_check, b.id, b.parsed_max, n_max, n_expr)
 end
 
 function emit_static_lengthcheck(::ParserState, nctx::NodeCtx, n::Int)
@@ -75,8 +70,7 @@ function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch})
         if Meta.isexpr(arg, :call) && !isempty(arg.args)
             s = first(arg.args)
             if s === :__length_check
-                length(arg.args) == 6 || throw(sentinel_err(arg, 6))
-                _, branch_id, emission_max, _, n_max, n_expr = arg.args
+                _, branch_id, emission_max, n_max, n_expr = arg.args
                 if branches[branch_id].parsed_min - emission_max >= n_max
                     expr.args[i] = true
                 else
@@ -84,11 +78,9 @@ function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch})
                     arg.head, arg.args = r.head, r.args
                 end
             elseif s === :__static_length_check
-                length(arg.args) == 4 || throw(sentinel_err(arg, 4))
                 _, branch_id, emission_max, n = arg.args
                 expr.args[i] = branches[branch_id].parsed_min - emission_max >= n
             elseif s === :__length_bound
-                length(arg.args) == 5 || throw(sentinel_err(arg, 5))
                 _, branch_id, emission_max, n, end_min = arg.args
                 reserve = if isnothing(end_min) 0 else bytes_after(branches[branch_id], end_min) end
                 if branches[branch_id].parsed_min - emission_max >= n + reserve
@@ -99,21 +91,16 @@ function resolve_sentinel_in_expr!(expr::Expr, branches::Vector{ParseBranch})
                     arg.head, arg.args = r.head, r.args
                 end
             elseif s in (:__trailing_free, :__must_follow)
-                length(arg.args) == 3 || throw(sentinel_err(arg, 3))
                 _, branch_id, end_at = arg.args
                 expr.args[i] = if s === :__must_follow; bytes_after(branches[branch_id], end_at) > 0
                 else branch_id == 1 && branches[1].parsed_max == end_at end
             elseif s === :__branch_check
-                length(arg.args) == 3 || throw(sentinel_err(arg, 3))
-                if arg.args[2] === Bool
-                    resolved = resolve_branch_check(branches[arg.args[3]])
-                    if resolved isa Expr
-                        arg.head, arg.args = resolved.head, resolved.args
-                    else
-                        expr.args[i] = resolved
-                    end
+                resolved = resolve_branch_check(branches[arg.args[2]])
+                if resolved isa Expr
+                    arg.head, arg.args = resolved.head, resolved.args
+                else
+                    expr.args[i] = resolved
                 end
-                # __branch_check(Int, id) is left for the assembly pass
             else
                 resolve_sentinel_in_expr!(arg, branches)
             end

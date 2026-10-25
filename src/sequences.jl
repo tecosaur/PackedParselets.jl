@@ -573,25 +573,13 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         "$charset × $count"
     end
     char_set = ByteSet()
-    for r in ranges
-        char_set = char_set ∪ ByteSet(r)
-    end
-    if cfold
-        folded = ByteSet()
-        for b in char_set
-            if UInt8('A') <= b <= UInt8('Z')
-                folded = folded ∪ ByteSet(b + 0x20)
-            elseif UInt8('a') <= b <= UInt8('z')
-                folded = folded ∪ ByteSet(b - 0x20)
-            end
-        end
-        char_set = char_set ∪ folded
+    for r in ranges, b in r
+        char_set = char_set ∪ byte_set(b, cfold)
     end
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     seg_desc = string(if variable; "$minlen-$maxlen" else "$maxlen" end,
                       " ", kind, if maxlen > 1 " characters" else " character" end)
     seg_extract, seg_impart = optional_wrap(option, argvar, extracts, tostringex, impart_body)
-    # Practical upper bound (see compile_digits for rationale)
     parsed_max = if has_skip
         (maxlen + 1) * (length(skipbytes) + 1)
     else

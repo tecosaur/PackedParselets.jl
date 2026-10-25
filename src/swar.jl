@@ -243,80 +243,31 @@ end
 ## Loading strategies
 
 """
-    gen_swar_hiload(state, nctx, var, nd) -> (sT, Expr)
+    gen_swar_hiload(state, nctx, var, nd) -> Expr
 
-Emit a high-aligned register load of `nd` bytes from `data` at `pos`,
-choosing the optimal strategy (backward, forward-overread, or exact sub-loads)
-based on the current branch's byte guarantee. Returns `(register_type, load_expr)`.
+Emit a high-aligned register load of `nd` bytes from `data` at `pos`: backward,
+reading the bytes before as padding, when the branch guarantees them, else
+forward-overread or exact sub-loads, as the input's length allows.
 """
 function gen_swar_hiload(state::ParserState, nctx::NodeCtx, var::Symbol, nd::Int)
     sT = register_type(nd)
-    b = nctx[:current_branch]
-    backward = b.parsed_min >= sizeof(sT) - nd
-    load = if !backward && nd < sizeof(sT)
-        shift = 8 * (sizeof(sT) - nd)
-        Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
-             :($var = htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos)))) << $shift),
-             Expr(:if, :(canreadback(data, pos, $(sizeof(sT) - nd))),
-                  gen_swar_load(sT, var, nd, true), gen_swar_load(sT, var, nd, false)))
-    else
-        gen_swar_load(sT, var, nd, backward)
-    end
-    sT, load
+    padding = sizeof(sT) - nd
+    backload = :($var = $(gen_load(sT, if iszero(padding); :pos else :(pos - $padding) end)))
+    nctx[:current_branch].parsed_min >= padding && return backload
+    Expr(:if, emit_static_lengthcheck(state, nctx, sizeof(sT)),
+         :($var = $(gen_load(sT, :pos)) << $(8padding)),
+         Expr(:if, :(canreadback(data, pos, $padding)), backload, gen_swar_load(sT, var, nd)))
 end
 
-"""
-    gen_swar_load(::Type{T}, var, nd, backward) -> Expr
-
-Load `nd` digit bytes from `data` at `pos` into `var::T`, high-aligned.
-
-Three strategies:
-- Full-width (`nd == sizeof(T)`): single load, no padding needed.
-- Backward (`nd < sizeof(T)`, `backward=true`): single wide load ending at
-  the last digit byte, relying on preceding parsed bytes as padding.
-- Exact (`nd < sizeof(T)`, `backward=false`): power-of-2 sub-loads shifted
-  and ORed together; reads exactly `nd` bytes.
-"""
-function gen_swar_load(T::DataType, var::Symbol, nd::Int, backward::Bool, offset::Int=0)
-    posoff(n) = if iszero(n); :pos else :(pos + $n) end
-    posexpr = posoff(offset)
-    padding = sizeof(T) - nd
-    # Full-width: single load, no alignment needed
-    if nd == sizeof(T)
-        if T === UInt8
-            return :($var = @inbounds data[$posexpr])
-        end
-        return :($var = htol(Base.unsafe_load(Ptr{$T}(pointer(data, $posexpr)))))
-    end
-    # Backward: single wide load using preceding bytes as padding
-    if backward
-        return :($var = htol(Base.unsafe_load(Ptr{$T}(pointer(data, $(posoff(offset - padding)))))))
-    end
-    # Exact: decompose nd into power-of-2 chunks, shift each to its
-    # high-aligned position and OR together
-    chunks = Tuple{Int,Int}[]  # (chunk_bytes, string_offset)
-    remaining, coff = nd, 0
-    while remaining > 0
-        chunk = 1 << (8 * sizeof(remaining) - 1 - leading_zeros(remaining))
-        push!(chunks, (chunk, coff))
-        coff += chunk
-        remaining -= chunk
-    end
-    parts = Any[]
-    for (chunk, off) in chunks
-        bit_shift = 8 * (padding + off)
-        cT = register_type(chunk)
-        cposexpr = posoff(offset + off)
-        load = if cT === UInt8
-            :($T(@inbounds data[$cposexpr]))
-        else
-            :(htol(Base.unsafe_load(Ptr{$cT}(pointer(data, $cposexpr)))) % $T)
-        end
-        push!(parts, if iszero(bit_shift) load else :($load << $bit_shift) end)
-    end
-    rhs = parts[1]
-    for i in 2:length(parts)
-        rhs = :($rhs | $(parts[i]))
+# Load exactly `nd` bytes at `pos + offset` into `var::T`, high-aligned, in power-of-2 parts
+function gen_swar_load(T::DataType, var::Symbol, nd::Int, offset::Int = 0)
+    rhs = nothing
+    for c in register_chunks(nd)
+        load = gen_load(c.iT, if iszero(offset + c.offset); :pos else :(pos + $(offset + c.offset)) end)
+        c.iT === T || (load = :($load % $T))
+        shift = 8 * (sizeof(T) - nd + c.offset)
+        iszero(shift) || (load = :($load << $shift))
+        rhs = if isnothing(rhs) load else :($rhs | $load) end
     end
     :($var = $rhs)
 end
@@ -334,74 +285,25 @@ and `availvar` from the enclosing parse context.
 """
 function gen_swar_varload(sT::DataType, var::Symbol, countvar::Symbol,
                           availvar::Symbol, base::Int, maxdigits::Int)
-    @assert sizeof(sT) >= maxdigits "gen_swar_varload requires sizeof(sT) >= maxdigits"
-    chunks = Int[]
-    c = 1 << (8 * sizeof(maxdigits) - 1 - leading_zeros(maxdigits))
-    while c >= 1
-        push!(chunks, c)
-        c >>= 1
+    exprs = ExprVarLine[]
+    chunk = prevpow(2, maxdigits)
+    # A full register of digits needs none of the smaller chunks
+    done_label = if chunk == sizeof(sT) gensym("done_cascade") end
+    while chunk >= 1
+        cT = register_type(chunk)
+        chunk_var, nondig_var = gensym("chunk$(chunk)"), gensym("nondig$(chunk)")
+        took = ExprVarLine[:($var |= ($chunk_var % $sT) << (($countvar << 3) & $(8 * sizeof(sT) - 1))),
+                           :($countvar += $chunk)]
+        chunk == sizeof(sT) && push!(took, :(@goto $done_label))
+        push!(exprs, :(if $countvar + $chunk <= $availvar
+                           $chunk_var = $(gen_load(cT, :(pos + $countvar)))
+                           $(gen_swar_nondigits(cT, chunk_var, nondig_var, base))
+                           if iszero($nondig_var); $(took...) end
+                       end))
+        chunk >>= 1
     end
-    has_full = !isempty(chunks) && first(chunks) == sizeof(sT)
-    done_label = if has_full gensym("done_cascade") end
-    exprs = gen_varload_chunks(sT, var, countvar, availvar, base, maxdigits, chunks, done_label)
-    if !isnothing(done_label)
-        push!(exprs, :(@label $done_label))
-    end
+    isnothing(done_label) || push!(exprs, :(@label $done_label))
     exprs
-end
-
-# Generate cascading load-check-accumulate blocks for the given chunk sequence.
-# When `done_label` is provided, the full-register success path jumps to it
-# instead of duplicating the sub-chunk code in both if/else branches.
-function gen_varload_chunks(sT::DataType, var::Symbol, countvar::Symbol,
-                             availvar::Symbol, base::Int, maxdigits::Int,
-                             chunks::AbstractVector{Int},
-                             done_label::Union{Symbol,Nothing})
-    isempty(chunks) && return ExprVarLine[]
-    chunk = first(chunks)
-    rest = @view chunks[2:end]
-    cT = register_type(chunk)
-    chunk_var = gensym("chunk$(chunk)")
-    nondig_var = gensym("nondig$(chunk)")
-    load_expr = if cT === UInt8
-        :($chunk_var = @inbounds data[pos + $countvar])
-    else
-        :($chunk_var = htol(Base.unsafe_load(Ptr{$cT}(pointer(data, pos + $countvar)))))
-    end
-    nondig_raw = gen_swar_nondigits(cT, chunk_var, nondig_var, base)
-    nondig_stmts = if Meta.isexpr(nondig_raw, :block)
-        filter(e -> !(e isa LineNumberNode), nondig_raw.args)
-    else
-        ExprVarLine[nondig_raw]
-    end
-    accum = :($var |= ($chunk_var % $sT) << (($countvar << 3) & $(8 * sizeof(sT) - 1)))
-    advance = :($countvar += $chunk)
-    rest_exprs = gen_varload_chunks(sT, var, countvar, availvar, base, maxdigits, rest, nothing)
-    if chunk == sizeof(sT) && !isnothing(done_label)
-        # Full-register chunk: on success, jump past sub-chunks;
-        # on failure or insufficient bytes, fall through to sub-chunks (emitted once).
-        ExprVarLine[:(if $countvar + $chunk <= $availvar
-                          $load_expr
-                          $(nondig_stmts...)
-                          if iszero($nondig_var)
-                              $accum
-                              $advance
-                              @goto $done_label
-                          end
-                      end),
-                    rest_exprs...]
-    else
-        # Sub-register chunk: independent check, then continue to next chunk
-        ExprVarLine[:(if $countvar + $chunk <= $availvar
-                          $load_expr
-                          $(nondig_stmts...)
-                          if iszero($nondig_var)
-                              $accum
-                              $advance
-                          end
-                      end),
-                    rest_exprs...]
-    end
 end
 
 ## Strategy dispatch
@@ -553,7 +455,7 @@ function gen_vardigit_backward(state::ParserState, nctx::NodeCtx, @nospecialize(
     b = nctx[:current_branch]
     shift, nondig = Symbol(availvar, :_shift), gensym("nondig")
     hibits = sT(0x80) * (typemax(sT) ÷ typemax(UInt8))
-    load = :(htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos + $availvar - $(sizeof(sT)))))))
+    load = gen_load(sT, :(pos + $availvar - $(sizeof(sT))))
     lowshift = :((($(sizeof(sT)) - $availvar) << 3) & $(8 * sizeof(sT) - 1))
     filled = :(iszero($nondig & ($hibits >>> $shift)))
     scan = :(while $countvar < $availvar && byte2int(@inbounds(data[pos + $countvar]), $base) != 0xff
@@ -597,7 +499,7 @@ function gen_vardigit_forward(state::ParserState, nctx::NodeCtx, @nospecialize(v
     # Forward overread: single full-width load at pos, digits at LSB
     wide = Expr(:block,
         :($(emit_lengthcheck(state, nctx, Base.max(mindigits, 1))) || $(vdjob.fail)),
-        :($swar_var = htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos))))),
+        :($swar_var = $(gen_load(sT, :pos))),
         gen_swar_digitcount(sT, swar_var, countvar, base, maxdigits)...)
     # Cascading power-of-2 exact-loads fallback
     cascade = Expr(:block, :($countvar = 0), :($swar_var = zero($sT)), :($availvar = $avail_bound),
@@ -662,10 +564,9 @@ function gen_swar_chunks(state::ParserState, nctx::NodeCtx,
         svar = gensym("chunk$ci")
         sT = register_type(nd)
         load = if ci == 1 && iszero(offset)
-            _, l = gen_swar_hiload(state, nctx, svar, nd)
-            l
+            gen_swar_hiload(state, nctx, svar, nd)
         else
-            gen_swar_load(sT, svar, nd, false, offset)
+            gen_swar_load(sT, svar, nd, offset)
         end
         check, parse = gen_swar_chunk(sT, svar, nd, base, on_fail)
         append!(exprs, ExprVarLine[load, check..., parse...])
@@ -713,11 +614,10 @@ function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, I
         # `b` in each character lane (a short load fills the high lanes)
         lanes(b) = (m = zero(sT); for i in pad:width-1; m |= sT(b) << 8i; end; m)
         reg, folded, idx, cut = gensym("chars"), gensym("folded"), gensym("indices"), gensym("cut")
-        load(at) = :(htol(Base.unsafe_load(Ptr{$sT}(pointer(data, $at)))))
         isnothing(count) || push!(exprs, :($cut = ((8 - $(last(count))) << 3) % UInt))
-        push!(exprs, if isnothing(count) gen_swar_load(sT, reg, nd, false, start)
-              else :($reg = if canreadback(data, pos + $start, 7); $(load(:(pos + $start + $(last(count)) - 8))) >>> $cut
-                            else $(load(:(pos + $start))) & (typemax(UInt64) >>> $cut) end) end,
+        push!(exprs, if isnothing(count) gen_swar_load(sT, reg, nd, start)
+              else :($reg = if canreadback(data, pos + $start, 7); $(gen_load(sT, :(pos + $start + $(last(count)) - 8))) >>> $cut
+                            else $(gen_load(sT, :(pos + $start))) & (typemax(UInt64) >>> $cut) end) end,
               :($folded = $(if casefold; :($reg | $(lanes(0x20))) else reg end)))
         # A non-ASCII byte's carries may corrupt neighbouring flags, but it fails its own lane
         # Every valid lane lies in one range: offset by the least, plus its range's excess

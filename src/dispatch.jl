@@ -120,8 +120,7 @@ function pattern_field!(exprs::PatternExprs,
     elseif length(new_value_segs) == 1
         push!(exprs.properties, node.value => new_value_segs[1].label)
     else
-        propprints = map(strip_segsets! ∘ copy, exprs.print.direct[initialprints+1:end])
-        filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, propprints)
+        propprints = strip_print_markers(exprs.print.direct[initialprints+1:end])
         resolve_print_markers!(propprints)
         push!(exprs.properties, node.value => ExprVarLine[(
             quote

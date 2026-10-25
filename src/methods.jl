@@ -87,7 +87,17 @@ function assemble_type(exprs::PatternExprs, state::ParserState)
             end
         end
     end
-    pnames = Tuple(unique(map(first, exprs.properties)))
+    # Each property's values, in order of first appearance
+    props = Pair{Symbol, Vector{Union{Symbol, Vector{ExprVarLine}}}}[]
+    seen = Dict{Symbol, Int}()
+    for (pname, val) in exprs.properties
+        if haskey(seen, pname)
+            push!(last(props[seen[pname]]), val)
+        else
+            seen[pname] = length(props) + 1
+            push!(props, pname => [val])
+        end
+    end
     typeparts = (;
         typedef = :(Base.@__doc__(primitive type $(esc(name)) <: $(state.supertype) $numbits end)),
         nbits = :($(GlobalRef(M, :nbits))(::Type{$(esc(name))}) = $(state.bits)),
@@ -96,12 +106,12 @@ function assemble_type(exprs::PatternExprs, state::ParserState)
         parsebytes = assemble_parsebytes(exprs.parse, exprs.segments, state, name),
         tobytes = assemble_tobytes(exprs.print, state, name),
         print = assemble_print(exprs.print, state, name),
-        propertynames = :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $pnames),
-        properties = assemble_properties(exprs.properties, exprs.segments, state, name),
+        propertynames = :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(Symbol[first(p) for p in props]))),
+        properties = assemble_properties(props, exprs.segments, state, name),
         segments_type = assemble_segments_type(exprs.segments, state, name),
         segments_value = assemble_segments_value(exprs.segments, exprs.print, state, name),
-        constructor = assemble_constructor(exprs.segments, exprs.properties, state, name),
-        show = assemble_show(exprs.segments, exprs.properties, state, name),
+        constructor = assemble_constructor(exprs.segments, props, state, name),
+        show = assemble_show(props, name),
         isless = :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
                        Core.Intrinsics.ult_int(a, b)),
         hookdata = Expr(:block, hookdata...),
@@ -158,16 +168,14 @@ end
 
 ## tobytes
 
-function strip_print_markers!(pexprs::Vector)
-    map!(strip_segsets! ∘ copy, pexprs, pexprs)
-    filter!(e -> !Meta.isexpr(e, :(=), 2) || first(e.args) !== :__segment_printed, pexprs)
-end
+# Copies of print expressions, without their `__segment_printed` markers
+strip_print_markers(pexprs::Vector) = strip_segsets!(Expr(:block, copyexprs(pexprs)...)).args
 
 function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
     root = state.branches[1]
     fixedlen = root.print_min == root.print_max
     M = PackedParselets
-    directexprs = strip_print_markers!(copy(print.direct))
+    directexprs = strip_print_markers(print.direct)
     rewrite_bufprint!(directexprs)
     allocating = if fixedlen
         :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
@@ -226,20 +234,10 @@ end
 
 ## getproperty
 
-function assemble_properties(properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
+function assemble_properties(grouped::Vector{Pair{Symbol, Vector{Union{Symbol, Vector{ExprVarLine}}}}},
                               segs::Vector{ValueSegment},
                               state::ParserState, name::Symbol)
-    isempty(properties) && return :()
-    grouped = Pair{Symbol, Vector{Union{Symbol, Vector{ExprVarLine}}}}[]
-    seen = Dict{Symbol, Int}()
-    for (pname, val) in properties
-        if haskey(seen, pname)
-            push!(grouped[seen[pname]].second, val)
-        else
-            seen[pname] = length(grouped) + 1
-            push!(grouped, pname => [val])
-        end
-    end
+    isempty(grouped) && return :()
     fallback = :(throw(FieldError($(esc(name)), prop)))
     clauses = fallback
     for i in length(grouped):-1:1
@@ -264,9 +262,9 @@ end
 ## Constructor
 
 function assemble_constructor(segs::Vector{ValueSegment},
-                              properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
+                              props::Vector{Pair{Symbol, Vector{Union{Symbol, Vector{ExprVarLine}}}}},
                               state::ParserState, name::Symbol)
-    resolved = resolve_property_segments(properties, segs)
+    resolved = resolve_property_segments(props, segs)
     isempty(resolved) && return :()
     args = Tuple{Symbol, Int}[]
     for (pname, idxs) in resolved
@@ -345,13 +343,10 @@ end
 
 ## show
 
-function assemble_show(segs::Vector{ValueSegment},
-                       properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}},
-                       state::ParserState, name::Symbol)
-    pnames = unique(map(first, properties))
-    isempty(pnames) && return :()
+function assemble_show(props::Vector{Pair{Symbol, Vector{Union{Symbol, Vector{ExprVarLine}}}}}, name::Symbol)
+    isempty(props) && return :()
     show_parts = ExprVarLine[]
-    for pname in pnames
+    for (pname, _) in props
         isempty(show_parts) || push!(show_parts, :(print(io, ", ")))
         push!(show_parts, :(show(io, getproperty(val, $(QuoteNode(pname))))))
     end
@@ -428,21 +423,17 @@ end
 
 ## Property-segment resolution
 
-# Map Symbol-ref properties to `(name, segment_indices)` pairs.
-# Only processes the first Symbol ref per name; Vector{ExprVarLine}
-# entries (choice-guarded or multi-segment) are handled separately.
-function resolve_property_segments(properties, segs::Vector{ValueSegment})
+# Map properties to `(name, segment_indices)` pairs, by their first value: a segment's
+# label, or for choice-guarded or multi-segment ones, the segments taking their name
+function resolve_property_segments(props, segs::Vector{ValueSegment})
     result = Pair{Symbol, Vector{Int}}[]
-    seen = Set{Symbol}()
-    for (pname, val) in properties
-        pname ∈ seen && continue
+    for (pname, vals) in props
+        val = first(vals)
         if val isa Symbol
-            push!(seen, pname)
             idx = findfirst(s -> s.label == val, segs)
             isnothing(idx) && continue
             push!(result, pname => [idx])
-        elseif val isa Vector
-            push!(seen, pname)
+        else
             idxs = Int[]
             for (i, s) in enumerate(segs)
                 !isnothing(s.argtype) && s.label == pname && push!(idxs, i)

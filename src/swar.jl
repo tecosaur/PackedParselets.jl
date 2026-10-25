@@ -406,11 +406,8 @@ end
 
 ## Strategy dispatch
 
-# Shared vocabulary for all digit-parse strategies: symbols, encoding
-# expressions, range checks, and error messages. Used by the three
-# strategy functions below.
-function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, @nospecialize(dspec::NamedTuple))
-    (; base, maxdigits, vmin, vmax, pad, exclude) = dspec
+function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, d::DigitSpec)
+    (; base, maxdigits, vmin, vmax, pad) = d
     checks = Expr[]
     if vmin > 0
         fail = build_fail_expr!(state, nctx, "Expected at least a value of $(string(vmin; base, pad))")
@@ -420,66 +417,23 @@ function gen_rangecheck(state::ParserState, nctx::NodeCtx, var::Symbol, @nospeci
         fail = build_fail_expr!(state, nctx, "Expected at most a value of $(string(vmax; base, pad))")
         push!(checks, :($var <= $vmax || $fail))
     end
-    if !isnothing(exclude)
-        for r in exclude
-            lo, hi = first(r), last(r)
-            desc = if lo == hi
-                "Value $(string(lo; base, pad)) is excluded"
-            else
-                "Value must not be in $(string(lo; base, pad))-$(string(hi; base, pad))"
-            end
-            fail = build_fail_expr!(state, nctx, desc)
-            check = if lo == hi
-                :($var != $lo || $fail)
-            else
-                :(($var < $lo || $var > $hi) || $fail)
-            end
-            push!(checks, check)
+    for r in something(d.exclude, UnitRange{Int}[])
+        lo, hi = first(r), last(r)
+        desc, cond = if lo == hi
+            "Value $(string(lo; base, pad)) is excluded", :($var != $lo)
+        else
+            "Value must not be in $(string(lo; base, pad))-$(string(hi; base, pad))", :($var < $lo || $var > $hi)
         end
+        push!(checks, :($cond || $(build_fail_expr!(state, nctx, desc))))
     end
-    isempty(checks) ? :() : Expr(:block, checks...)
+    checks
 end
 
-function compute_digit_vocab(state::ParserState, nctx::NodeCtx,
-                             fieldvar::Symbol, @nospecialize(option), @nospecialize(dspec::NamedTuple))
-    (; base, mindigits, maxdigits, vmin, vmax, dI, dT, claims_sentinel) = dspec
-    fixedwidth = mindigits == maxdigits
-    fnum = Symbol("$(fieldvar)_num")
-    # numexpr: transform raw fnum into the stored representation
-    directval = cardbits(vmax - vmin + 1 + claims_sentinel) ==
-                cardbits(vmax + 1) && (vmin > 0 || !claims_sentinel)
-    numexpr = if directval
-        if dI != dT; :($fnum % $dT) else fnum end
-    elseif iszero(vmin) && claims_sentinel
-        :($fnum + $(one(dT)))
-    elseif vmin - claims_sentinel > 0
-        :(($fnum - $(dT(vmin - claims_sentinel))) % $dT)
-    else
-        if dI != dT; :($fnum % $dT) else fnum end
-    end
-    directvar = numexpr === fnum
-    parsevar = if directvar; fnum else fieldvar end
-    rangecheck = gen_rangecheck(state, nctx, fnum, dspec)
-    fail_expr = build_fail_expr!(state, nctx, if fixedwidth && maxdigits > 1
-        "exactly $maxdigits digits in base $base"
-    elseif mindigits > 1
-        "$mindigits to $maxdigits digits in base $base"
-    else
-        "up to $maxdigits digits in base $base"
-    end)
-    (; fnum, fieldvar, parsevar, directvar, numexpr, rangecheck,
-       fail_expr, option, dT)
-end
-
-# Scalar `parseint` fallback for digit fields where SWAR isn't applicable.
-function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
-                            @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
-    (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
-    (; base, mindigits, maxdigits, skipbytes) = dspec
-    fixedwidth = mindigits == maxdigits
-    bitsconsumed = Symbol("$(vocab.fieldvar)_bitsconsumed")
+function gen_digit_parseint(state::ParserState, nctx::NodeCtx, d::DigitSpec, fail::Expr)
+    (; fieldvar, fnum, base, mindigits, maxdigits, skipbytes) = d
+    bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     scanlimit = emit_lengthbound(state, nctx, maxdigits)
-    matchcond = if fixedwidth
+    matchcond = if mindigits == maxdigits
         :($bitsconsumed == $maxdigits)
     elseif mindigits > 1
         :($bitsconsumed >= $mindigits)
@@ -487,44 +441,27 @@ function gen_digit_parseint(state::ParserState, nctx::NodeCtx,
         :(!iszero($bitsconsumed))
     end
     fnum_set = if isnothing(skipbytes)
-        :(($bitsconsumed, $fnum) = parseint($(dspec.dI), data, pos, $base, $scanlimit))
+        :(($bitsconsumed, $fnum) = parseint($(d.dI), data, pos, $base, $scanlimit))
     else
-        scanned = Symbol("$(vocab.fieldvar)_scanned")
-        :(($bitsconsumed, $fnum, $scanned) = parseint($(dspec.dI), data, pos, $base, $scanlimit, $skipbytes))
+        :(($bitsconsumed, $fnum, $(Symbol("$(fieldvar)_scanned"))) =
+              parseint($(d.dI), data, pos, $base, $scanlimit, $skipbytes))
     end
-    result = ExprVarLine[fnum_set, :($matchcond || $fail_expr)]
-    rangecheck != :() && push!(result, rangecheck)
-    if !directvar; push!(result, :($fieldvar = $numexpr)) end
-    result
+    ExprVarLine[fnum_set, :($matchcond || $fail)], fnum
 end
 
-
-"""
-    gen_digit_swar_fixed(vocab, dspec, state, nctx) -> Vector{ExprVarLine}
-
-Fixed-width SWAR for 1–16 digit fields.
-"""
-function gen_digit_swar_fixed(state::ParserState, nctx::NodeCtx,
-                              @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
-    (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
-    (; base, maxdigits, dI) = dspec
-    chunksize = sizeof(UInt)
-    chunks = if maxdigits <= chunksize
+function gen_digit_swar_fixed(state::ParserState, nctx::NodeCtx, d::DigitSpec, fail::Expr)
+    (; maxdigits, fnum) = d
+    chunks = if maxdigits <= sizeof(UInt)
         ((0, maxdigits),)
     else
-        ((0, chunksize), (chunksize, maxdigits - chunksize))
+        ((0, sizeof(UInt)), (sizeof(UInt), maxdigits - sizeof(UInt)))
     end
-    b = nctx[:current_branch]
-    len_check = Expr(:call, :__length_check, b.id, b.parsed_max, maxdigits, maxdigits, maxdigits)
-    result = ExprVarLine[:($len_check || $fail_expr)]
-    append!(result, gen_swar_chunks(state, nctx, chunks, base, fnum, dI, fail_expr))
-    rangecheck != :() && push!(result, rangecheck)
-    if !directvar; push!(result, :($fieldvar = $numexpr)) end
-    result
+    ExprVarLine[:($(emit_lengthcheck(state, nctx, maxdigits)) || $fail),
+                gen_swar_chunks(state, nctx, chunks, d.base, fnum, d.dI, fail)...], fnum
 end
 
 """
-    gen_digit_swar_variable(vocab, dspec, state, nctx) -> Vector{ExprVarLine}
+    gen_digit_swar_variable(state, nctx, d, fail) -> (Vector{ExprVarLine}, Symbol)
 
 Variable-width SWAR for digit fields of up to 8 digits in one register;
 digits beyond the first 8 continue in `parseint`.
@@ -533,23 +470,18 @@ Load strategy preference: backward > forward-overread > cascading exact-loads.
 Both runtime and compile-time paths are emitted; `fold_static_branches!`
 selects the winner based on resolved length guarantees.
 """
-function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
-                                 @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
-    (; fnum, fail_expr, fieldvar) = vocab
-    (; base, mindigits, maxdigits, dI, pad) = dspec
+function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx, d::DigitSpec, fail::Expr)
+    (; fnum, fieldvar, base, mindigits, maxdigits, pad, dI) = d
     head = Base.min(maxdigits, sizeof(UInt))
-    headspec = merge(dspec, (; mindigits = Base.min(mindigits, head), maxdigits = head))
     sT = register_type(head)
     nT = if maxdigits == head; sT
     elseif Int128(base)^maxdigits - 1 <= typemax(UInt64); UInt64
     else UInt128 end
     swar_var = Symbol("$(fieldvar)_swar")
     numvar = if nT == sT; swar_var else Symbol("$(fieldvar)_wide") end
-    bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     parse_expr = gen_swarparse(sT, swar_var, base, head)
     countvar = Symbol("$(fieldvar)_count")
     countcheck = if mindigits > 1; :($countvar >= $mindigits) else :(!iszero($countvar)) end
-    num_cast = if nT == dI; numvar else :($numvar % $dI) end
     varparse = ExprVarLine[
         # Masked shifts skip Julia's out-of-range handling; a zero count fails regardless
         :($swar_var <<= (($(sizeof(sT)) - $countvar) << 3) & $(8 * sizeof(sT) - 1)),
@@ -593,45 +525,32 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx,
                     $countvar += $tailcount
                 end))
     end
-    push!(varparse, :($fnum = $num_cast))
+    push!(varparse, :($fnum = $(if nT == dI numvar else :($numvar % $dI) end)))
     b = nctx[:current_branch]
-    backward = b.parsed_min >= sizeof(sT) - 1
-    vdjob = (; sT, swar_var, countvar,
+    vdjob = (; sT, swar_var, countvar, base, fail,
+               mindigits = Base.min(mindigits, head), maxdigits = head,
                availvar = Symbol("$(fieldvar)_avail"),
                avail_bound = emit_lengthbound(state, nctx, head),
                end_min = b.parsed_min + mindigits,
                # Padded values usually come at full width, so at one length
                trailing_free = mindigits < sizeof(UInt) <= maxdigits && pad < maxdigits &&
                    Expr(:call, :__trailing_free, b.id, b.parsed_max + maxdigits))
-    load_and_count = if backward
-        gen_vardigit_backward(state, nctx, vocab, headspec, vdjob, b)
+    load_and_count = if b.parsed_min >= sizeof(sT) - 1
+        gen_vardigit_backward(state, nctx, vdjob)
     else
-        gen_vardigit_forward(state, nctx, vocab, headspec, vdjob, b)
+        gen_vardigit_forward(state, nctx, vdjob)
     end
-    (; rangecheck, directvar, fieldvar, numexpr, fail_expr) = vocab
-    # When the SWAR register is wider than dI, the range check must test
-    # numvar (full width) rather than fnum (after truncation), since
-    # values like 256 would wrap to 0 in a UInt8 and pass a <= 255 check.
-    pre_rangecheck = if nT != dI
-        gen_rangecheck(state, nctx, numvar, dspec)
-    else
-        rangecheck
-    end
-    result = ExprVarLine[load_and_count...,
-                varparse...,
-                :($countcheck || $fail_expr),
-                :($bitsconsumed = $countvar)]
-    pre_rangecheck != :() && push!(result, pre_rangecheck)
-    if !directvar; push!(result, :($fieldvar = $numexpr)) end
-    result
+    # A register wider than the value's type is range-checked before truncating wraps it
+    ExprVarLine[load_and_count..., varparse..., :($countcheck || $fail),
+                :($(Symbol("$(fieldvar)_bitsconsumed")) = $countvar)],
+        if nT == dI fnum else numvar end
 end
 
 # Backward strategy for variable-width: single wide load ending at
 # pos + avail - 1, then right-shift to low-align.
-function gen_vardigit_backward(state::ParserState, nctx::NodeCtx,
-                                @nospecialize(vocab), @nospecialize(dspec::NamedTuple), @nospecialize(vdjob), b::ParseBranch)
-    (; sT, swar_var, countvar, availvar, end_min) = vdjob
-    (; base, mindigits, maxdigits) = dspec
+function gen_vardigit_backward(state::ParserState, nctx::NodeCtx, @nospecialize(vdjob))
+    (; sT, swar_var, countvar, availvar, end_min, base, mindigits, maxdigits) = vdjob
+    b = nctx[:current_branch]
     shift, nondig = Symbol(availvar, :_shift), gensym("nondig")
     hibits = sT(0x80) * (typemax(sT) ÷ typemax(UInt8))
     load = :(htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos + $availvar - $(sizeof(sT)))))))
@@ -666,34 +585,25 @@ function gen_vardigit_backward(state::ParserState, nctx::NodeCtx,
               $countvar = 0
               $scan
           end)]
-    guard_n = Base.max(mindigits, 1)
-    guard_check = Expr(:call, :__length_check, b.id, b.parsed_max, guard_n, guard_n, guard_n)
     ExprVarLine[:($availvar = $(emit_lengthbound(state, nctx, maxdigits, end_min))),
-                :($guard_check || $(vocab.fail_expr)),
+                :($(emit_lengthcheck(state, nctx, Base.max(mindigits, 1))) || $(vdjob.fail)),
                 backload...]
 end
 
 # Forward-overread + cascading fallback for variable-width.
 # Emits both paths gated by __static_length_check; fold_static_branches! picks the winner.
-function gen_vardigit_forward(state::ParserState, nctx::NodeCtx,
-                               @nospecialize(vocab), @nospecialize(dspec::NamedTuple), @nospecialize(vdjob), b::ParseBranch)
-    (; sT, swar_var, countvar, availvar, avail_bound) = vdjob
-    (; base, mindigits, maxdigits) = dspec
+function gen_vardigit_forward(state::ParserState, nctx::NodeCtx, @nospecialize(vdjob))
+    (; sT, swar_var, countvar, availvar, avail_bound, base, mindigits, maxdigits) = vdjob
     # Forward overread: single full-width load at pos, digits at LSB
-    fwdload = ExprVarLine[
+    wide = Expr(:block,
+        :($(emit_lengthcheck(state, nctx, Base.max(mindigits, 1))) || $(vdjob.fail)),
         :($swar_var = htol(Base.unsafe_load(Ptr{$sT}(pointer(data, pos))))),
-        gen_swar_digitcount(sT, swar_var, countvar, base, maxdigits)...]
-    guard_n = Base.max(mindigits, 1)
-    guard_check = Expr(:call, :__length_check, b.id, b.parsed_max, guard_n, guard_n, guard_n)
-    fwd_guarded = ExprVarLine[:($guard_check || $(vocab.fail_expr)), fwdload...]
+        gen_swar_digitcount(sT, swar_var, countvar, base, maxdigits)...)
     # Cascading power-of-2 exact-loads fallback
-    varload = gen_swar_varload(sT, swar_var, countvar, availvar, base, maxdigits)
-    cascade = ExprVarLine[:($countvar = 0), :($swar_var = zero($sT)),
-                          :($availvar = $avail_bound), varload...]
-    wide = Expr(:block, fwd_guarded...)
+    cascade = Expr(:block, :($countvar = 0), :($swar_var = zero($sT)), :($availvar = $avail_bound),
+                   gen_swar_varload(sT, swar_var, countvar, availvar, base, maxdigits)...)
     narrow = Expr(:if, :(canreadback(data, pos, $(sizeof(sT) - 1))),
-                  Expr(:block, gen_vardigit_backward(state, nctx, vocab, dspec, vdjob, b)...),
-                  Expr(:block, cascade...))
+                  Expr(:block, gen_vardigit_backward(state, nctx, vdjob)...), cascade)
     fits = emit_lengthcheck(state, nctx, sizeof(sT))
     # Digits ending the input reach its end, which a backward load serves at any length
     vdjob.trailing_free === false ||
@@ -703,34 +613,37 @@ end
 
 ## Top-level digit parse dispatch
 
-"""
-    gen_digit_parse(state, nctx, fieldvar, option, dspec)
-        -> (; exprs::Vector{ExprVarLine}, parsevar::Symbol, directvar::Bool)
-
-Dispatch digit parsing: SWAR fixed/variable when base ≤ 16 and digit count
-is within register limits, scalar `parseint` otherwise.
-"""
-function gen_digit_parse(state::ParserState, nctx::NodeCtx,
-                         fieldvar::Symbol, @nospecialize(option),
-                         @nospecialize(dspec::NamedTuple))
-    vocab = compute_digit_vocab(state, nctx, fieldvar, option, dspec)
-    (; mindigits, maxdigits, base, skipbytes, groups) = dspec
+# SWAR when base ≤ 16 and the digits fit registers, else a scalar `parseint` scan
+function gen_digit_parse(state::ParserState, nctx::NodeCtx, d::DigitSpec)
+    (; mindigits, maxdigits, base, skipbytes) = d
     fixedwidth = mindigits == maxdigits
-    swar_limit = if fixedwidth 2 * sizeof(UInt) else ndigits(typemax(UInt128); base = base::Int) - 1 end
-    use_swar = base <= 16 && maxdigits <= swar_limit && isnothing(skipbytes)
-    # Fixed-width digits with separators anywhere parse like one group of them
-    use_grouped_swar = base <= 16 && !isnothing(skipbytes) &&
-        (!isnothing(groups) || fixedwidth && maxdigits <= 2 * sizeof(UInt))
-    exprs = if use_grouped_swar
-        gen_digit_swar_grouped(state, nctx, vocab, dspec)
-    elseif !use_swar
-        gen_digit_parseint(state, nctx, vocab, dspec)
-    elseif fixedwidth
-        gen_digit_swar_fixed(state, nctx, vocab, dspec)
+    fail = build_fail_expr!(state, nctx, if fixedwidth && maxdigits > 1
+        "exactly $maxdigits digits in base $base"
+    elseif mindigits > 1
+        "$mindigits to $maxdigits digits in base $base"
     else
-        gen_digit_swar_variable(state, nctx, vocab, dspec)
+        "up to $maxdigits digits in base $base"
+    end)
+    swar_limit = if fixedwidth 2 * sizeof(UInt) else ndigits(typemax(UInt128); base) - 1 end
+    exprs, checkvar = if base > 16
+        gen_digit_parseint(state, nctx, d, fail)
+    elseif !isnothing(skipbytes)
+        # Fixed-width digits with separators anywhere parse like one group of them
+        if !isnothing(d.groups) || fixedwidth && maxdigits <= 2 * sizeof(UInt)
+            gen_digit_swar_grouped(state, nctx, d, fail)
+        else
+            gen_digit_parseint(state, nctx, d, fail)
+        end
+    elseif maxdigits > swar_limit
+        gen_digit_parseint(state, nctx, d, fail)
+    elseif fixedwidth
+        gen_digit_swar_fixed(state, nctx, d, fail)
+    else
+        gen_digit_swar_variable(state, nctx, d, fail)
     end
-    (; exprs, vocab.parsevar, vocab.directvar)
+    append!(exprs, gen_rangecheck(state, nctx, checkvar, d))
+    d.direct || push!(exprs, :($(d.fieldvar) = $(encoding(d))))
+    exprs
 end
 
 ## Multi-chunk SWAR: load → validate → reduce → accumulate
@@ -866,15 +779,13 @@ function grouped_chunks_and_check(groups::Vector{Int}, @nospecialize(skipbytes),
     (; chunks, sep_check, total_bytes = offset)
 end
 
-function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
-                                @nospecialize(vocab), @nospecialize(dspec::NamedTuple))
-    (; fnum, fail_expr, rangecheck, directvar, fieldvar, numexpr) = vocab
-    (; base, maxdigits, dI, skipbytes) = dspec
-    (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(something(dspec.groups, [maxdigits]), skipbytes)
+function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx, d::DigitSpec, fail::Expr)
+    (; fnum, fieldvar, base, maxdigits, dI, skipbytes) = d
+    (; chunks, sep_check, total_bytes) = grouped_chunks_and_check(something(d.groups, [maxdigits]), skipbytes)
     # Ungrouped, separators may fall anywhere, so a non-digit leaves the registers for a scan
     regs = gensym("regs")
     swar_body = gen_swar_chunks(state, nctx, chunks, base, fnum, dI,
-                                if isnothing(dspec.groups); :($regs = false) else fail_expr end)
+                                if isnothing(d.groups); :($regs = false) else fail end)
     scanned = Symbol("$(fieldvar)_scanned")
     bitsconsumed = Symbol("$(fieldvar)_bitsconsumed")
     push!(swar_body, Expr(:(=), scanned, total_bytes))
@@ -882,13 +793,13 @@ function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
     fallback = ExprVarLine[
         :(($bitsconsumed, $fnum, $scanned) =
             parseint($(dI), data, pos, $base, $scanlimit, $skipbytes)),
-        :($bitsconsumed == $maxdigits || $fail_expr)]
+        :($bitsconsumed == $maxdigits || $fail)]
     lencheck = emit_lengthcheck(state, nctx, total_bytes)
     result = ExprVarLine[
         :($regs = $lencheck && $sep_check),
         :(if $regs; $(swar_body...) end)]
     # Grouped digits often come without their separators
-    if !isnothing(dspec.groups)
+    if !isnothing(d.groups)
         compact = gen_swar_chunks(state, nctx, grouped_chunks_and_check([maxdigits], skipbytes).chunks,
                                   base, fnum, dI, :($regs = false))
         push!(result, :(if !$regs && $(emit_lengthcheck(state, nctx, maxdigits))
@@ -898,9 +809,7 @@ function gen_digit_swar_grouped(state::ParserState, nctx::NodeCtx,
                         end))
     end
     push!(result, :(if !$regs; $(fallback...) end))
-    rangecheck != :() && push!(result, rangecheck)
-    if !directvar; push!(result, :($fieldvar = $numexpr)) end
-    result
+    result, fnum
 end
 
 ## Reverse-SWAR: spread packed bpc-bit fields to one-per-byte for printing

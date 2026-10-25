@@ -206,6 +206,37 @@ struct PatternExprs
 end
 PatternExprs() = PatternExprs([], PrintExprs(), [], [], [])
 
+# A digit field's values and how they're stored: `dI` holds a value, `dT` its encoding,
+# which offsets values by `vmin`, and by one more when zero is claimed to mark absence
+struct DigitSpec
+    fieldvar::Symbol
+    base::Int
+    mindigits::Int
+    maxdigits::Int
+    vmin::Int128
+    vmax::Int128
+    pad::Int
+    claims::Bool
+    skipbytes::Union{Nothing, Tuple{Vararg{UInt8}}}
+    exclude::Union{Nothing, Vector{UnitRange{Int}}}
+    groups::Union{Nothing, Vector{Int}}
+    dbits::Int
+    dI::DataType
+    dT::DataType
+    direct::Bool
+    fnum::Symbol
+    parsevar::Symbol
+end
+
+function DigitSpec(fieldvar::Symbol, base::Int, mindigits::Int, maxdigits::Int, vmin::Int128, vmax::Int128,
+                   pad::Int, claims::Bool, @nospecialize(skipbytes), exclude, groups)
+    dbits = cardbits(vmax - vmin + 1 + claims)
+    direct = dbits == cardbits(vmax + 1) && (vmin > 0 || !claims)
+    fnum = Symbol("$(fieldvar)_num")
+    DigitSpec(fieldvar, base, mindigits, maxdigits, vmin, vmax, pad, claims, skipbytes, exclude, groups,
+              dbits, cardtype(cardbits(vmax + 1)), cardtype(dbits), direct, fnum, if direct fnum else fieldvar end)
+end
+
 """
     ParseBranch
 

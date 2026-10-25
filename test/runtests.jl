@@ -3672,6 +3672,11 @@ end
         @test PP.printbounds(ArmBounds) == (7, 8)
         check_roundtrips(ArmBounds, ("A1234-56", "Babc-56", "CC12-56"))
     end
+    @testset "keywords within a tuple arm" begin
+        eval(:(@defpacked ArmKw (choice(("A", :x(digits(2)), base=16), ("B", :y(digits(3)))))))
+        @test parse(ArmKw, "Aff").x == 0xff
+        @test parse(ArmKw, "B123").y == 123
+    end
     @testset "letter-range dispatch" begin
         iddef = :(@defpacked LetterChoice (choice(("X", :a(digits(3))), ("Y", :b(digits(2))), ("Z", :c(digits(1))))))
         @test parsebytes_complexity(iddef) == (branches=6:20, branch_total=20, ops=3:68)

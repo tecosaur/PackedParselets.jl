@@ -200,23 +200,42 @@ function patch_optional_extracts!(segments::Vector{ValueSegment},
     end
 end
 
-function arm_clear_bits(state::ParserState, bits_before::Int)
-    arm_bits = state.bits - bits_before
-    arm_bits > 1 || return ExprVarLine[]
+# Clear the packed bits `from+1:to`, which an arm that failed may have set
+function arm_clear_bits(from::Int, to::Int)
+    to - from > 1 || return ExprVarLine[]
     # Built in the packed type, which may be wider than any integer
-    mask = :(Core.Intrinsics.lshr_int(Core.Intrinsics.not_int(__cast_to_packed($UInt8, 0x00)), __packed_shift($arm_bits)))
+    mask = :(Core.Intrinsics.lshr_int(Core.Intrinsics.not_int(__cast_to_packed($UInt8, 0x00)), __packed_shift($(to - from))))
     ExprVarLine[:(parsed = Core.Intrinsics.and_int(parsed,
-        Core.Intrinsics.not_int(Core.Intrinsics.shl_int($mask, __packed_shift($(state.bits))))))]
+        Core.Intrinsics.not_int(Core.Intrinsics.shl_int($mask, __packed_shift($to)))))]
 end
 
-function walk_choice_arm!(oexprs, state::ParserState, nctx::NodeCtx, @nospecialize(arm))
-    if Meta.isexpr(arm, :tuple)
-        for a in arm.args
-            pattern_dispatch!(oexprs, state, nctx, a)
-        end
-    else
-        pattern_dispatch!(oexprs, state, nctx, arm)
-    end
+# Walk `arm` into its own accumulator, in a branch forked from the current one
+function walk_arm!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx, @nospecialize(arm),
+                   armvar::Symbol, end_label::Symbol, @nospecialize(sentinel), props::Vector)
+    parent = nctx[:current_branch]
+    child = ParseBranch(length(state.branches) + 1, parent, armvar,
+                        parent.parsed_min, parent.parsed_max,
+                        parent.parsed_min, parent.parsed_min,
+                        parent.print_min, parent.print_max, parent.parsed_min)
+    push!(state.branches, child)
+    odetect = ExprVarLine[]
+    nctx = NodeCtx(nctx, :optional, armvar)
+    nctx = NodeCtx(nctx, :opt_label, end_label)
+    nctx = NodeCtx(nctx, :oprint_detect, odetect)
+    nctx = NodeCtx(nctx, :optional_sentinel, sentinel)
+    nctx = NodeCtx(nctx, :current_branch, child)
+    oexprs = PatternExprs(ExprVarLine[], PrintExprs(), exprs.segments, props, Vector{ByteSet}[])
+    arm === "" || pattern_dispatch!(oexprs, state, nctx, arm)
+    child, oexprs, odetect
+end
+
+# Parse an arm where its branch's length check allows; failing within, it jumps to `end_label`
+function arm_attempt(@nospecialize(popt), armvar::Symbol, end_label::Symbol, child::ParseBranch,
+                     parse::Vector{ExprVarLine})
+    check = Expr(:call, :__branch_check, Bool, child.id)
+    ExprVarLine[:($armvar = $(if isnothing(popt) check else :($popt && $check) end)),
+                :(if $armvar; $(parse...) end),
+                :(@label $end_label)]
 end
 
 ## Byte profiling for structured choice dispatch
@@ -410,25 +429,13 @@ function pattern_choice_optional!(exprs::PatternExprs,
                                   state::ParserState, nctx::NodeCtx,
                                   @nospecialize(arm))
     popt = get(nctx, :optional, nothing)
+    parent = nctx[:current_branch]
     optvar = gensym("optional")
     end_label = gensym("opt_end")
-    nctx = NodeCtx(nctx, :optional, optvar)
-    nctx = NodeCtx(nctx, :opt_label, end_label)
-    nctx = NodeCtx(nctx, :oprint_detect, ExprVarLine[])
-    parent = nctx[:current_branch]
-    child = ParseBranch(length(state.branches) + 1, parent, optvar,
-                        parent.parsed_min, parent.parsed_max,
-                        parent.parsed_min, parent.parsed_min,
-                        parent.print_min, parent.print_max, parent.parsed_min)
-    push!(state.branches, child)
-    nctx = NodeCtx(nctx, :current_branch, child)
     sentinel_ref = Ref{Union{Nothing, OptSentinel}}(nothing)
-    nctx = NodeCtx(nctx, :optional_sentinel, sentinel_ref)
     seg_start = length(exprs.segments)
     bits_before = state.bits
-    oexprs = PatternExprs(ExprVarLine[], PrintExprs(),
-                          exprs.segments, exprs.properties, Vector{ByteSet}[])
-    walk_choice_arm!(oexprs, state, nctx, arm)
+    child, oexprs, odetect = walk_arm!(exprs, state, nctx, arm, optvar, end_label, sentinel_ref, exprs.properties)
     if sentinel_ref[] === nothing
         flag_nbits = (state.bits += 1)
         push!(oexprs.parse, emit_pack(state, Bool, optvar, flag_nbits))
@@ -440,15 +447,10 @@ function pattern_choice_optional!(exprs::PatternExprs,
     parent.parsed_max += child.parsed_max - child.start_min
     parent.print_max = Base.max(parent.print_max, child.print_max)
     savedpos = gensym("savedpos")
-    branch_check = Expr(:call, :__branch_check, Bool, child.id)
-    guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
     push!(exprs.parse, :($savedpos = pos))
-    push!(exprs.parse, :($optvar = $guard))
-    push!(exprs.parse, :(if $optvar; $(oexprs.parse...) end))
-    push!(exprs.parse, :(@label $end_label))
-    push!(exprs.parse, :(if !$optvar; pos = $savedpos; $(arm_clear_bits(state, bits_before)...) end))
+    append!(exprs.parse, arm_attempt(popt, optvar, end_label, child, oexprs.parse))
+    push!(exprs.parse, :(if !$optvar; pos = $savedpos; $(arm_clear_bits(bits_before, state.bits)...) end))
     # Print: hoist extraction + condition, wrap bodies in if
-    odetect = nctx[:oprint_detect]
     cond_assign = :($optvar = $check)
     for field in (:direct, :getval)
         append!(getfield(exprs.print, field), odetect)
@@ -471,10 +473,8 @@ struct ChoiceArm
     end_label::Symbol
     child::ParseBranch
     oexprs::PatternExprs
-    arm_nctx::NodeCtx
-    arm_props::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}}
+    odetect::Vector{ExprVarLine}
     seg_range::UnitRange{Int}
-    bits_before::Int
     bits_after::Int
 end
 
@@ -506,29 +506,16 @@ function pattern_choice_multi!(exprs::PatternExprs,
     for (k, arm) in enumerate(arms)
         armvar = gensym("arm$k")
         end_label = gensym("arm$(k)_end")
-        arm_nctx = NodeCtx(nctx, :optional, armvar)
-        arm_nctx = NodeCtx(arm_nctx, :opt_label, end_label)
-        arm_nctx = NodeCtx(arm_nctx, :oprint_detect, ExprVarLine[])
-        arm_nctx = NodeCtx(arm_nctx, :optional_sentinel, nothing)
-        child = ParseBranch(length(state.branches) + 1, parent, armvar,
-                            parent.parsed_min, parent.parsed_max,
-                            parent.parsed_min, parent.parsed_min,
-                            parent.print_min, parent.print_max, parent.parsed_min)
-        push!(state.branches, child)
-        arm_nctx = NodeCtx(arm_nctx, :current_branch, child)
         seg_start = length(exprs.segments)
         state.bits = arm_base
-        bits_before = state.bits
-        arm_props = Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}[]
-        oexprs = PatternExprs(ExprVarLine[], PrintExprs(),
-                              exprs.segments, arm_props, Vector{ByteSet}[])
-        arm !== "" && walk_choice_arm!(oexprs, state, arm_nctx, arm)
+        child, oexprs, odetect = walk_arm!(exprs, state, nctx, arm, armvar, end_label, nothing,
+                                           Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}[])
         bits_after = state.bits
         dval = gensym("discrim")
         push!(oexprs.parse, :($dval = $(discrim_type(k))))
         push!(oexprs.parse, emit_pack(state, discrim_type, dval, discrim_pos))
-        push!(arm_data, ChoiceArm(armvar, end_label, child, oexprs, arm_nctx, arm_props,
-                                  seg_start+1:length(exprs.segments), bits_before, bits_after))
+        push!(arm_data, ChoiceArm(armvar, end_label, child, oexprs, odetect,
+                                  seg_start+1:length(exprs.segments), bits_after))
     end
     state.bits = maximum(Int[ad.bits_after for ad in arm_data])
     # Each arm starts where the choice does, so the choice spans their extremes
@@ -536,27 +523,26 @@ function pattern_choice_multi!(exprs::PatternExprs,
     parent.parsed_max += maximum(Int[ad.child.parsed_max - ad.child.start_min for ad in arm_data])
     parent.print_min = minimum(Int[ad.child.print_min for ad in arm_data])
     parent.print_max = maximum(Int[ad.child.print_max for ad in arm_data])
+    armcheck(k) = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
     for (k, ad) in enumerate(arm_data)
         ad.child.close_min = parent.parsed_min
-        check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
+        check = armcheck(k)
         patch_optional_extracts!(exprs.segments, ad.seg_range, check)
-        for (name, val) in ad.arm_props
+        for (name, val) in ad.oexprs.properties
             guarded = guard_property_extract(val, check, exprs.segments, ad.seg_range)
             push!(exprs.properties, name => guarded)
         end
     end
-    final_bits = state.bits
     arm_spans = Vector{Vector{ByteSet}}[ad.oexprs.bytespans for ad in arm_data]
     dispatch_reg = gensym("dispatch_reg")
     dispatch = find_choice_dispatch(arm_spans, dispatch_reg)
     if !isnothing(dispatch)
-        emit_dispatch_parse!(exprs, state, nctx, popt, savedpos, arm_data,
+        emit_dispatch_parse!(exprs, state, nctx, popt, savedpos, arm_data, arm_base,
                              dispatch_reg, dispatch, "" in arms)
     else
-        emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data,
+        emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data, arm_base,
                             "" in arms, discrim_bits)
     end
-    state.bits = final_bits
     # Emit per-arm print blocks. Separate `if` blocks (not if/elseif) so
     # rewrite_bufprint! can reach print calls inside each arm.
     discrim_extract = emit_extract(state, discrim_pos, discrim_bits)
@@ -566,7 +552,7 @@ function pattern_choice_multi!(exprs::PatternExprs,
     push!(exprs.print.direct, discrim_valid)
     push!(exprs.print.getval, copy(discrim_valid))
     for (k, ad) in enumerate(arm_data)
-        odetect = ad.arm_nctx[:oprint_detect]
+        odetect = ad.odetect
         cond = :($discrim_extract == $(discrim_type(k)))
         # direct: self-contained (odetect + direct inside if)
         append!(exprs.print.direct, odetect)
@@ -585,16 +571,16 @@ function pattern_choice_multi!(exprs::PatternExprs,
     if !isnothing(tag_field)
         tag_tuple = Expr(:tuple, tag_values...)
         for k in eachindex(arm_data)
-            check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))
             push!(exprs.properties, tag_field =>
-                ExprVarLine[:(if $check; $tag_tuple[$(discrim_type(k))] end)])
+                ExprVarLine[:(if $(armcheck(k)); $tag_tuple[$(discrim_type(k))] end)])
         end
     end
 end
 
 function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
                               @nospecialize(popt::Union{Nothing, Symbol}), savedpos::Symbol,
-                              arm_data::Vector{ChoiceArm}, reg_var::Symbol, @nospecialize(dispatch), has_empty::Bool)
+                              arm_data::Vector{ChoiceArm}, arm_base::Int, reg_var::Symbol, @nospecialize(dispatch),
+                              has_empty::Bool)
     arm_idx_var = gensym("arm_idx")
     (; offset, iT, idx) = dispatch
     bwidth = sizeof(iT)
@@ -608,17 +594,11 @@ function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::Nod
                              $arm_idx_var = $idx
                          end))
     for (k, ad) in enumerate(arm_data)
-        branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
-        guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
-        state.bits = ad.bits_after
-        rewind = :(if !$(ad.armvar); pos = $savedpos; $(arm_clear_bits(state, ad.bits_before)...) end)
+        rewind = :(if !$(ad.armvar); pos = $savedpos; $(arm_clear_bits(arm_base, ad.bits_after)...) end)
         push!(exprs.parse, :($(ad.armvar) = false))
         push!(exprs.parse, :(if $arm_idx_var == $(UInt8(k))
-                                 $(ExprVarLine[
-                                     :($(ad.armvar) = $guard),
-                                     :(if $(ad.armvar); $(ad.oexprs.parse...) end),
-                                     :(@label $(ad.end_label)),
-                                     rewind]...)
+                                 $(arm_attempt(popt, ad.armvar, ad.end_label, ad.child, ad.oexprs.parse)...)
+                                 $rewind
                              end))
     end
     if !has_empty || !isnothing(popt)
@@ -644,7 +624,7 @@ so far is snapshotted and rewound, and restored once every arm has been tried.
 """
 function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx,
                              @nospecialize(popt::Union{Nothing, Symbol}), savedpos::Symbol,
-                             arm_data::Vector{ChoiceArm}, has_empty::Bool, discrim_bits::Int)
+                             arm_data::Vector{ChoiceArm}, arm_base::Int, has_empty::Bool, discrim_bits::Int)
     innermost = if has_empty && isnothing(popt)
         ExprVarLine[]
     else
@@ -667,15 +647,9 @@ function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::Node
     cascade = innermost
     for p in Iterators.reverse(plan)
         ad = arm_data[p.src]
-        branch_check = Expr(:call, :__branch_check, Bool, ad.child.id)
-        guard = if isnothing(popt) branch_check else :($popt && $branch_check) end
-        state.bits = ad.bits_after
-        attempt = ExprVarLine[
-            :($(ad.armvar) = $guard),
-            :(if $(ad.armvar); $(ad.oexprs.parse...) end),
-            :(@label $(ad.end_label))]
+        attempt = arm_attempt(popt, ad.armvar, ad.end_label, ad.child, ad.oexprs.parse)
         clear = if p.static_commit
-            arm_clear_bits(state, ad.bits_before)
+            arm_clear_bits(arm_base, ad.bits_after)
         else
             final = if p.clears_threshold isbest else :($isbest && $len >= $(p.threshold)) end
             push!(attempt, :(if $(ad.armvar)
@@ -689,7 +663,7 @@ function emit_cascade_parse!(exprs::PatternExprs, state::ParserState, nctx::Node
                                  end
                              end))
             # A rewound success has packed its discriminant, just below the arm's bits.
-            arm_clear_bits(state, ad.bits_before - discrim_bits)
+            arm_clear_bits(arm_base - discrim_bits, ad.bits_after)
         end
         cascade = ExprVarLine[attempt...,
             :(if !$(ad.armvar); pos = $savedpos; $(clear...); $(cascade...) end)]

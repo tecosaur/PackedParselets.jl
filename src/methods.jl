@@ -42,20 +42,23 @@ function maketype(@nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{Segme
                   @nospecialize(globals::NamedTuple = (;)),
                   @nospecialize(global_kwargs::Tuple = ()))
     root = ParseBranch(1, nothing, :root, 0, 0, 0, 0, 0, 0, 0)
-    state = ParserState(name, mod, 0, supertype,
-                        globals, ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
+    kwnames = Symbol[]
+    for def in segments; append!(kwnames, def.kwargs) end
+    append!(kwnames, global_kwargs)
+    state = ParserState(name, mod, 0, supertype, globals, segments, kwnames,
+                        ParseBranch[root], String[], Pair{Symbol, SegmentOutput}[])
     nctx = NodeCtx(:current_branch, root)
     nctx = NodeCtx(nctx, :casefold, casefold)
     exprs = PatternExprs()
     push!(exprs.parse, Expr(:call, :__branch_check, root.id, nothing))
-    pattern_dispatch!(exprs, state, nctx, segments, global_kwargs, pattern)
-    assemble_type(exprs, state, name, segments)
+    pattern_dispatch!(exprs, state, nctx, pattern)
+    assemble_type(exprs, state)
 end
 
 ## Assembly
 
 """
-    assemble_type(exprs, state, name, segments) -> (NamedTuple, ParserState)
+    assemble_type(exprs, state) -> (NamedTuple, ParserState)
 
 Assemble all method definitions for the generated type as a `NamedTuple`
 of expression components.
@@ -63,8 +66,8 @@ of expression components.
 Runs finalize hooks from the segment registry, collecting their outputs
 in the `hookdata` field.
 """
-function assemble_type(exprs::PatternExprs, state::ParserState, name::Symbol,
-                       @nospecialize(segments::NamedTuple{<:Any, <:Tuple{Vararg{SegmentDef}}} = (;)))
+function assemble_type(exprs::PatternExprs, state::ParserState)
+    (; name, segments) = state
     numbits = 8 * cld(state.bits, 8)
     for field in (:direct, :getval, :getlen, :putval)
         implement_casting!(state, getfield(exprs.print, field))

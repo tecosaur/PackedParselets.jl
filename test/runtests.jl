@@ -3663,10 +3663,18 @@ end
         @test parse(StructChoiceOpt, "B007").y == 7
         @test parse(StructChoiceOpt, "B007").x === nothing
         @test tryparse(StructChoiceOpt, "C99") === nothing
+        @test PP.parsebounds(StructChoiceOpt) == (0, 4)
+        @test PP.printbounds(StructChoiceOpt) == (0, 4)
+    end
+    @testset "bounds span the arms, not their sum" begin
+        eval(:(@defpacked ArmBounds (choice(("A", digits(4)), ("B", letters(3)), ("CC", digits(2))), "-", digits(2))))
+        @test PP.parsebounds(ArmBounds) == (7, 8)
+        @test PP.printbounds(ArmBounds) == (7, 8)
+        check_roundtrips(ArmBounds, ("A1234-56", "Babc-56", "CC12-56"))
     end
     @testset "letter-range dispatch" begin
         iddef = :(@defpacked LetterChoice (choice(("X", :a(digits(3))), ("Y", :b(digits(2))), ("Z", :c(digits(1))))))
-        @test parsebytes_complexity(iddef) == (branches=6:20, branch_total=20, ops=3:70)
+        @test parsebytes_complexity(iddef) == (branches=6:20, branch_total=20, ops=3:68)
         eval(iddef)
         @test parse(LetterChoice, "X042").a == 42
         @test parse(LetterChoice, "Y07").b == 7
@@ -3688,7 +3696,7 @@ end
     end
     @testset "casefold dispatch" begin
         iddef = :(@defpacked CaseFoldChoice (choice(("ab", :x(digits(2))), ("cd", :y(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:49)
+        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:47)
         eval(iddef)
         @test parse(CaseFoldChoice, "ab42").x == 42
         @test parse(CaseFoldChoice, "AB42").x == 42
@@ -3706,7 +3714,7 @@ end
     end
     @testset "cascade fallback" begin
         iddef = :(@defpacked CascadeChoice (choice((:a(digits(2)), "X"), (:b(digits(2)), "Y"))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:47)
+        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:45)
         eval(iddef)
         @test parse(CascadeChoice, "42X").a == 42
         @test parse(CascadeChoice, "42X").b === nothing
@@ -3757,7 +3765,7 @@ end
         @testset "equal-length matches go to source order" begin
             iddef = :(@defpacked CascadeTie (choice(:y(letters(3, lower=true)),
                        :x(letters(1:4, lower=true)))))
-            @test parsebytes_complexity(iddef) == (branches=4:19, branch_total=19, ops=4:61)
+            @test parsebytes_complexity(iddef) == (branches=4:19, branch_total=19, ops=2:59)
             eval(iddef)
             @test parse(CascadeTie, "abc").y == "abc"
             @test parse(CascadeTie, "abc").x === nothing
@@ -3769,7 +3777,7 @@ end
             # b could take 6 digits, but a's "12x" is the longer match here.
             iddef = :(@defpacked CascadeLongest (choice((:a(digits(2)), "x"), :b(digits(1:6))),
                        "x", :c(digits(1))))
-            @test parsebytes_complexity(iddef) == (branches=7:32, branch_total=37, ops=11:103)
+            @test parsebytes_complexity(iddef) == (branches=7:32, branch_total=37, ops=9:101)
             eval(iddef)
             @test parse(CascadeLongest, "12xx3").a == 12
             @test parse(CascadeLongest, "12xx3").c == 3
@@ -3780,7 +3788,7 @@ end
     end
     @testset "multi-byte window dispatch" begin
         iddef = :(@defpacked MultiByteChoice (choice(("AX", :x(digits(2))), ("AY", :y(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:48)
+        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:46)
         eval(iddef)
         @test parse(MultiByteChoice, "AX42").x == 42
         @test parse(MultiByteChoice, "AX42").y === nothing
@@ -3793,7 +3801,7 @@ end
         iddef = :(@defpacked FourArm (choice(
             ("A", :a(digits(2))), ("B", :b(digits(2))),
             ("C", :c(digits(2))), ("D", :d(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:26, branch_total=26, ops=3:91)
+        @test parsebytes_complexity(iddef) == (branches=6:26, branch_total=26, ops=3:85)
         eval(iddef)
         @test parse(FourArm, "A42").a == 42
         @test parse(FourArm, "B07").b == 7
@@ -3838,7 +3846,7 @@ end
     end
     @testset "digit vs letter discrimination" begin
         iddef = :(@defpacked DigitLetterChoice (choice((:n(digits(3))), (letters(1), :m(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:65)
+        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:63)
         eval(iddef)
         @test parse(DigitLetterChoice, "042").n == 42
         @test parse(DigitLetterChoice, "042").m === nothing
@@ -3908,7 +3916,7 @@ end
                     seq("y", :id(digits(3))))),
                 seq("B", :id(digits(4))),
                 seq("C", :tag(choice("p", "q")), :id(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:36, branch_total=36, ops=3:116)
+        @test parsebytes_complexity(iddef) == (branches=6:36, branch_total=36, ops=3:114)
         eval(iddef)
         # Each arm parses and extracts :id correctly
         @test parse(NestedDupField, "Ax01").id == 1
@@ -3932,7 +3940,7 @@ end
     end
     @testset "string choice inside arm" begin
         iddef = :(@defpacked InnerChoice (choice((:tag(choice("alpha", "beta")), :n(digits(1))), ("X", :m(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:19, branch_total=19, ops=3:52)
+        @test parsebytes_complexity(iddef) == (branches=6:19, branch_total=19, ops=3:50)
         eval(iddef)
         @test parse(InnerChoice, "alpha3").tag == :alpha
         @test parse(InnerChoice, "beta5").tag == :beta
@@ -3943,7 +3951,7 @@ end
     end
     @testset "optional inside arm" begin
         iddef = :(@defpacked OptInArm (choice(("A", :x(digits(2)), optional("-", :y(digits(1)))), ("B", :z(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:19, branch_total=19, ops=3:60)
+        @test parsebytes_complexity(iddef) == (branches=6:19, branch_total=19, ops=3:58)
         eval(iddef)
         @test parse(OptInArm, "A42").x == 42
         @test parse(OptInArm, "A42").y === nothing
@@ -3966,7 +3974,7 @@ end
     end
     @testset "cross-alternative dispatch" begin
         iddef = :(@defpacked CrossAlt (choice((choice("AB", "CD"), :x(digits(1))), (choice("AD", "CB"), :y(digits(1))))))
-        @test parsebytes_complexity(iddef) == (branches=6:18, branch_total=18, ops=3:52)
+        @test parsebytes_complexity(iddef) == (branches=6:18, branch_total=18, ops=3:50)
         eval(iddef)
         @test parse(CrossAlt, "AB3").x == 3
         @test parse(CrossAlt, "CD7").x == 7
@@ -3979,7 +3987,7 @@ end
     @testset "nested: structured choice inside optional" begin
         iddef = :(@defpacked ChoiceInOpt (:id(digits(max=99)),
             optional("-", choice(("A", :x(digits(2))), ("B", :y(digits(2)))))))
-        @test parsebytes_complexity(iddef) == (branches=5:26, branch_total=28, ops=18:90)
+        @test parsebytes_complexity(iddef) == (branches=5:26, branch_total=28, ops=18:88)
         eval(iddef)
         bare = parse(ChoiceInOpt, "42")
         @test bare.id == 42
@@ -4013,7 +4021,7 @@ end
             :new => :num(digits(4)),
             :old => seq(choice(:kind, :a => "AA", :b => "BB"),
                         :num(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:26, branch_total=26, ops=3:60)
+        @test parsebytes_complexity(iddef) == (branches=6:25, branch_total=25, ops=3:56)
         eval(:(@defpacked NestedTag (choice(:format,
             :new => :num(digits(4)),
             :old => seq(choice(:kind, :a => "AA", :b => "BB"),
@@ -4037,7 +4045,7 @@ end
         iddef = :(@defpacked RangeCascade ("Y",
             :year(choice(digits(2, min=91, max=99, pad=2), digits(2, min=0, max=7, pad=2))),
             :month(digits(2, min=1, max=12, pad=2))))
-        @test parsebytes_complexity(iddef) == (branches=7:14, branch_total=14, ops=11:56)
+        @test parsebytes_complexity(iddef) == (branches=7:13, branch_total=13, ops=11:54)
         eval(:(@defpacked RangeCascade ("Y",
             :year(choice(digits(2, min=91, max=99, pad=2), digits(2, min=0, max=7, pad=2))),
             :month(digits(2, min=1, max=12, pad=2)))))
@@ -4055,7 +4063,7 @@ end
         # check: the nested branch has already consumed some of it.
         iddef = :(@defpacked TruncDispatch (choice(("A", :a(digits(2))), ("B", :b(digits(3)))),
                    "x", :c(digits(2))))
-        @test parsebytes_complexity(iddef) == (branches=6:18, branch_total=18, ops=4:70)
+        @test parsebytes_complexity(iddef) == (branches=6:17, branch_total=17, ops=4:66)
         eval(iddef)
         @test parses_within(TruncDispatch, "B123x45", 7)
         @test !parses_within(TruncDispatch, "B123x45", 5)

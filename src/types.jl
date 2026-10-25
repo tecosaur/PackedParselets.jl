@@ -321,7 +321,7 @@ struct HashPlan
     injective::Bool
 end
 
-# `record`: a match stores its index (`:index`), `true` (`:flag`), or nothing (`:none`)
+# `record`: a match stores its index (`:index`), `true` (`:flag`), or, for a skip, nothing (`:none`)
 struct ChoiceMatch
     mopts::Vector{String}
     sopts::Vector{String}

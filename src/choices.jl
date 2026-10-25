@@ -184,7 +184,9 @@ function record_match(cmatch::ChoiceMatch, @nospecialize(index))
     (; fieldvar, record) = cmatch
     if record === :index; :($fieldvar = $index)
     elseif record === :flag; :($fieldvar = one($fieldvar))
-    else :() end
+    # A skip's prefixes, unlike a value's options, tend to be all present or all absent,
+    # which a branch predicts better than a conditional move
+    else :(keepbranch()) end
 end
 
 function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cmatch::ChoiceMatch)
@@ -256,7 +258,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
     end
     # Stage 3: advance pos and record the matched option
     coerced_i = if isempty(ph.table) && ph.iT === cint; :i else :(i % $cint) end
-    action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end); keepbranch()),
+    action = ExprVarLine[:(pos += $(if variable_len; :optlen else minoptlen end)),
                          record_match(cmatch, coerced_i)]
     guard_append!(action)
     push!(parts, :(if found; $(body...) end))
@@ -289,7 +291,6 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, cmatch::ChoiceM
         body = quote
             $(record_match(cmatch, :($(i % cint))))
             pos += $n
-            keepbranch()
         end
         chain = if isnothing(chain)
             Expr(:if, :($fit && !$nomatch), body)

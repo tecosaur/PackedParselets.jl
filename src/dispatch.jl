@@ -540,13 +540,15 @@ function pattern_choice_multi!(exprs::PatternExprs,
         dval = gensym("discrim")
         push!(oexprs.parse, :($dval = $(discrim_type(k))))
         push!(oexprs.parse, emit_pack(state, discrim_type, dval, discrim_pos))
-        parent.parsed_max += child.parsed_max - child.start_min
-        parent.print_max = Base.max(parent.print_max, child.print_max)
         push!(arm_data, ChoiceArm(armvar, end_label, child, oexprs, arm_nctx, arm_props,
                                   seg_start+1:length(exprs.segments), bits_before, bits_after))
     end
     state.bits = maximum(Int[ad.bits_after for ad in arm_data])
+    # Each arm starts where the choice does, so the choice spans their extremes
     parent.parsed_min += minimum(Int[ad.child.parsed_min - ad.child.start_min for ad in arm_data])
+    parent.parsed_max += maximum(Int[ad.child.parsed_max - ad.child.start_min for ad in arm_data])
+    parent.print_min = minimum(Int[ad.child.print_min for ad in arm_data])
+    parent.print_max = maximum(Int[ad.child.print_max for ad in arm_data])
     for (k, ad) in enumerate(arm_data)
         ad.child.close_min = parent.parsed_min
         check = :($(emit_extract(state, discrim_pos, discrim_bits)) == $(discrim_type(k)))

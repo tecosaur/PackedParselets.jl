@@ -232,7 +232,7 @@ end
 # Parse an arm where its branch's length check allows; failing within, it jumps to `end_label`
 function arm_attempt(@nospecialize(popt), armvar::Symbol, end_label::Symbol, child::ParseBranch,
                      parse::Vector{ExprVarLine})
-    check = Expr(:call, :__branch_check, Bool, child.id)
+    check = Expr(:call, :__branch_check, child.id)
     ExprVarLine[:($armvar = $(if isnothing(popt) check else :($popt && $check) end)),
                 :(if $armvar; $(parse...) end),
                 :(@label $end_label)]

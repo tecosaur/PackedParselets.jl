@@ -276,7 +276,7 @@ function build_hash_matcher(state::ParserState, nctx::NodeCtx, ph::HashPlan, cma
         else push!(body, :(if found; $(stmts...) end)) end
     # Stage 1: variable-length option → look up optlen, check available bytes
     if variable_len
-        optlencheck = emit_lengthcheck(state, nctx, :optlen, minoptlen, maximum(ncodeunits, mopts))
+        optlencheck = emit_lengthcheck(state, nctx, :optlen, maximum(ncodeunits, mopts))
         append!(body, ExprVarLine[:(optlen = $(optlens)[i]),
                                   :(found = $optlencheck)])
     end

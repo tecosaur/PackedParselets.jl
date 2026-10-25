@@ -295,7 +295,7 @@ Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}
     if maxdigits <= 9 || num <= typemax(UInt32)
         bufprint_decimal32(buf, pos, num % UInt32, 0, mindigits, Base.min(maxdigits, 10))
     else
-        bufprint_decimal64(buf, pos, num, pad)
+        bufprint_decimal64(buf, pos, num)
     end
 end
 
@@ -339,8 +339,8 @@ Base.@constprop :aggressive @inline function bufprint_fixed6(buf::Memory{UInt8},
     pos
 end
 
-@noinline function bufprint_decimal64(buf::Memory{UInt8}, pos::Int, num::UInt64, pad::Int)
-    startpos = pos
+# Only values wider than a UInt32 come here, so wider than any padding that sends them
+@noinline function bufprint_decimal64(buf::Memory{UInt8}, pos::Int, num::UInt64)
     # Split into ≤8-digit UInt32 chunks via divrem by 10^8.
     # UInt64 max ≈ 1.8×10^19 → at most three chunks (4+8+8 digits).
     hi, lo = divrem(num, UInt64(100_000_000))
@@ -351,16 +351,7 @@ end
         pos = bufprint_decimal32(buf, pos, hi2 % UInt32, 0)
         pos = bufprint_decimal32(buf, pos, mid % UInt32, 8)
     end
-    pos = bufprint_decimal32(buf, pos, lo % UInt32, 8)
-    # Pad if needed
-    nd = pos - startpos
-    if nd < pad
-        npad = pad - nd
-        @inbounds for j in pos:-1:startpos+1; buf[j + npad] = buf[j] end
-        @inbounds for j in startpos+1:startpos+npad; buf[j] = UInt8('0') end
-        pos += npad
-    end
-    pos
+    bufprint_decimal32(buf, pos, lo % UInt32, 8)
 end
 
 # A range `num` must lie in, by `mindigits:maxdigits`, is taken without a test, and

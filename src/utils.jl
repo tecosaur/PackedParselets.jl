@@ -5,8 +5,34 @@
 
 ## Invalid values
 
+# `x` when within `lo:hi`, for constructors
+@inline checkvalue(x::Integer, lo::Integer, hi::Integer) = if lo <= x <= hi x else throw_valuerange(x, lo, hi) end
+@noinline throw_valuerange(x::Integer, lo::Integer, hi::Integer) =
+    throw(ArgumentError(string("Value ", x, if x < lo " is below minimum " else " is above maximum " end, if x < lo lo else hi end)))
+
 @noinline throw_invalidpacking(@nospecialize(T::Type), field::Union{Symbol, Nothing}, value::Integer) =
     throw(InvalidPacking(T, field, value))
+
+## Segment text
+
+markend!(::Nothing, ::Int, ::Int) = nothing
+markend!(marks::Vector{Int}, i::Int, pos::Int) = (marks[i] = pos; nothing)
+
+# `segments(val)`: the text `tobytes` writes for each of `val`'s `N` segments, and
+# `nothing` for those it passes over
+function printsegments(val, ::Val{N}, maxbytes::Int) where {N}
+    buf = Memory{UInt8}(undef, maxbytes)
+    marks = fill(-1, N)
+    tobytes(buf, val, 0, marks)
+    texts = Vector{Union{String, Nothing}}(nothing, N)
+    start = 0
+    for (i, stop) in enumerate(marks)
+        stop < 0 && continue
+        texts[i] = String(view(buf, start+1:stop))
+        start = stop
+    end
+    ntuple(i -> texts[i], Val(N))
+end
 
 ## Compat
 

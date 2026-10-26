@@ -286,12 +286,11 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     b.parsed_max += last(bounds.parsed)
     b.print_min += first(bounds.printed)
     b.print_max += last(bounds.printed)
-    (; direct, vars, getval, getlen, putval) = codegen.print
+    (; direct, vars, getval, getlen) = codegen.print
     append!(exprs.print.direct, direct)
     append!(exprs.print.vars, vars)
     append!(if isnothing(option) exprs.print.getval else nctx[:oprint_detect] end, getval)
     append!(exprs.print.getlen, getlen)
-    append!(exprs.print.putval, putval)
     argvar = something(meta.argvar, :_)
     push!(exprs.layout, Segment((bounds.nbits, kind, meta.label, meta.desc, meta.shortform)))
     push!(exprs.segments, ValueSegment(

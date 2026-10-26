@@ -433,14 +433,13 @@ function pattern_choice_optional!(exprs::PatternExprs,
     push!(exprs.parse, :($savedpos = pos))
     append!(exprs.parse, arm_attempt(popt, optvar, end_label, child, oexprs.parse))
     push!(exprs.parse, :(if !$optvar; pos = $savedpos; $(arm_clear_bits(bits_before, state.bits)...) end))
-    cond_assign = :($optvar = $check)
-    for field in (:direct, :getval)
-        append!(getfield(exprs.print, field), odetect)
-        push!(getfield(exprs.print, field), cond_assign)
-    end
+    # Each segment's direct print extracts what it prints, where `getval` relies on `odetect`
+    append!(exprs.print.getval, odetect)
+    push!(exprs.print.getval, :($optvar = $check))
+    push!(exprs.print.direct, :($optvar = $check))
     append!(exprs.print.vars, oexprs.print.vars)
     push!(exprs.print.vars, optvar => false)
-    for field in (:direct, :getval, :getlen, :putval)
+    for field in (:direct, :getval, :getlen)
         body = getfield(oexprs.print, field)
         isempty(body) && continue
         push!(getfield(exprs.print, field), :(if $optvar; $(body...) end))
@@ -522,21 +521,21 @@ function pattern_choice_multi!(exprs::PatternExprs,
                             "" in arms, discrim_bits)
     end
     # Separate `if` blocks (not if/elseif) so rewrite_bufprint! can reach each arm's prints
-    discrim_extract = emit_extract(state, discrim_pos, discrim_bits)
+    discrim = gensym("discrim")
+    push!(exprs.print.vars, discrim => :(zero($discrim_type)))
     # An arm prints only on its own discriminant, so any other would print nothing
     tagvar = if isnothing(tag_field); :discriminant else Symbol(:attr_, tag_field) end
-    discrim_valid = emit_validity_check(state, tagvar, discrim_extract, 1:length(arm_data))
-    push!(exprs.print.direct, discrim_valid)
-    push!(exprs.print.getval, copy(discrim_valid))
+    for stream in (exprs.print.direct, exprs.print.getval)
+        push!(stream, :($discrim = $(emit_extract(state, discrim_pos, discrim_bits))),
+              emit_validity_check(state, tagvar, discrim, 1:length(arm_data)))
+    end
     for (k, ad) in enumerate(arm_data)
         odetect = ad.odetect
-        cond = :($discrim_extract == $(discrim_type(k)))
-        append!(exprs.print.direct, odetect)
+        cond = :($discrim == $(discrim_type(k)))
         push!(exprs.print.direct, :(if $cond; $(ad.oexprs.print.direct...) end))
         append!(exprs.print.vars, ad.oexprs.print.vars)
         push!(exprs.print.getval, :(if $cond; $(odetect...); $(ad.oexprs.print.getval...) end))
         push!(exprs.print.getlen, :(if $cond; $(ad.oexprs.print.getlen...) end))
-        push!(exprs.print.putval, :(if $cond; $(ad.oexprs.print.putval...) end))
     end
     # Propagated so an enclosing choice can dispatch on this one's content
     all_alts = reduce(vcat, arm_spans)

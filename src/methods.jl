@@ -54,7 +54,7 @@ end
 function assemble_type(exprs::PatternExprs, state::ParserState)
     (; name, segments) = state
     numbits = 8 * cld(state.bits, 8)
-    for field in (:direct, :getval, :getlen, :putval)
+    for field in (:direct, :getval, :getlen)
         implement_casting!(state, getfield(exprs.print, field))
     end
     root = state.branches[1]
@@ -94,7 +94,7 @@ function assemble_type(exprs::PatternExprs, state::ParserState)
         propertynames = :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(Symbol[first(p) for p in props]))),
         properties = assemble_properties(props, exprs.segments, state, name),
         segments_type = assemble_segments_type(exprs.layout, name),
-        segments_value = assemble_segments_value(length(exprs.segments), exprs.print, name),
+        segments_value = assemble_segments_value(length(exprs.segments), state, name),
         constructor = assemble_constructor(exprs.segments, props, state, name),
         show = assemble_show(props, name),
         isless = :($(GlobalRef(Base, :isless))(a::$(esc(name)), b::$(esc(name))) =
@@ -159,7 +159,8 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
     root = state.branches[1]
     fixedlen = root.print_min == root.print_max
     M = PackedParselets
-    directexprs = strip_print_markers(print.direct)
+    directexprs = copyexprs(print.direct)
+    foreach(mark_segment_ends!, directexprs)
     rewrite_bufprint!(directexprs)
     allocating = if fixedlen
         :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
@@ -182,7 +183,8 @@ function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
           end)
     end
     Expr(:block,
-        :(Base.@constprop :none function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, val::$(esc(name)), pos::Int)
+        # `segments(val)` collects where each segment ends in `marks`
+        :(Base.@constprop :none function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, val::$(esc(name)), pos::Int, marks = nothing)
               $(directexprs...)
               pos
           end),
@@ -344,26 +346,17 @@ end
 assemble_segments_type(layout::Layout, name::Symbol) =
     :($(GlobalRef(PackedParselets, :segments))(::Type{$(esc(name))}) = $layout)
 
-function assemble_segments_value(nsegs::Int, print::PrintExprs, name::Symbol)
-    texts = Symbol[Symbol("seg", i) for i in 1:nsegs]
-    pexprs = copyexprs(print.direct)
-    resolve_print_markers!(pexprs)
-    foreach(rewrite_segment_captures!, pexprs)
-    :(function $(GlobalRef(PackedParselets, :segments))(val::$(esc(name)))
-          io = IOBuffer()
-          $(Expr(:(=), Expr(:tuple, texts...), Expr(:tuple, fill(nothing, nsegs)...)))
-          $(pexprs...)
-          $(Expr(:tuple, texts...))
-      end)
-end
+assemble_segments_value(nsegs::Int, state::ParserState, name::Symbol) =
+    :($(GlobalRef(PackedParselets, :segments))(val::$(esc(name))) =
+          $(GlobalRef(PackedParselets, :printsegments))(val, Val($nsegs), $(state.branches[1].print_max)))
 
-# Replace each `__segment_printed = i` marker with `seg$i = takestring!(io)`
-function rewrite_segment_captures!(@nospecialize(expr))
+# Replace each `__segment_printed = i` marker with a note of where segment `i` ends
+function mark_segment_ends!(@nospecialize(expr))
     expr isa Expr || return
     if Meta.isexpr(expr, :(=)) && first(expr.args) === :__segment_printed
-        expr.args[1:2] = :($(Symbol("seg", expr.args[2])) = takestring!(io)).args
+        expr.head, expr.args = :call, Any[:markend!, :marks, expr.args[2], :pos]
     else
-        foreach(rewrite_segment_captures!, expr.args)
+        foreach(mark_segment_ends!, expr.args)
     end
 end
 

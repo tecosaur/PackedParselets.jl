@@ -112,8 +112,7 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
             PrintExprs(direct = ExprVarLine[fextract, checked(copy(printexpr))...],
                        vars = vars,
                        getval = ExprVarLine[fextract],
-                       getlen = checked(lenexpr),
-                       putval = checked(copy(printexpr))),
+                       getlen = checked(lenexpr)),
             seg_impart),
         SegmentMeta(label, desc, desc, argtype, argvar),
         arrangements)
@@ -150,7 +149,7 @@ function compile_choice_fixed(::ParserState, nctx::NodeCtx, @nospecialize(ctx))
     SegmentOutput(
         SegmentBounds(pmin:maximum(ncodeunits, sopts), tlen:tlen, 0, nothing),
         SegmentCodegen(pexprs, ExprVarLine[],
-            PrintExprs(direct=printout, putval=copy(printout),
+            PrintExprs(direct=printout,
                        getlen=ExprVarLine[:(pos += $tlen)]),
             Expr[]),
         SegmentMeta(label,

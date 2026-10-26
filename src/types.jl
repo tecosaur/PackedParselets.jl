@@ -36,7 +36,7 @@ struct SegmentBounds
 end
 
 """
-    PrintExprs(; direct, vars, getval, getlen, putval)
+    PrintExprs(; direct, vars, getval, getlen)
 
 Print-phase expression bundle produced by segment handlers.
 
@@ -44,20 +44,17 @@ Print-phase expression bundle produced by segment handlers.
 - `vars`: variables shared across phases, with default values (`Symbol => init`)
 - `getval`: extract bit-packed values to variables declared in `vars`
 - `getlen`: increment `pos` by the output byte count (using variables from `getval`)
-- `putval`: write to buffer/IO using variables from `getval`, incrementing `pos`
 """
 const PrintExprs = @NamedTuple{
     direct::Vector{ExprVarLine},
     vars::Vector{Pair{Symbol, Any}},
     getval::Vector{ExprVarLine},
     getlen::Vector{ExprVarLine},
-    putval::Vector{ExprVarLine},
 }
 
 PrintExprs(; direct=ExprVarLine[], vars=Pair{Symbol,Any}[],
-             getval=ExprVarLine[], getlen=ExprVarLine[],
-             putval=ExprVarLine[]) =
-    (direct=direct, vars=vars, getval=getval, getlen=getlen, putval=putval)
+             getval=ExprVarLine[], getlen=ExprVarLine[]) =
+    (direct=direct, vars=vars, getval=getval, getlen=getlen)
 
 """
     SegmentCodegen(parse, extract, print, impart)

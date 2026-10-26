@@ -760,8 +760,7 @@ end
         pinfo = PP.PrintExprs(direct = PP.ExprVarLine[fextract, print_exprs...],
                               vars = Pair{Symbol,Any}[fieldvar => UInt32(0)],
                               getval = PP.ExprVarLine[fextract],
-                              getlen = PP.ExprVarLine[:(pos += 8)],
-                              putval = print_exprs)
+                              getlen = PP.ExprVarLine[:(pos += 8)])
         PP.SegmentOutput(
             PP.SegmentBounds(8:8, 8:8, nbits, sentinel),
             PP.SegmentCodegen(parse_exprs, seg_extract, pinfo, seg_impart),
@@ -3625,8 +3624,8 @@ end
     @testset "Ranged digits" begin
         @test Ranged(100).id == 100
         @test Ranged(255).id == 255
-        @test_throws ArgumentError Ranged(99)
-        @test_throws ArgumentError Ranged(256)
+        @test_throws ArgumentError("Value 99 is below minimum 100") Ranged(99)
+        @test_throws ArgumentError("Value 256 is above maximum 255") Ranged(256)
     end
     @testset "Multi-field digits" begin
         @test LargeId(100, 200) == parse(LargeId, "100-200")

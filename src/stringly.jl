@@ -29,7 +29,7 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
     SegmentOutput(
         SegmentBounds(litlen:litlen, litlen:litlen, 0, nothing),
         SegmentCodegen(parse, ExprVarLine[],
-            PrintExprs(direct=printout, putval=copy(printout),
+            PrintExprs(direct=printout,
                        getlen=ExprVarLine[:(pos += $litlen)]),
             Expr[]),
         SegmentMeta(:literal, sprint(show, lit), lit, nothing, nothing),
@@ -113,7 +113,7 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segme
     SegmentOutput(
         SegmentBounds(0:parsed_max, plen:plen, 0, nothing),
         SegmentCodegen(parse, ExprVarLine[],
-            PrintExprs(direct=pexprs, putval=copy(pexprs), getlen=lenexprs),
+            PrintExprs(direct=pexprs, getlen=lenexprs),
             Expr[]),
         SegmentMeta(:skip, desc, shortform, nothing, nothing),
         arrangements)

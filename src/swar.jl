@@ -5,55 +5,6 @@
 
 ## Constants
 
-"""
-    swarparse_consts(::Type{T}, base::Int, nd::Int)
-        -> (; ascii_mask::T, alpha_mask::T, steps::Tuple)
-
-Compute SWAR ASCII-to-integer reduction constants for `nd` digit bytes
-high-aligned in register type `T`.
-
-The `ascii_mask` simultaneously strips ASCII encoding and zeros garbage
-(low) bytes. Each reduction step has `(; multiplier, shift[, mask])` where
-`Cₖ = base^g × 2^(g×8) + 1` combines each pair of adjacent `g`-byte digit groups
-into `earlier × base^g + later`, in O(log nd) steps. The mask clears inter-lane
-overflow between steps; the final step needs none.
-For hex (base > 10), `alpha_mask` enables letter correction before the
-first reduction step.
-"""
-function swarparse_consts(T::DataType, base::Int, nd::Int)
-    nbytes = sizeof(T)
-    1 <= nd <= nbytes || throw(ArgumentError(
-        "ndigits=$nd must be between 1 and $nbytes for $T"))
-    2 <= base <= 16 || throw(ArgumentError(
-        "base=$base must be between 2 and 16"))
-    hex = base > 10
-    padding = nbytes - nd
-    byteval = if hex; T(0x4F) else T(0x0F) end
-    ascii_mask, alpha_mask = zero(T), zero(T)
-    for i in 0:nd-1
-        ascii_mask |= byteval << (8 * (padding + i))
-        hex && (alpha_mask |= T(0x40) << (8 * (padding + i)))
-    end
-    nsteps = if nd <= 1 0 else 8 * sizeof(nd) - leading_zeros(nd - 1) end
-    steps = Any[]
-    for step in 1:nsteps
-        g = 1 << (step - 1)
-        shift = g * 8
-        multiplier = T(base) ^ g * (one(T) << shift) + one(T)
-        if step < nsteps
-            group_mask = (one(T) << shift) - one(T)
-            mask = zero(T)
-            for i in 0:(nbytes ÷ (2g))
-                mask |= group_mask << (2g * 8 * i)
-            end
-            push!(steps, (; multiplier, shift, mask))
-        else
-            push!(steps, (; multiplier, shift))
-        end
-    end
-    (; ascii_mask, alpha_mask, steps)
-end
-
 # Byte `b` in every lane of a `T`
 bytelanes(T::DataType, b::Integer) = T(b) * (typemax(T) ÷ typemax(UInt8))
 
@@ -68,15 +19,7 @@ otherwise. For base > 10, bit 7 of each byte is set for non-digits.
 function gen_swar_nondigits(T::DataType, var::Symbol, result::Symbol, base::Int)
     base <= 10 &&
         return :($result = ($var & ($var + $(bytelanes(T, 0x10 - base))) & $(bytelanes(T, 0xf0))) ⊻ $(bytelanes(T, 0x30)))
-    # Each byte's top bit is set by adding the distance to it from a range's start, and
-    # stays set short of its end
-    dec_ok, alp_ok, folded = gensym("dec"), gensym("alp"), gensym("folded")
-    hibits = bytelanes(T, 0x80)
-    Expr(:block,
-         :($folded = $var | $(bytelanes(T, 0x20))),
-         :($dec_ok = ($var + $(bytelanes(T, 0x80 - 0x30))) & ~($var + $(bytelanes(T, 0x80 - 0x3a))) & $hibits),
-         :($alp_ok = ($folded + $(bytelanes(T, 0x80 - 0x61))) & ~($folded + $(bytelanes(T, 0x80 - 0x61 - base + 10))) & $hibits),
-         :($result = ($dec_ok | $alp_ok) ⊻ $hibits))
+    :($result = digitflags($var, $base))
 end
 
 """
@@ -105,58 +48,6 @@ function gen_swar_digitcheck(T::DataType, var::Symbol, base::Int, nd::Int, on_fa
     ExprVarLine[check_expr, :(if $failcond; $on_fail end)]
 end
 
-"""
-    gen_swar_digitcount(::Type{T}, var, countvar, base, maxdigits) -> Vector{ExprVarLine}
-
-Count consecutive base-`base` digit bytes from the LSB of `var::T`
-(low-aligned) into `countvar`, at most `maxdigits`.
-"""
-function gen_swar_digitcount(T::DataType, var::Symbol, countvar::Symbol, base::Int, maxdigits::Int)
-    nondig = gensym("nondig")
-    result = ExprVarLine[gen_swar_nondig_flags(T, var, nondig, base)]
-    if maxdigits < sizeof(T)
-        push!(result, :($nondig |= $(~((one(T) << (8 * maxdigits)) - one(T)) & bytelanes(T, 0x80))))
-    end
-    push!(result, :($countvar = trailing_zeros($nondig) >> 3))
-    result
-end
-
-# Set bit 7 of each byte of `nondig` whose byte in `var` is not a base-`base` digit
-function gen_swar_nondig_flags(T::DataType, var::Symbol, nondig::Symbol, base::Int)
-    base > 10 && return gen_swar_nondigits(T, var, nondig, base)
-    hibits = bytelanes(T, 0x80)
-    # A non-ASCII byte's carries only reach later lanes
-    :($nondig = ((($var + $(bytelanes(T, 0x50))) ⊻ ($var + $(bytelanes(T, 0x50 - base)))) & ~$var & $hibits) ⊻ $hibits)
-end
-
-"""
-    gen_swarparse(::Type{T}, var, base, nd, decoded = false) -> Vector{ExprVarLine}
-
-Emit the multiply-shift reduction that converts `nd` high-aligned ASCII
-digit bytes in `var::T` into an integer value (stored back in `var`).
-
-For hex, applies `(alpha >> 6) * 9` letter correction before reduction.
-When `decoded`, the bytes already hold digit values (zero in padding bytes).
-"""
-function gen_swarparse(T::DataType, var::Symbol, base::Int, nd::Int, decoded::Bool = false)
-    c = swarparse_consts(T, base, nd)
-    exprs = if decoded ExprVarLine[] else ExprVarLine[:($var &= $(c.ascii_mask))] end
-    if !decoded && !iszero(c.alpha_mask)
-        alpha = gensym("alpha")
-        push!(exprs,
-              :($alpha = $var & $(c.alpha_mask)),
-              :($var = ($alpha >> 6) * $(T(9)) + ($var ⊻ $alpha)))
-    end
-    for s in c.steps
-        if hasproperty(s, :mask)
-            push!(exprs, :($var = (($var * $(s.multiplier)) >> $(s.shift)) & $(s.mask)))
-        else
-            push!(exprs, :($var = ($var * $(s.multiplier)) >> $(s.shift)))
-        end
-    end
-    exprs
-end
-
 function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail)
     check = if nd == 1 && base <= 10
         ExprVarLine[:($var = ($var - $(UInt8('0'))) % $cT),
@@ -174,7 +65,7 @@ function gen_swar_chunk(cT::DataType, var::Symbol, nd::Int, base::Int, on_fail)
     else
         gen_swar_digitcheck(cT, var, base, nd, on_fail)
     end
-    parse = if nd == 1 ExprVarLine[] else gen_swarparse(cT, var, base, nd) end
+    parse = if nd == 1 ExprVarLine[] else ExprVarLine[:($var = swarparse($var, $base, $nd))] end
     (check, parse)
 end
 
@@ -208,37 +99,6 @@ function gen_swar_load(T::DataType, var::Symbol, nd::Int, offset::Int = 0)
         rhs = if isnothing(rhs) load else :($rhs | $load) end
     end
     :($var = $rhs)
-end
-
-"""
-    gen_swar_varload(::Type{sT}, var, countvar, availvar, base, maxdigits)
-        -> Vector{ExprVarLine}
-
-Load the digits at `pos` in exact power-of-2 loads, low-aligned into `var`, with
-their count (0 to `maxdigits`) in `countvar`. Expects `countvar = 0`, `var = 0`,
-and `availvar` bounding the bytes readable.
-"""
-function gen_swar_varload(sT::DataType, var::Symbol, countvar::Symbol,
-                          availvar::Symbol, base::Int, maxdigits::Int)
-    exprs = ExprVarLine[]
-    chunk = prevpow(2, maxdigits)
-    # A full register of digits needs none of the smaller chunks
-    done_label = if chunk == sizeof(sT) gensym("done_cascade") end
-    while chunk >= 1
-        cT = register_type(chunk)
-        chunk_var, nondig_var = gensym("chunk$(chunk)"), gensym("nondig$(chunk)")
-        took = ExprVarLine[:($var |= ($chunk_var % $sT) << (($countvar << 3) & $(8 * sizeof(sT) - 1))),
-                           :($countvar += $chunk)]
-        chunk == sizeof(sT) && push!(took, :(@goto $done_label))
-        push!(exprs, :(if $countvar + $chunk <= $availvar
-                           $chunk_var = $(gen_load(cT, :(pos + $countvar)))
-                           $(gen_swar_nondigits(cT, chunk_var, nondig_var, base))
-                           if iszero($nondig_var); $(took...) end
-                       end))
-        chunk >>= 1
-    end
-    isnothing(done_label) || push!(exprs, :(@label $done_label))
-    exprs
 end
 
 ## Strategy dispatch
@@ -299,7 +159,7 @@ end
 Variable-width SWAR for digit fields of up to 8 digits in one register;
 digits beyond the first 8 continue in `parseint`.
 
-Load strategy preference: backward > forward-overread > cascading exact-loads.
+Load strategy preference: backward > forward-overread > exact loads.
 Both runtime and compile-time paths are emitted; `fold_branches!` drops those
 the resolved length guarantees rule out.
 """
@@ -312,13 +172,12 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx, d::DigitSpec
     else UInt128 end
     swar_var = Symbol("$(fieldvar)_swar")
     numvar = if nT == sT; swar_var else Symbol("$(fieldvar)_wide") end
-    parse_expr = gen_swarparse(sT, swar_var, base, head)
     countvar = Symbol("$(fieldvar)_count")
     countcheck = if mindigits > 1; :($countvar >= $mindigits) else :(!iszero($countvar)) end
     varparse = ExprVarLine[
         # Masked shifts skip Julia's out-of-range handling; a zero count fails regardless
         :($swar_var <<= (($(sizeof(sT)) - $countvar) << 3) & $(8 * sizeof(sT) - 1)),
-        parse_expr...]
+        :($swar_var = swarparse($swar_var, $base, $head))]
     if maxdigits > head
         tailcount, tailnum = gensym("tailcount"), gensym("tailnum")
         powers = Tuple(UInt64[UInt64(base)^k for k in 0:maxdigits - head])
@@ -327,29 +186,9 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx, d::DigitSpec
             :(($tailcount, $tailnum) = parseint(UInt64, data, pos + $head, $base, $tailmax))
         elseif pad > head
             # Padded values usually come at full width, so a loop over a short tail is predicted
-            digit = gensym("digit")
-            :(($tailcount, $tailnum) = (0, zero(UInt64));
-              while $tailcount < $tailmax && ($digit = byte2int(peekbyte(data, pos + $head + $tailcount), $base)) != 0xff
-                  ($tailcount, $tailnum) = ($tailcount + 1, $tailnum * $base + $digit)
-              end)
+            :(($tailcount, $tailnum) = digittail_scan(data, pos + $head, $tailmax, $base))
         else
-            # One register ending where the tail may, reading back into the head; halved
-            # shifts take an empty tail to zero
-            tT = register_type(maxdigits - head)
-            w = sizeof(tT)
-            tail, tailshift, tailnondig = gensym("tail"), gensym("tailshift"), gensym("tailnondig")
-            quote
-                $tailcount = $tailmax
-                $tail = $(gen_load(tT, :(pos + $head + $tailcount - $w)))
-                $tailshift = (($w - $tailcount) << 2) & $(8w - 1)
-                $tail = ($tail >>> $tailshift) >>> $tailshift
-                $(gen_swar_nondig_flags(tT, tail, tailnondig, base))
-                $tailcount = trailing_zeros($tailnondig) >> 3
-                $tailshift = (($w - $tailcount) << 2) & $(8w - 1)
-                $tail = ($tail << $tailshift) << $tailshift
-                $(gen_swarparse(tT, tail, base, w)...)
-                $tailnum = $tail % UInt64
-            end
+            :(($tailcount, $tailnum) = digittail_word($(register_type(maxdigits - head)), data, pos + $head, $tailmax, $base))
         end
         push!(varparse, :($numvar = $swar_var % $nT),
               :(if $countvar == $head
@@ -360,83 +199,26 @@ function gen_digit_swar_variable(state::ParserState, nctx::NodeCtx, d::DigitSpec
     end
     push!(varparse, :($fnum = $(if nT == dI numvar else :($numvar % $dI) end)))
     b = nctx[:current_branch]
-    vdjob = (; sT, swar_var, countvar, base, fail,
-               mindigits = Base.min(mindigits, head), maxdigits = head,
-               availvar = Symbol("$(fieldvar)_avail"),
-               avail_bound = emit_lengthbound(state, nctx, head),
-               end_min = b.parsed_min + mindigits,
-               # Padded values usually come at full width, so at one length
-               trailing_free = mindigits < sizeof(UInt) <= maxdigits && pad < maxdigits &&
-                   Expr(:call, :__trailing_free, b.id, b.parsed_max + maxdigits))
-    load_and_count = if b.parsed_min >= sizeof(sT) - 1
-        gen_vardigit_backward(state, nctx, vdjob)
-    else
-        gen_vardigit_forward(state, nctx, vdjob)
+    end_min = b.parsed_min + mindigits
+    # Bytes before `pos` already parsed can be read back over by any input
+    backward = b.parsed_min >= sizeof(sT) - 1
+    wide = !backward && emit_lengthcheck(state, nctx, sizeof(sT))
+    # Digits ending the input reach its end, which a backward load serves at any length, and
+    # padded values usually come at full width, so at one length
+    if !backward && mindigits < sizeof(UInt) <= maxdigits && pad < maxdigits
+        wide = :($wide && (!$(Expr(:call, :__trailing_free, b.id, b.parsed_max + maxdigits)) || !canreadback(data, pos, $(sizeof(sT) - 1))))
     end
+    run = :(if $wide
+        ($swar_var, $countvar) = digitrun_forward($sT, data, pos, $head, $base)
+    else
+        $(emit_lengthcheck(state, nctx, Base.max(Base.min(mindigits, head), 1))) || $fail
+        ($swar_var, $countvar) = digitrun_backward($sT, data, pos, $(emit_lengthbound(state, nctx, head, end_min)), $head, $base,
+                                                   $(Expr(:call, :__must_follow, b.id, end_min)), $(!backward))
+    end)
     # A register wider than the value's type is range-checked before truncating wraps it
-    ExprVarLine[load_and_count..., varparse..., :($countcheck || $fail),
+    ExprVarLine[run, varparse..., :($countcheck || $fail),
                 :($(Symbol("$(fieldvar)_bitsconsumed")) = $countvar)],
         if nT == dI fnum else numvar end
-end
-
-# One load ending at `pos + avail - 1`, shifted right to low-align
-function gen_vardigit_backward(state::ParserState, nctx::NodeCtx, @nospecialize(vdjob))
-    (; sT, swar_var, countvar, availvar, end_min, base, mindigits, maxdigits) = vdjob
-    b = nctx[:current_branch]
-    shift, nondig = Symbol(availvar, :_shift), gensym("nondig")
-    hibits = bytelanes(sT, 0x80)
-    load = gen_load(sT, :(pos + $availvar - $(sizeof(sT))))
-    lowshift = :((($(sizeof(sT)) - $availvar) << 3) & $(8 * sizeof(sT) - 1))
-    filled = :(iszero($nondig & ($hibits >>> $shift)))
-    scan = :(while $countvar < $availvar && byte2int(@inbounds(data[pos + $countvar]), $base) != 0xff
-                 $countvar += 1
-             end)
-    # Digits usually fill what's available short of the bytes that must follow, counted by
-    # length; a loop counting the rest keeps this a branch, where counting in-register
-    # would become a cmov, unless taking digits that run on into those bytes keeps it one
-    backload = ExprVarLine[
-        :($swar_var = $load),
-        :($shift = $lowshift),
-        :($swar_var >>>= $shift),
-        gen_swar_nondig_flags(sT, swar_var, nondig, base),
-        :(if $(Expr(:call, :__must_follow, b.id, end_min))
-              if $filled && ($availvar == $maxdigits || byte2int(peekbyte(data, pos + $availvar), $base) == 0xff)
-                  $countvar = $availvar
-              else
-                  $countvar = trailing_zeros($nondig) >> 3
-                  if $countvar == $availvar
-                      $availvar = $(emit_lengthbound(state, nctx, maxdigits))
-                      $scan
-                      $availvar = $countvar
-                      $swar_var = $load >>> $lowshift
-                  end
-              end
-          elseif $filled
-              $countvar = $availvar
-          else
-              $countvar = 0
-              $scan
-          end)]
-    ExprVarLine[:($availvar = $(emit_lengthbound(state, nctx, maxdigits, end_min))),
-                :($(emit_lengthcheck(state, nctx, Base.max(mindigits, 1))) || $(vdjob.fail)),
-                backload...]
-end
-
-function gen_vardigit_forward(state::ParserState, nctx::NodeCtx, @nospecialize(vdjob))
-    (; sT, swar_var, countvar, availvar, avail_bound, base, mindigits, maxdigits) = vdjob
-    wide = Expr(:block,
-        :($(emit_lengthcheck(state, nctx, Base.max(mindigits, 1))) || $(vdjob.fail)),
-        :($swar_var = $(gen_load(sT, :pos))),
-        gen_swar_digitcount(sT, swar_var, countvar, base, maxdigits)...)
-    cascade = Expr(:block, :($countvar = 0), :($swar_var = zero($sT)), :($availvar = $avail_bound),
-                   gen_swar_varload(sT, swar_var, countvar, availvar, base, maxdigits)...)
-    narrow = Expr(:if, :(canreadback(data, pos, $(sizeof(sT) - 1))),
-                  Expr(:block, gen_vardigit_backward(state, nctx, vdjob)...), cascade)
-    fits = emit_lengthcheck(state, nctx, sizeof(sT))
-    # Digits ending the input reach its end, which a backward load serves at any length
-    vdjob.trailing_free === false ||
-        (fits = :($fits && (!$(vdjob.trailing_free) || !canreadback(data, pos, $(sizeof(sT) - 1)))))
-    ExprVarLine[Expr(:if, fits, wide, narrow)]
 end
 
 ## Top-level digit parse dispatch
@@ -561,7 +343,7 @@ function gen_swar_charseq(var::Symbol, cT::DataType, chunks::Vector{Tuple{Int, I
         # Packing reads indices as base-2^bpc digits (the zero padding lanes as leading
         # zeros); above 4 bits they overflow the reduction's lanes, so merge pairwise
         if bpc <= 4
-            append!(exprs, gen_swarparse(sT, idx, 1 << bpc, nd, true))
+            push!(exprs, :($idx = swarparse($idx, $(1 << bpc), $nd, true)))
         else
             half = 8
             while half < 8width

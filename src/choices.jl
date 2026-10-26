@@ -281,24 +281,19 @@ function build_linear_matcher(state::ParserState, nctx::NodeCtx, cmatch::ChoiceM
     mopts = mopts[perm]
     sopts = sopts[perm]
     # Unrolled if/elseif rather than iterating a tuple of byte-tuples, which boxes.
-    # Built last option first by a loop, not a closure: `cint` is a type, which a
-    # closure would specialise on.
-    chain = nothing
-    for i in reverse(eachindex(sopts))
+    # Built by a loop, not a closure: `cint` is a type, which a closure would
+    # specialise on.
+    arms = Tuple{Any, Any}[]
+    for i in eachindex(sopts)
         n = ncodeunits(sopts[i])
-        fit = :(nbytes - pos + 1 >= $n)
-        nomatch = gen_literal_mismatch(state, nctx, sopts[i], casefold)
-        body = quote
-            $(record_match(cmatch, :($(i % cint))))
-            pos += $n
-        end
-        chain = if isnothing(chain)
-            Expr(:if, :($fit && !$nomatch), body)
-        else
-            Expr(:elseif, :($fit && !$nomatch), body, chain)
-        end
+        match = gen_literal_match(state, nctx, sopts[i], casefold)
+        push!(arms, (:(nbytes - pos + 1 >= $n && $match),
+                     quote
+                         $(record_match(cmatch, :($(i % cint))))
+                         pos += $n
+                     end))
     end
-    (ExprVarLine[chain], mopts, sopts)
+    (ExprVarLine[ifchain(arms)], mopts, sopts)
 end
 
 ## Perfect hashing

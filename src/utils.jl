@@ -23,10 +23,142 @@ canreadback(::AbstractVector{UInt8}, pos::Int, n::Int) = pos > n
 canreadback(::Base.CodeUnits{UInt8, <:Union{String, SubString{String}}}, pos::Int, n::Int) =
     n <= sizeof(Int) || pos > n
 
+@inline loadword(::Type{T}, data::AbstractVector{UInt8}, at::Int) where {T} = htol(unsafe_load(Ptr{T}(pointer(data, at))))
+
+# The `n < sizeof(T)` bytes at `data[pos]` high-aligned in a `T`, zero below, by two loads
+# overlapping as `n` needs
+@inline function loadexact(::Type{T}, data::AbstractVector{UInt8}, pos::Int, n::Int) where {T <: Unsigned}
+    load(::Type{L}, at) where {L} = loadword(L, data, at) % T
+    pair(::Type{L}) where {L} = load(L, pos) | load(L, pos + n - sizeof(L)) << (((n - sizeof(L)) << 3) & (8sizeof(T) - 1))
+    v = if sizeof(T) > 4 && n >= 4 pair(UInt32)
+    elseif sizeof(T) > 2 && n >= 2 pair(UInt16)
+    elseif n >= 1 load(UInt8, pos)
+    else zero(T) end
+    v << (((sizeof(T) - n) << 3) & (8sizeof(T) - 1))
+end
+
 # The byte at `data[pos]`, or zero just past the end: a `String` ends in a NUL byte
 peekbyte(data::AbstractVector{UInt8}, pos::Int) = if pos <= length(data) @inbounds data[pos] else 0x00 end
 peekbyte(data::Base.CodeUnits{UInt8, <:Union{String, SubString{String}}}, pos::Int) =
     unsafe_load(pointer(data, pos))
+
+## Digit runs
+
+# Bit 7 of each byte of `v` set where that byte isn't a base-`base` digit
+@inline function digitflags(v::T, base::Int) where {T <: Unsigned}
+    hibits = bytelanes(T, 0x80)
+    # A non-ASCII byte's carries only reach later lanes
+    base <= 10 && return (((v + bytelanes(T, 0x50)) ⊻ (v + bytelanes(T, 0x50 - base))) & ~v & hibits) ⊻ hibits
+    # Each byte's top bit is set by adding the distance to it from a range's start, and
+    # stays set short of its end
+    folded = v | bytelanes(T, 0x20)
+    decimal = (v + bytelanes(T, 0x80 - 0x30)) & ~(v + bytelanes(T, 0x80 - 0x3a)) & hibits
+    alpha = (folded + bytelanes(T, 0x80 - 0x61)) & ~(folded + bytelanes(T, 0x80 - 0x61 - base + 10)) & hibits
+    (decimal | alpha) ⊻ hibits
+end
+
+# The run of base-`base` digits at `data[pos]`, at most `maxdigits`, low-aligned in a `T`
+# loaded forward from `pos`, and its length
+@inline function digitrun_forward(::Type{T}, data::AbstractVector{UInt8}, pos::Int, maxdigits::Int, base::Int) where {T <: Unsigned}
+    swar = loadword(T, data, pos)
+    nondig = digitflags(swar, base)
+    maxdigits < sizeof(T) && (nondig |= ~((one(T) << (8 * maxdigits)) - one(T)) & bytelanes(T, 0x80))
+    swar, trailing_zeros(nondig) >> 3
+end
+
+"""
+    digitrun_backward(T, data, pos, avail, maxdigits, base, mustfollow, exact) -> (T, Int)
+
+As `digitrun_forward`, from a load ending at `pos + avail - 1`, or with `exact` and no
+bytes to read back over, of just the `avail` bytes. When bytes `mustfollow`, `avail`
+stops short of them, and digits running on into them are counted on.
+"""
+@inline function digitrun_backward(::Type{T}, data::AbstractVector{UInt8}, pos::Int, avail::Int,
+                                   maxdigits::Int, base::Int, mustfollow::Bool, exact::Bool) where {T <: Unsigned}
+    hibits = bytelanes(T, 0x80)
+    load(n) = if !exact || canreadback(data, pos, sizeof(T) - 1) loadword(T, data, pos + n - sizeof(T)) else loadexact(T, data, pos, n) end
+    lowshift(n) = ((sizeof(T) - n) << 3) & (8 * sizeof(T) - 1)
+    swar = load(avail)
+    shift = lowshift(avail)
+    swar >>>= shift
+    nondig = digitflags(swar, base)
+    filled = iszero(nondig & (hibits >>> shift))
+    # Digits usually fill what's available short of the bytes that must follow, counted by
+    # length; a loop counting the rest keeps this a branch, where counting in-register
+    # would become a cmov, unless taking digits that run on into those bytes keeps it one
+    if mustfollow
+        if filled && (avail == maxdigits || byte2int(peekbyte(data, pos + avail), base) == 0xff)
+            count = avail
+        else
+            count = trailing_zeros(nondig) >> 3
+            if count == avail
+                while count < min(maxdigits, length(data) - pos + 1) && byte2int(@inbounds(data[pos + count]), base) != 0xff
+                    count += 1
+                end
+                swar = load(count) >>> lowshift(count)
+            end
+        end
+    elseif filled
+        count = avail
+    else
+        count = 0
+        while count < avail && byte2int(@inbounds(data[pos + count]), base) != 0xff
+            count += 1
+        end
+    end
+    swar, count
+end
+
+# The run of up to `n` base-`base` digits at `data[at]` and its value, digit by digit
+@inline function digittail_scan(data::AbstractVector{UInt8}, at::Int, n::Int, base::Int)
+    count, num = 0, zero(UInt64)
+    while count < n && (digit = byte2int(peekbyte(data, at + count), base)) != 0xff
+        count, num = count + 1, num * base + digit
+    end
+    count, num
+end
+
+# As `digittail_scan`, from one `T` ending where the run may, reading back into what precedes;
+# halved shifts take an empty run to zero
+@inline function digittail_word(::Type{T}, data::AbstractVector{UInt8}, at::Int, n::Int, base::Int) where {T <: Unsigned}
+    wordmask = 8 * sizeof(T) - 1
+    tail = loadword(T, data, at + n - sizeof(T))
+    shift = ((sizeof(T) - n) << 2) & wordmask
+    tail = (tail >>> shift) >>> shift
+    count = trailing_zeros(digitflags(tail, base)) >> 3
+    shift = ((sizeof(T) - count) << 2) & wordmask
+    tail = (tail << shift) << shift
+    count, swarparse(tail, base, sizeof(T)) % UInt64
+end
+
+"""
+    swarparse(v::T, base, nd[, decoded]) -> T
+
+The value of the `nd` base-`base` (≤ 16) ASCII digits high-aligned in `v`, or digit
+values when `decoded` (zero in the bytes below). Each multiply-shift step joins each pair
+of neighbouring `g`-byte groups into `earlier × base^g + later`, masking off what spills
+between groups but for the last.
+"""
+@inline function swarparse(v::T, base::Int, nd::Int, decoded::Bool = false) where {T <: Unsigned}
+    if !decoded
+        digitlanes = typemax(T) << (8 * (sizeof(T) - nd))
+        # Hex keeps bit 6, set only for letters, to correct their value by 9
+        v &= bytelanes(T, if base > 10 0x4f else 0x0f end) & digitlanes
+        if base > 10
+            alpha = v & bytelanes(T, 0x40) & digitlanes
+            v = (alpha >> 6) * T(9) + (v ⊻ alpha)
+        end
+    end
+    # Unrolled, as LLVM unrolling a loop late would set it to unroll others differently
+    joingroups(v, g, pow) = (v = (v * (pow << (8g) + one(T))) >> (8g);
+                             if 2g < nd v & (typemax(T) ÷ ((one(T) << (8g)) + one(T))) else v end)
+    pow = T(base)
+    1 < nd && (v = joingroups(v, 1, pow))
+    2 < nd && (v = joingroups(v, 2, pow *= pow))
+    4 < nd && (v = joingroups(v, 4, pow *= pow))
+    8 < nd && (v = joingroups(v, 8, pow *= pow))
+    v
+end
 
 ## Character parsing
 

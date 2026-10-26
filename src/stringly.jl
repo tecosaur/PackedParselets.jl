@@ -15,12 +15,12 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
         throw(ArgumentError("Expected ASCII string for literal with casefolding"))
     litref = if casefold; lowercase(lit) else lit end
     litlen = ncodeunits(litref)
-    mismatch = gen_literal_mismatch(state, nctx, litref, casefold)
+    match = gen_literal_match(state, nctx, litref, casefold)
     lencheck = emit_lengthcheck(state, nctx, litlen)
     parse = ExprVarLine[
         :(if !$lencheck
               $notfound
-          elseif $mismatch
+          elseif !$match
               $notfound
           end),
         :(pos += $litlen)]
@@ -52,21 +52,23 @@ function gen_skip_step(state::ParserState, nctx::NodeCtx,
                       alts::Vector{String}, casefold::Bool, peek::Bool)
     # "" matches zero bytes, which a skip's no-match fall-through already covers.
     alts = filter(!isempty, alts)
-    refs = if casefold map(lowercase, alts) else alts end
+    refs = unique(if casefold map(lowercase, alts) else alts end)
     if length(refs) <= 1
         return gen_static_lchop(refs, casefold, peek)
     end
-    # Multiple alternatives: the choice matcher's hash dispatch narrows the
-    # candidates to verify, rather than trying each in turn.
-    fieldvar = gensym("skip_match")
-    cint = cardtype(cardbits(length(refs) + 1))
-    cmatch = ChoiceMatch(refs, alts, casefold, fieldvar, cint, :none)
-    matcher, _, _ = build_choice_matcher(state, nctx, cmatch)
-    lencheck = emit_lengthcheck(state, nctx, minimum(ncodeunits, refs))
-    # Inputs rarely start like an alternative: test how they start before hashing
+    minlen = minimum(ncodeunits, refs)
+    lencheck = emit_lengthcheck(state, nctx, minlen)
+    # Inputs rarely start like an alternative: test how they start before matching
     guard = gen_peek(refs, casefold)
-    cond = if peek && peeks(minimum(ncodeunits, refs)); :($guard && $lencheck) else :($lencheck && $guard) end
-    :(if $cond; $fieldvar = zero($cint); $(matcher...) end)
+    cond = if peek && peeks(minlen); :($guard && $lencheck) else :($lencheck && $guard) end
+    factored = gen_factored_lchop(refs, casefold)
+    isnothing(factored) || return :(if $cond; $factored end)
+    # Otherwise the choice matcher's hash dispatch narrows the candidates to verify,
+    # rather than trying each in turn
+    cint = cardtype(cardbits(length(refs) + 1))
+    cmatch = ChoiceMatch(refs, alts, casefold, gensym("skip_match"), cint, :none)
+    matcher, _, _ = build_choice_matcher(state, nctx, cmatch)
+    :(if $cond; $(matcher...) end)
 end
 
 function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::SegmentDef, args::Vector{Any})
@@ -117,16 +119,16 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segme
         arrangements)
 end
 
-## Codegen: literal mismatch
+## Codegen: literal match
 
 # Where a wider load needs fewer chunks, both widths are emitted under a static
 # length check for `fold_branches!` to choose between
-function gen_literal_mismatch(state::ParserState, nctx::NodeCtx,
-                              str::String, casefold::Bool)
+function gen_literal_match(state::ParserState, nctx::NodeCtx,
+                           str::String, casefold::Bool)
     wide_n = widened(ncodeunits(str))
-    narrow_mm = negate_match(gen_string_match(str, casefold))
-    isnothing(wide_n) && return narrow_mm
-    Expr(:if, emit_static_lengthcheck(state, nctx, wide_n), negate_match(gen_string_match(str, casefold, wide_n)), narrow_mm)
+    narrow = conjoin(gen_string_match(str, casefold))
+    isnothing(wide_n) && return narrow
+    Expr(:if, emit_static_lengthcheck(state, nctx, wide_n), conjoin(gen_string_match(str, casefold, wide_n)), narrow)
 end
 
 ## Prefix stripping
@@ -144,16 +146,43 @@ Assumes prefixes are non-empty, and casefolded prefixes already lowercased.
 Expects `data`, `pos`, `nbytes` in scope.
 """
 function gen_static_lchop(prefixes::Vector{String}, casefold::Bool, peek::Bool)
-    ordered = prefixes[sortperm_by(ncodeunits, prefixes, true)]
-    chain = nothing
-    for p in Iterators.reverse(ordered)
+    arms = Tuple{Any, Any}[]
+    for p in prefixes[sortperm_by(ncodeunits, prefixes, true)]
         nb = ncodeunits(p)
         cond = :(nbytes - pos + 1 >= $nb && $(conjoin(gen_string_match(p, casefold))))
         peek && peeks(nb) && (cond = :($(gen_peek([p], casefold)) && $cond))
-        chain = if isnothing(chain) Expr(:if, cond, :(pos += $nb; keepbranch()))
-        else Expr(:elseif, cond, :(pos += $nb; keepbranch()), chain) end
+        push!(arms, (cond, :(pos += $nb; keepbranch())))
     end
-    chain
+    ifchain(arms)
+end
+
+# `gen_static_lchop`, but matching the head and tail all prefixes share once, around the
+# middles that differ: "https://" and "http://" as "http", an optional "s", then "://".
+# The longest middle is then the longest prefix, unless a middle may begin where another
+# and the tail do, which a maximal head rules out for two prefixes.
+function gen_factored_lchop(prefixes::Vector{String}, casefold::Bool)
+    shortest = minimum(ncodeunits, prefixes)
+    shared(byteof) = allequal(byteof(p) for p in prefixes)
+    sharedrun(byteat, n) = something(findfirst(i -> !shared(p -> byteat(p, i)), 1:n), n + 1) - 1
+    nhead = sharedrun(codeunit, shortest)
+    ntail = sharedrun((p, i) -> codeunit(p, ncodeunits(p) + 1 - i), shortest - nhead)
+    nhead + ntail > 0 && (iszero(ntail) || length(prefixes) == 2) || return nothing
+    trimmed(p, nfirst, nlast) = String(codeunits(p)[nfirst+1:end-nlast])
+    middles = map(p -> trimmed(p, nhead, ntail), prefixes[sortperm_by(ncodeunits, prefixes, true)])
+    matches(str, offset) = conjoin(gen_string_match(str, casefold, ncodeunits(str), offset))
+    fits(n) = :(nbytes - pos + 1 >= $n)
+    skiplen = gensym("skiplen")
+    middle = ifchain(Tuple{Any, Any}[
+        (:($(fits(nhead + ncodeunits(m))) && $(matches(m, nhead))), :($skiplen += $(ncodeunits(m))))
+        for m in middles if !isempty(m)])
+    tail = trimmed(first(prefixes), ncodeunits(first(prefixes)) - ntail, 0)
+    taken = if iszero(ntail) true else :($(fits(:($skiplen + $ntail))) && $(matches(tail, skiplen))) end
+    any(isempty, middles) || (taken = :($skiplen > $nhead && $taken))
+    :(if $(matches(trimmed(first(prefixes), 0, ncodeunits(first(prefixes)) - nhead), 0))
+          $skiplen = $nhead
+          $middle
+          if $taken; pos += $skiplen + $ntail; keepbranch() end
+      end)
 end
 
 ## String matching primitives
@@ -175,27 +204,35 @@ function gen_peek(alts::Vector{String}, casefold::Bool, fits = false)
 end
 
 """
-    gen_string_match(str, casefold[, nbytes]) -> Vector{Expr}
+    gen_string_match(str, casefold[, nbytes, offset]) -> Vector{Expr}
 
-Emit one check per register-sized chunk of `str` against `data` at `pos`.
+Emit one check per register-sized chunk of `str` against `data` at `pos + offset`.
 
 With `nbytes > ncodeunits(str)`, chunks widen with the overflow bytes masked
 to `0x00`: only valid when those extra bytes are known to be readable.
 """
-function gen_string_match(str::String, casefold::Bool, nbytes::Int = ncodeunits(str))
+function gen_string_match(str::String, casefold::Bool, nbytes::Int = ncodeunits(str),
+                          offset::Union{Int, Symbol} = 0)
     strlen = ncodeunits(str)
+    base = if offset === 0; :pos else :(pos + $offset) end
     checks = Expr[]
     for chunk in register_chunks(nbytes)
         valid = min(chunk.width, strlen - chunk.offset)
         (; value, mask) = pack_chunk(str, chunk, casefold, valid)
-        posexpr = if iszero(chunk.offset)
-            :pos
-        else
-            :(pos + $(chunk.offset))
-        end
+        posexpr = if iszero(chunk.offset) base else :($base + $(chunk.offset)) end
         push!(checks, gen_masked_compare(chunk.iT, posexpr, value, mask))
     end
     checks
+end
+
+# `if c₁; b₁ elseif c₂; b₂ … end` from `(cond, body)` arms
+function ifchain(arms::Vector{Tuple{Any, Any}})
+    chain = nothing
+    for (cond, body) in Iterators.reverse(arms)
+        chain = Expr(:elseif, cond, body, (if isnothing(chain); () else (chain,) end)...)
+    end
+    isnothing(chain) || (chain.head = :if)
+    chain
 end
 
 function conjoin(checks::Vector{Expr})
@@ -205,4 +242,3 @@ function conjoin(checks::Vector{Expr})
     end
     joint
 end
-negate_match(checks::Vector{Expr}) = :(!($(conjoin(checks))))

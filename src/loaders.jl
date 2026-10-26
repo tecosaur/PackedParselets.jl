@@ -89,7 +89,7 @@ function gen_load(iT::DataType, posexpr::Union{Symbol, Expr})
     if iT === UInt8
         :(@inbounds data[$posexpr])
     else
-        :(htol(Base.unsafe_load(Ptr{$iT}(pointer(data, $posexpr)))))
+        :(loadword($iT, data, $posexpr))
     end
 end
 

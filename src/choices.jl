@@ -523,10 +523,9 @@ function gen_backward_verify(options::Vector{String}, casefold::Bool,
                              nbytes::Int, bvc, prefix::Symbol,
                              skip::Union{Nothing, Tuple{Int, Int}})
     (; iT, padding) = bvc
-    mask = zero(iT)
-    for j in 0:sizeof(iT)-1
+    function maskbyte(j)
         optj = j - padding
-        byte = if optj < 0 || optj >= nbytes
+        if optj < 0 || optj >= nbytes
             0x00
         elseif !isnothing(skip) && skip[1] <= optj < skip[1] + skip[2]
             0x00
@@ -535,8 +534,8 @@ function gen_backward_verify(options::Vector{String}, casefold::Bool,
         else
             0xFF
         end
-        mask |= iT(byte) << (8j)
     end
+    mask = reduce(|, (iT(maskbyte(j)) << (8j) for j in 0:sizeof(iT)-1))
     function expected(opt)
         v = zero(iT)
         for j in 0:nbytes-1
@@ -590,13 +589,13 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
     else
         # Tails are padded to one length so the tables are homogeneous (indexing a tuple
         # of differently-sized tuples by `i` is a runtime field lookup)
-        masks = Tuple(Any[Tuple(UInt8[bytemask(t, j) for j in 1:maxtail]) for t in tails])
-        bytes = Tuple(Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & masks[k][j] else 0x00 end for j in 1:maxtail])
+        tailmasks = Tuple(Any[Tuple(UInt8[bytemask(t, j) for j in 1:maxtail]) for t in tails])
+        bytes = Tuple(Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & tailmasks[k][j] else 0x00 end for j in 1:maxtail])
                           for (k, t) in enumerate(tails)])
         # A loop, as a closure would capture `pos` and `i`, boxing them throughout the parser
         :(let tailmatch = true
               for j in 1:$(Tuple(taillens))[i]
-                  tailmatch &= @inbounds(data[pos + $(minoptlen - 1) + j]) & $masks[i][j] == $bytes[i][j]
+                  tailmatch &= @inbounds(data[pos + $(minoptlen - 1) + j]) & $tailmasks[i][j] == $bytes[i][j]
               end
               tailmatch
           end)

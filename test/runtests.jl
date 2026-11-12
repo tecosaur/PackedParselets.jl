@@ -526,16 +526,13 @@ end
     @defpacked SegTree ("A", :x(digits(2)), choice(:head, :b => ("B", :y(digits(3))), :c => ("C", :z(letters(1)))),
                         optional("-", choice(("P", :p(digits(1))), ("Q", :q(digits(1))))), :w(digits(1)))
     # Each segment's position, laid out as `segments` documents
-    function place!(placed, layout, pos)
-        for s in layout
-            pos = if s isa PP.Segment
-                push!(placed, s => pos)
-                pos + s.nbits
-            else
-                maximum(opt -> if isnothing(opt) pos else place!(placed, opt, pos) end, s.options)
-            end
+    place!(placed, layout, pos) = foldl(layout; init = pos) do pos, s
+        if s isa PP.Segment
+            push!(placed, s => pos)
+            pos + s.nbits
+        else
+            maximum(opt -> if isnothing(opt) pos else place!(placed, opt, pos) end, s.options)
         end
-        pos
     end
     placed = Pair{PP.Segment, Int}[]
     @test place!(placed, PP.segments(SegTree), 0) == PP.nbits(SegTree)
@@ -4192,3 +4189,11 @@ end
 end
 
 end # @testset "PackedParselets"
+
+# A closure's reassigned captures are boxed: in a generated parser, that's `pos` at every use
+@static if isdefined(Test, :detect_closure_boxes)
+    @testset "no boxed captures" begin
+        boxed = Test.detect_closure_boxes(PackedParselets, @__MODULE__)
+        @test isempty(filter(((m, _),) -> m.module in (PackedParselets, @__MODULE__), boxed))
+    end
+end

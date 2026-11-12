@@ -82,7 +82,7 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segme
     # The printed prefix is usually present, the others absent: a run of those shares one
     # test of how they start, unless the printed one after shares a first byte so it'd pass
     run, runalts, runstart = ExprVarLine[], String[], 0
-    function flush!(next)
+    function flush!(next, runstart)
         if length(run) > 1 && isdisjoint(UInt8[codeunit(a, 1) | 0x20 for a in runalts], next)
             fits = emit_static_lengthcheck(state, nctx, runstart + 4)
             push!(parse, Expr(:if, gen_peek(runalts, casefold, fits), Expr(:block, run...)))
@@ -96,13 +96,13 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segme
         absent && isempty(run) && (runstart = parsed_max)
         step = gen_skip_step(state, nctx, alts, casefold, absent)
         firsts = UInt8[codeunit(a, 1) | 0x20 for a in filter(!isempty, alts)]
-        absent || flush!(firsts)
+        absent || flush!(firsts, runstart)
         isnothing(step) || push!(if absent run else parse end, step)
         absent && append!(runalts, map(lowercase, filter(!isempty, alts)))
         parsed_max += maximum(ncodeunits, alts)
         extend_bytespans!(arrangements, push!(string_bytespans(alts, casefold), ByteSet[]))
     end
-    flush!(UInt8[])
+    flush!(UInt8[], runstart)
     plen = if isnothing(pval) 0 else ncodeunits(pval) end
     pexprs = if isnothing(pval) ExprVarLine[] else ExprVarLine[:(print(io, $pval))] end
     desc = if isnothing(pval) "" else string("Skipped literal string \"", join(all_strings, ", "), '"') end

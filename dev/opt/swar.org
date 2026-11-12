@@ -269,14 +269,16 @@ run time whatever the context can't prove:
   then a branchless digit count from the LSB.
 - Backward :: a single full-width load ending at the last available byte when
   enough bytes precede ~pos~, shifted down to the LSB.
-- Cascading sub-loads :: descending power-of-2 chunks (e.g. 4, 2, 1 for
-  maxdigits=7), each conditionally loaded and digit-checked. Bytes accumulate
-  low-aligned, with a running count. The per-chunk exits make this cheaper than
-  loading every available byte and counting once (2.65 ns rather than 3.15 ns
-  for =Q42=).
+- Exact loads :: where neither fits (a short byte vector), two overlapping loads
+  of the widest power-of-2 that fits read just the available bytes, placed as the
+  backward load would leave them and counted the same way. On random lengths
+  this is faster than conditionally loading and checking chunks of 4, 2 and 1.
 
-The reduction constants are precomputed for ~maxdigits~; zeroed low bytes beyond
-the actual count don't affect the result.
+The reduction is for ~maxdigits~; zeroed low bytes beyond the actual count don't
+affect the result. Loading, counting and reducing are ~@inline~ runtime functions
+(~digitrun_forward~, ~digitrun_backward~, ~swarparse~) taking the field's constants as
+arguments: each field emits a call, and inlining folds the constants into the same
+machine code a specialised expansion would give.
 
 Length checks for individual digit fields are not emitted inline. Instead they
 are deferred via [[file:overview.org][sentinels]] and resolved later by the framework, which batches

@@ -593,6 +593,12 @@ function gen_tail_verify(options::Vector{String}, casefold::Bool, minoptlen::Int
         masks = Tuple(Any[Tuple(UInt8[bytemask(t, j) for j in 1:maxtail]) for t in tails])
         bytes = Tuple(Any[Tuple(UInt8[if j <= ncodeunits(t) codeunit(t, j) & masks[k][j] else 0x00 end for j in 1:maxtail])
                           for (k, t) in enumerate(tails)])
-        :(all(j -> @inbounds(data[pos + $minoptlen + j - 1]) & $masks[i][j] == $bytes[i][j], 1:$(Tuple(taillens))[i]))
+        # A loop, as a closure would capture `pos` and `i`, boxing them throughout the parser
+        :(let tailmatch = true
+              for j in 1:$(Tuple(taillens))[i]
+                  tailmatch &= @inbounds(data[pos + $(minoptlen - 1) + j]) & $masks[i][j] == $bytes[i][j]
+              end
+              tailmatch
+          end)
     end
 end

@@ -2194,6 +2194,23 @@ end
             @test parse_allocations(MixedTail, "ef_yz12") == 0
         end
 
+        @testset "PathChoice (hashed, tails beyond a register's reach)" begin
+            # Leading the pattern, the shortest option is narrower than the register
+            # its tail would be read from, so tails are compared a byte at a time
+            @defpacked PathChoice (skip(choice("works/", "authors/", "sources/", "institutions/", "concepts/",
+                                               "publishers/", "funders/", "topics/", "awards/")),
+                                   :id(digits(max=999)))
+            for path in ("", "works/", "authors/", "institutions/", "awards/")
+                @test parse(PathChoice, path * "42").id == 42
+            end
+            @test tryparse(PathChoice, "workz/42") === nothing
+            @test tryparse(PathChoice, "institutionz/42") === nothing
+            @test parse_allocations(PathChoice, "institutions/42") == 0
+            # A closure capturing `pos` boxes it, which inlined into a caller can allocate
+            lowered = only(code_lowered(PP.parsebytes, Tuple{Type{PathChoice}, Vector{UInt8}, Int}))
+            @test !occursin("Core.Box", sprint(show, lowered))
+        end
+
         @testset "SuffixChoice (options sharing a suffix)" begin
             iddef = :(@defpacked SuffixChoice (:kind(choice("alpha/", "beta/", "delta/")),
                        :id(digits(max=999))))

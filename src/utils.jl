@@ -111,7 +111,7 @@ stops short of them, and digits running on into them are counted on.
     filled = iszero(nondig & (hibits >>> shift))
     # Digits usually fill what's available short of the bytes that must follow, counted by
     # length; a loop counting the rest keeps this a branch, where counting in-register
-    # would become a cmov, unless taking digits that run on into those bytes keeps it one
+    # would become a cmov
     if mustfollow
         if filled && (avail == maxdigits || byte2int(peekbyte(data, pos + avail), base) == 0xff)
             count = avail
@@ -127,8 +127,10 @@ stops short of them, and digits running on into them are counted on.
     elseif filled
         count = avail
     else
+        # One of the `avail` bytes is flagged, so isn't a digit, and ends this within them.
+        # Unbounded, the loop isn't unrolled into every field as one bounded by `avail` is
         count = 0
-        while count < avail && byte2int(@inbounds(data[pos + count]), base) != 0xff
+        while byte2int(@inbounds(data[pos + count]), base) != 0xff
             count += 1
         end
     end

@@ -5,21 +5,18 @@ Writing to an ~IOBuffer~ and extracting a ~String~ works, but carries overhead f
 IO dispatch and copying. =PackedParselets= replaces this with direct writes to a
 ~Memory{UInt8}~ buffer.
 
-* Rewriting pass
+* Buffer writes
 
-The print expressions from the pattern walk use standard ~print(io, ...)~ calls. A
-post-processing pass rewrites these for the ~tobytes~ method:
+Each segment's print expressions write to ~buf~ after byte ~pos~ and advance ~pos~:
 
-| Original                              | Rewritten                                |
-|---------------------------------------+------------------------------------------|
-| ~print(io, "literal")~                  | Word-sized stores into ~buf~               |
-| ~print(io, string(var, base=b, pad=p))~ | ~bufprint(buf, pos, var, b, p)~            |
-| ~printchars(io, packed, n, ranges)~     | Reverse-SWAR stores or ~unpackchars!~ call |
-| ~__tobytes_print(io, embedded)~         | ~tobytes~ + ~unsafe_copyto!~                 |
+| Segment            | Written by                                  |
+|--------------------+---------------------------------------------|
+| Literal            | Word-sized stores into ~buf~                  |
+| Digits             | ~bufprint(buf, pos, var, base, pad, maxdigits)~ |
+| Character sequence | Reverse-SWAR stores or an ~unpackchars!~ call |
+| Embedded type      | Its own ~tobytes(buf, val, pos)~              |
 
-Control flow (~if~/~else~ for optionals) is preserved; only the leaf ~print~ calls
-are replaced. The IO-based ~print~ method continues to use the original
-expressions unchanged.
+Optionals and choices wrap these in ~if~ blocks on the bits that mark them.
 
 * Decimal integer output (jeaiii)
 
@@ -74,7 +71,6 @@ assignment.
 ~tobytes(buf, val)~ writes directly into a caller-provided ~Memory{UInt8}~, returning
 the byte count. This is the zero-allocation inner method.
 
-~tobytes(val)~ allocates a buffer at the maximum output length, calls the 2-arg
-method, and returns =(buf, len)=. ~string(val)~ calls ~tobytes~ and then either uses
-~unsafe_takestring~ (zero-copy) for fixed-length output, or copies to a
-correctly-sized ~StringMemory~ for variable-length output.
+~string(val)~ allocates a ~StringMemory~ of the maximum output length, has
+~tobytes~ fill it, and takes it as the ~String~, truncated in place to the bytes
+written: one allocation and no copy, whatever the length.

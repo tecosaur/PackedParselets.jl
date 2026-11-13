@@ -387,9 +387,9 @@ end
 const RADIX100 = Tuple(UInt16(UInt8('0') + i % 10) << 8 | UInt16(UInt8('0') + i ÷ 10)
                        for i in 0:99)
 
-@inline function radix100_store(buf::Memory{UInt8}, pos::Int, pair::Integer)
-    Base.unsafe_store!(Ptr{UInt16}(pointer(buf, pos)), @inbounds RADIX100[pair + 1])
-end
+# Printers take their buffer's pointer once: through `buf`, each store reloads it
+@inline radix100_store(p::Ptr{UInt8}, pos::Int, pair::Integer) =
+    unsafe_store!(Ptr{UInt16}(p + pos), @inbounds RADIX100[pair + 1])
 
 const POW10 = ntuple(i -> UInt64(10)^(i - 1), Val(20))
 
@@ -437,7 +437,7 @@ Base.@constprop :aggressive @inline function bufprint_decimal(buf::Memory{UInt8}
     end
     mindigits = Base.max(pad + 1, 1)
     if maxdigits <= 9 || num <= typemax(UInt32)
-        bufprint_decimal32(buf, pos, num % UInt32, 0, mindigits, Base.min(maxdigits, 10))
+        bufprint_decimal32(buf, pos, num % UInt32, mindigits, Base.min(maxdigits, 10))
     else
         bufprint_decimal64(buf, pos, num)
     end
@@ -461,6 +461,7 @@ end
 
 # Exactly `width ≤ 6` digits; an odd `width` leaves a single digit in the leading pair.
 Base.@constprop :aggressive @inline function bufprint_fixed6(buf::Memory{UInt8}, pos::Int, num::UInt32, width::Int)
+    p = pointer(buf)
     prod, npairs = if width <= 2
         (UInt64(num) << 32, 0)
     elseif width <= 4
@@ -470,14 +471,14 @@ Base.@constprop :aggressive @inline function bufprint_fixed6(buf::Memory{UInt8},
     end
     pair = Int(prod >> 32)
     if isodd(width)
-        @inbounds buf[pos += 1] = UInt8('0') + pair % UInt8
+        unsafe_store!(p + pos, UInt8('0') + pair % UInt8); pos += 1
     else
-        radix100_store(buf, pos + 1, pair)
+        radix100_store(p, pos, pair)
         pos += 2
     end
     for _ in 1:npairs
         prod = UInt64(prod % UInt32) * UInt64(100)
-        radix100_store(buf, pos + 1, Int(prod >> 32))
+        radix100_store(p, pos, Int(prod >> 32))
         pos += 2
     end
     pos
@@ -487,27 +488,26 @@ end
 @noinline function bufprint_decimal64(buf::Memory{UInt8}, pos::Int, num::UInt64)
     # UInt64 max ≈ 1.8×10^19: at most three chunks of 10^8 (4+8+8 digits)
     hi, lo = divrem(num, UInt64(100_000_000))
-    if hi <= typemax(UInt32)
-        pos = bufprint_decimal32(buf, pos, hi % UInt32, 0)
+    pos = if hi <= typemax(UInt32)
+        bufprint_decimal32(buf, pos, hi % UInt32)
     else
         hi2, mid = divrem(hi, UInt64(100_000_000))
-        pos = bufprint_decimal32(buf, pos, hi2 % UInt32, 0)
-        pos = bufprint_decimal32(buf, pos, mid % UInt32, 8)
+        bufprint_fixed(buf, bufprint_decimal32(buf, pos, hi2 % UInt32), mid, 8)
     end
-    bufprint_decimal32(buf, pos, lo % UInt32, 8)
+    bufprint_fixed(buf, pos, lo, 8)
 end
 
 # A range `num` must lie in, by `mindigits:maxdigits`, is taken without a test, and
 # one it can't lie in is skipped: the ranges above 10^6, whose constants are only exact
 # near their tops, are still only reached by values the ranges below them exclude.
-Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt8}, pos::Int, num::UInt32, pad::Int,
+Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt8}, pos::Int, num::UInt32,
                                                                 mindigits::Int = 1, maxdigits::Int = 10)
-    startpos = pos
+    p = pointer(buf)
     if maxdigits <= 2 || (mindigits <= 2 && num < 100)
         if num < 10
-            @inbounds buf[pos += 1] = UInt8('0') + num % UInt8
+            unsafe_store!(p + pos, UInt8('0') + num % UInt8); pos += 1
         else
-            radix100_store(buf, pos + 1, num)
+            radix100_store(p, pos, num)
             pos += 2
         end
     else
@@ -526,23 +526,16 @@ Base.@constprop :aggressive @inline function bufprint_decimal32(buf::Memory{UInt
         end
         pair = Int(prod >> 32)
         if pair < 10
-            @inbounds buf[pos += 1] = UInt8('0') + pair % UInt8
+            unsafe_store!(p + pos, UInt8('0') + pair % UInt8); pos += 1
         else
-            radix100_store(buf, pos + 1, pair)
+            radix100_store(p, pos, pair)
             pos += 2
         end
         for _ in 1:npairs
             prod = UInt64(prod % UInt32) * UInt64(100)
-            radix100_store(buf, pos + 1, Int(prod >> 32))
+            radix100_store(p, pos, Int(prod >> 32))
             pos += 2
         end
-    end
-    nd = pos - startpos
-    if nd < pad
-        npad = pad - nd
-        @inbounds for j in pos:-1:startpos+1; buf[j + npad] = buf[j] end
-        @inbounds for j in startpos+1:startpos+npad; buf[j] = UInt8('0') end
-        pos += npad
     end
     pos
 end

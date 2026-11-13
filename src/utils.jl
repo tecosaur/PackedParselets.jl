@@ -333,14 +333,15 @@ function unpackchars!(buf, pos::Int, packed::P, nchars::Int,
     pos
 end
 
-# The byte for character index `idx` over `ranges`, continuing past the last range
+# The byte for character index `idx` over `ranges`, continuing past the last range.
+# Each range `idx` lies beyond adds the gap before the next, without a branch on `idx`.
 @inline function charbyte(ranges::NTuple{N, UnitRange{UInt8}}, idx::UInt8) where {N}
-    for r in ranges
-        rlen = length(r) % UInt8
-        idx < rlen && return first(r) + idx
-        idx -= rlen
+    byte, edge = first(first(ranges)) + idx, 0x00
+    for i in 2:N
+        edge += length(ranges[i - 1]) % UInt8
+        byte += (idx >= edge) * (first(ranges[i]) - last(ranges[i - 1]) - 0x01)
     end
-    last(last(ranges)) + 0x01 + idx
+    byte
 end
 
 function printchars(io::IO, packed::P, nchars::Int,

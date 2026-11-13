@@ -2553,11 +2553,12 @@ end
                 # Each step strips its longest matching option, ignoring case
                 @test check_deftype(Symbol("SkipFactored", i), :(($skips, :n(digits(1:5)))); casefold = true) do T
                     all(1:2000) do _
-                        input = join(rand(pieces, rand(0:3))) * join(rand('0':'9', rand(0:3)))
-                        input = String(map(c -> rand(Bool) ? uppercase(c) : c, collect(input)))
+                        plain = join(rand(pieces, rand(0:3))) * join(rand('0':'9', rand(0:3)))
+                        input = String(map(c -> rand(Bool) ? uppercase(c) : c, collect(plain)))
                         pos = 1
                         for alts in steps
-                            fits = filter(a -> startswith(lowercase(input[pos:end]), lowercase(a)), alts)
+                            rest = lowercase(input[pos:end])
+                            fits = filter(a -> startswith(rest, lowercase(a)), alts)
                             isempty(fits) || (pos += maximum(ncodeunits, fits))
                         end
                         ndigits = min(5, something(findfirst(!isdigit, input[pos:end]), ncodeunits(input) - pos + 2) - 1)

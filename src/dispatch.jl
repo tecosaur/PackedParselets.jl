@@ -41,40 +41,36 @@ function pattern_dispatch!(exprs::PatternExprs,
     end
 end
 
+# The positional `items`, and `nctx` extended by those that are `head` keywords
+function splitkwargs(nctx::NodeCtx, @nospecialize(items), head::Symbol, @nospecialize(known), whose::String)
+    args = Any[]
+    for arg in items
+        if Meta.isexpr(arg, head, 2)
+            kwname, kwval = arg.args
+            kwname ∈ known ||
+                throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments$whose are: $(join(known, ", "))"))
+            nctx = NodeCtx(nctx, kwname, kwval)
+        else
+            push!(args, arg)
+        end
+    end
+    args, nctx
+end
+
 function pattern_dispatch!(exprs::PatternExprs,
                            state::ParserState, nctx::NodeCtx,
                            @nospecialize(thing))
     if Meta.isexpr(thing, :tuple)
-        args = Any[]
-        for arg in thing.args
-            if Meta.isexpr(arg, :(=), 2)
-                kwname, kwval = arg.args
-                kwname ∈ state.kwnames ||
-                    throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments are: $(join(state.kwnames, ", "))"))
-                nctx = NodeCtx(nctx, kwname, kwval)
-            else
-                push!(args, arg)
-            end
-        end
+        args, nctx = splitkwargs(nctx, thing.args, :(=), state.kwnames, "")
         pattern_dispatch!(exprs, state, nctx, :seq, args)
     elseif Meta.isexpr(thing, :call)
         name = first(thing.args)
-        args = Any[]
-        nkeys = if name isa Symbol && haskey(state.segments, name)
+        known = if name isa Symbol && haskey(state.segments, name)
             getfield(state.segments, name).kwargs
         else
             state.kwnames
         end
-        for arg in thing.args[2:end]
-            if Meta.isexpr(arg, :kw, 2)
-                kwname, kwval = arg.args
-                kwname ∈ nkeys ||
-                    throw(ArgumentError("Unknown keyword argument $kwname. Known keyword arguments for $name are: $(join(nkeys, ", "))"))
-                nctx = NodeCtx(nctx, kwname, kwval)
-            else
-                push!(args, arg)
-            end
-        end
+        args, nctx = splitkwargs(nctx, @view(thing.args[2:end]), :kw, known, " for $name")
         pattern_dispatch!(exprs, state, nctx, name, args)
     elseif thing isa String
         def = getfield(state.segments, :literal)

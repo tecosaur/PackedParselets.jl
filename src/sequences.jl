@@ -298,14 +298,8 @@ function charseq_impart_exprs(state::ParserState, @nospecialize(cspec::NamedTupl
         exprs
     end
     push!(body, emit_pack(state, cT, charvar, bitpos - lenbits))
-    if variable
-        lenpack = if iszero(lenbase)
-            :($lenoffset = $lenvar % $lT)
-        else
-            :($lenoffset = ($lenvar - $lenbase) % $lT)
-        end
-        push!(body, lenpack, emit_pack(state, lT, lenoffset, bitpos))
-    end
+    lenoff = if iszero(lenbase) lenvar else :($lenvar - $lenbase) end
+    variable && push!(body, :($lenoffset = $lenoff % $lT), emit_pack(state, lT, lenoffset, bitpos))
     body
 end
 
@@ -508,14 +502,8 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
     end
     posadv = if has_skip; scannedvar else lenvar end
     push!(parse_exprs, emit_pack(state, cT, charvar, bitpos - lenbits), :(pos += $posadv))
-    if variable
-        lenpack = if iszero(lenbase)
-            :($lenoffset = $lenvar % $lT)
-        else
-            :($lenoffset = ($lenvar - $lenbase) % $lT)
-        end
-        push!(parse_exprs, lenpack, emit_pack(state, lT, lenoffset, bitpos))
-    end
+    lenoff = if iszero(lenbase) lenvar else :($lenvar - $lenbase) end
+    variable && push!(parse_exprs, :($lenoffset = $lenoff % $lT), emit_pack(state, lT, lenoffset, bitpos))
     extracts = ExprVarLine[:($charvar = $(emit_extract(state, bitpos - lenbits, charbits)))]
     if variable
         push!(extracts, if iszero(lenbase)

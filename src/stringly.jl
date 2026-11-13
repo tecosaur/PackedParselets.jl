@@ -24,16 +24,11 @@ function compile_literal(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Se
               $notfound
           end),
         :(pos += $litlen)]
-    spans = string_bytespans([lit], casefold)
-    printout = ExprVarLine[:(print(io, $lit))]
     SegmentOutput(
         SegmentBounds(litlen:litlen, litlen:litlen, 0, nothing),
-        SegmentCodegen(parse, ExprVarLine[],
-            PrintExprs(direct=printout,
-                       getlen=ExprVarLine[:(pos += $litlen)]),
-            Expr[]),
+        SegmentCodegen(parse, ExprVarLine[], bufprint_static(lit), Expr[]),
         SegmentMeta(:literal, sprint(show, lit), lit, nothing, nothing),
-        spans)
+        string_bytespans([lit], casefold))
 end
 
 function skip_step_strings(@nospecialize(arg))
@@ -105,17 +100,13 @@ function compile_skip(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segme
         extend_bytespans!(arrangements, push!(string_bytespans(alts, casefold), ByteSet[]))
     end
     flush!(UInt8[], runstart)
-    plen = if isnothing(pval) 0 else ncodeunits(pval) end
-    pexprs = if isnothing(pval) ExprVarLine[] else ExprVarLine[:(print(io, $pval))] end
+    printed = something(pval, "")
+    plen = ncodeunits(printed)
     desc = if isnothing(pval) "" else string("Skipped literal string \"", join(all_strings, ", "), '"') end
-    shortform = something(pval, "")
-    lenexprs = if iszero(plen) ExprVarLine[] else ExprVarLine[:(pos += $plen)] end
     SegmentOutput(
         SegmentBounds(0:parsed_max, plen:plen, 0, nothing),
-        SegmentCodegen(parse, ExprVarLine[],
-            PrintExprs(direct=pexprs, getlen=lenexprs),
-            Expr[]),
-        SegmentMeta(:skip, desc, shortform, nothing, nothing),
+        SegmentCodegen(parse, ExprVarLine[], bufprint_static(printed), Expr[]),
+        SegmentMeta(:skip, desc, printed, nothing, nothing),
         arrangements)
 end
 

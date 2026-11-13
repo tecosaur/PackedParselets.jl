@@ -743,9 +743,10 @@ end
         push!(parse_exprs, :(pos += 8))
         fextract = :($fieldvar = $(PP.emit_extract(state, nbits_pos - presbits, 24)))
         print_exprs = PP.ExprVarLine[
-            :(print(io, string(div($fieldvar, 10000) + 2000, pad=4))),
-            :(print(io, string(div($fieldvar % 10000, 100), pad=2))),
-            :(print(io, string($fieldvar % 100, pad=2)))]
+            fextract,
+            :(pos = bufprint(buf, pos, div($fieldvar, 10000) + 2000, 10, 4)),
+            :(pos = bufprint(buf, pos, div($fieldvar % 10000, 100), 10, 2)),
+            :(pos = bufprint(buf, pos, $fieldvar % 100, 10, 2))]
         argvar = gensym("arg_ts")
         argconv = gensym("arg_ts_u32")
         impart_body = Expr[:($argconv = $argvar % UInt32),
@@ -757,13 +758,9 @@ end
         extract_setup = PP.ExprVarLine[fextract]
         seg_extract, seg_impart = PP.optional_wrap(option, argvar, extract_setup, fieldvar, impart_body)
         label = Symbol(chopprefix(String(fieldvar), "attr_"))
-        pinfo = PP.PrintExprs(direct = PP.ExprVarLine[fextract, print_exprs...],
-                              vars = Pair{Symbol,Any}[fieldvar => UInt32(0)],
-                              getval = PP.ExprVarLine[fextract],
-                              getlen = PP.ExprVarLine[:(pos += 8)])
         PP.SegmentOutput(
             PP.SegmentBounds(8:8, 8:8, nbits, sentinel),
-            PP.SegmentCodegen(parse_exprs, seg_extract, pinfo, seg_impart),
+            PP.SegmentCodegen(parse_exprs, seg_extract, print_exprs, seg_impart),
             PP.SegmentMeta(label, "timestamp (YYYYMMDD)", "YYYYMMDD", :Integer, argvar),
             Vector{PP.ByteSet}[])
     end

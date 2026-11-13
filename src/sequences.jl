@@ -59,7 +59,7 @@ end
 function emit_grouped(@nospecialize(emit_group::Function), groups::Vector{Int}, sep::UInt8)
     exprs = ExprVarLine[]
     for i in 1:length(groups)
-        i > 1 && push!(exprs, :(write(io, $sep)))
+        i > 1 && push!(exprs, :(@inbounds buf[pos += 1] = $sep))
         append!(exprs, emit_group(i, groups[i]))
     end
     exprs
@@ -157,23 +157,16 @@ function compile_digits(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Seg
 end
 
 function digits_print_exprs(d::DigitSpec, fextract::Expr, valid::Vector{ExprVarLine})
-    (; fieldvar, fnum, parsevar, base, mindigits, maxdigits, pad, dT) = d
+    (; fieldvar, parsevar, base, mindigits, pad) = d
     # Short values print padded to the fewest digits the field parses
     printpad = if mindigits > 1; Base.max(pad, mindigits) else pad end
-    printex = :(printdigits(io, $parsevar, $base, $printpad, $(ndigits(d.vmax; base))))
-    getval = ExprVarLine[fextract]
-    d.direct || push!(getval, :($fieldvar = $(decoding(d))))
-    lenex = if printpad >= maxdigits; printpad
-    else gen_digit_count(parsevar, maxdigits, base, Base.max(printpad, 1), d.vmax) end
-    vars = Pair{Symbol,Any}[fnum => zero(dT)]
-    d.direct || push!(vars, fieldvar => zero(dT))
-    PrintExprs(direct = ExprVarLine[getval..., valid..., printex],
-               vars = vars, getval = getval,
-               getlen = ExprVarLine[:(pos += $lenex)])
+    exprs = ExprVarLine[fextract]
+    d.direct || push!(exprs, :($fieldvar = $(decoding(d))))
+    push!(append!(exprs, valid), :(pos = bufprint(buf, pos, $parsevar, $base, $printpad, $(ndigits(d.vmax; base)))))
 end
 
 function grouped_digits_print(d::DigitSpec, fextract::Expr, valid::Vector{ExprVarLine})
-    (; fieldvar, fnum, parsevar, base, groups, dT) = d
+    (; fieldvar, parsevar, base, groups) = d
     gvars = Symbol[gensym("g$i") for i in eachindex(groups)]
     extract = ExprVarLine[fextract]
     d.direct || push!(extract, :($fieldvar = $(decoding(d))))
@@ -184,27 +177,9 @@ function grouped_digits_print(d::DigitSpec, fextract::Expr, valid::Vector{ExprVa
     end
     push!(extract, :($(gvars[1]) = $remainder))
     writes = emit_grouped(groups, first(d.skipbytes)) do gi, gsize
-        ExprVarLine[:(printdigits(io, $(gvars[gi]), $base, $gsize, $gsize))]
+        ExprVarLine[:(pos = bufprint(buf, pos, $(gvars[gi]), $base, $gsize, $gsize))]
     end
-    vars = Pair{Symbol,Any}[fnum => zero(dT)]
-    d.direct || push!(vars, fieldvar => zero(dT))
-    for gv in gvars; push!(vars, gv => 0) end
-    PrintExprs(direct = ExprVarLine[extract..., writes...],
-               vars = vars,
-               getval = extract,
-               getlen = ExprVarLine[:(pos += $(sum(groups) + length(groups) - 1))])
-end
-
-# Branchless digit count: min + (x >= base^min) + (x >= base^(min+1)) + ...
-function gen_digit_count(var, maxdigits::Int, base::Int=10, mindigits::Int=1,
-                         maxval::Integer=Int128(base)^maxdigits - 1)
-    count = mindigits
-    for i in mindigits:maxdigits-1
-        threshold = Int128(base)^i
-        threshold > maxval && continue
-        count = :($count + ($var >= $(if threshold > typemax(Int64) UInt64(threshold) else Int(threshold) end)))
-    end
-    count
+    append!(extract, writes)
 end
 
 function digits_impart_exprs(state::ParserState, d::DigitSpec, argvar::Symbol, bitpos::Int)
@@ -512,18 +487,14 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
             :($lenvar = $(emit_extract(state, bitpos, lenbits)) + $lenbase)
         end)
     end
-    charargs = if variable
-        :($charvar, Int($lenvar), $rangetuple)
-    else
-        :($charvar, $maxlen, $rangetuple, $oneindexed)
-    end
+    charargs = :($charvar, $(if variable; :(Int($lenvar)) else maxlen end), $rangetuple, $oneindexed)
     printexprs = if isnothing(groups)
-        ExprVarLine[:(printchars(io, $(charargs.args...)))]
+        gen_printchars(charargs.args...)
     else
         shifts = Int[(sum(groups) - done) * bpc for done in cumsum(groups)]
         emit_grouped(groups, first(skipbytes)) do gi, gsize
             gexpr = if iszero(shifts[gi]) charvar else :($charvar >> $(shifts[gi])) end
-            ExprVarLine[:(printchars(io, $gexpr, $gsize, $rangetuple, $oneindexed))]
+            gen_printchars(gexpr, gsize, rangetuple, oneindexed)
         end
     end
     numeric = get(nctx, :numeric, false)::Bool
@@ -557,16 +528,9 @@ function compile_charseq_impl(state::ParserState, nctx::NodeCtx,
         end
     end
     nseps = if isnothing(groups) 0 else length(groups) - 1 end
-    nchars_expr = if variable; :(Int($lenvar)) else maxlen end
-    lenexpr = if iszero(nseps); :(pos += $nchars_expr) else :(pos += $nchars_expr + $nseps) end
-    pvars = Pair{Symbol,Any}[charvar => :(zero($cT))]
-    variable && push!(pvars, lenvar => 0)
     lencheck = ExprVarLine[]
     variable && push!(lencheck, emit_validity_check(state, fieldvar, lenvar, minlen:maxlen))
-    pinfo = PrintExprs(direct = ExprVarLine[extracts..., lencheck..., printexprs...],
-                       vars = pvars,
-                       getval = copy(extracts),
-                       getlen = ExprVarLine[lenexpr])
+    pinfo = ExprVarLine[extracts..., lencheck..., printexprs...]
     SegmentOutput(
         SegmentBounds(minlen:parsed_max, minlen+nseps:maxlen+nseps, totalbits, sentinel),
         SegmentCodegen(parse_exprs, seg_extract, pinfo, seg_impart),
@@ -621,22 +585,7 @@ function compile_embed(state::ParserState, nctx::NodeCtx, ::PatternExprs, ::Segm
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     extract_setup = ExprVarLine[fextract]
     seg_extract, seg_impart = optional_wrap(option, argvar, extract_setup, fieldvar, body)
-    writeex = :(__tobytes_print(io, $fieldvar))
-    direct = ExprVarLine[fextract, writeex]
-    vars = Pair{Symbol,Any}[fieldvar => :($(zero_int(T)))]
-    getval = ExprVarLine[fextract]
-    pinfo = if wmin == wmax
-        PrintExprs(; direct, vars, getval,
-                   getlen = ExprVarLine[:(pos += $wmin)])
-    else
-        # Variable-length: measured by the embedded type's own allocating `tobytes`
-        ebuf = Symbol("$(fieldvar)_buf")
-        tobytes_ref = GlobalRef(PackedParselets, :tobytes)
-        push!(vars, ebuf => :(Base.StringMemory(0)))
-        push!(getval, :($ebuf = $tobytes_ref($fieldvar)))
-        PrintExprs(; direct, vars, getval,
-                   getlen = ExprVarLine[:(pos += length($ebuf))])
-    end
+    pinfo = ExprVarLine[fextract, :(pos = $(GlobalRef(PackedParselets, :tobytes))(buf, $fieldvar, pos))]
     SegmentOutput(
         SegmentBounds(pmin:pmax, wmin:wmax,
                       ebits + presbits, sentinel),

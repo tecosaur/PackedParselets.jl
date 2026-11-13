@@ -92,7 +92,9 @@ function pattern_field!(exprs::PatternExprs,
     isnothing(get(nctx, :fieldvar, nothing)) || throw(ArgumentError("Fields may not be nested"))
     nctx = NodeCtx(nctx, :fieldvar, Symbol("attr_$(node.value)"))
     initial_segs = length(exprs.segments)
-    initialprints = length(exprs.print.direct)
+    initialprints = length(exprs.print)
+    branch = nctx[:current_branch]
+    printed = branch.print_max
     for arg in args
         pattern_dispatch!(exprs, state, nctx, arg)
     end
@@ -110,13 +112,11 @@ function pattern_field!(exprs::PatternExprs,
     elseif length(new_value_segs) == 1
         push!(exprs.properties, node.value => new_value_segs[1].label)
     else
-        propprints = strip_print_markers(exprs.print.direct[initialprints+1:end])
-        resolve_print_markers!(propprints)
         push!(exprs.properties, node.value => ExprVarLine[(
             quote
-                io = IOBuffer()
-                $(propprints...)
-                takestring!(io)
+                buf, pos, marks = Base.StringMemory($(branch.print_max - printed)), 0, nothing
+                $(copyexprs(@view exprs.print[initialprints+1:end])...)
+                takestring(buf, pos)
             end).args...])
     end
 end
@@ -207,21 +207,19 @@ function walk_arm!(exprs::PatternExprs, state::ParserState, nctx::NodeCtx, @nosp
                         parent.parsed_min, parent.parsed_min,
                         parent.print_min, parent.print_max, parent.parsed_min)
     push!(state.branches, child)
-    odetect = ExprVarLine[]
     nctx = NodeCtx(nctx, :optional, armvar)
     nctx = NodeCtx(nctx, :opt_label, end_label)
-    nctx = NodeCtx(nctx, :oprint_detect, odetect)
     nctx = NodeCtx(nctx, :optional_sentinel, sentinel)
     nctx = NodeCtx(nctx, :current_branch, child)
-    oexprs = PatternExprs(ExprVarLine[], PrintExprs(), exprs.segments, props, Vector{ByteSet}[], Layout())
+    oexprs = PatternExprs(ExprVarLine[], ExprVarLine[], exprs.segments, props, Vector{ByteSet}[], Layout())
     arm === "" || pattern_dispatch!(oexprs, state, nctx, arm)
-    child, oexprs, odetect
+    child, oexprs
 end
 
 # The segment of `nbits` that select a choice's arm or mark an optional present, which prints nothing
 selector(nbits::Int, label::Symbol, desc::String) =
     SegmentOutput(SegmentBounds(0:0, 0:0, nbits, nothing),
-                  SegmentCodegen(ExprVarLine[], ExprVarLine[], PrintExprs(), Expr[]),
+                  SegmentCodegen(ExprVarLine[], ExprVarLine[], ExprVarLine[], Expr[]),
                   SegmentMeta(label, desc, "", nothing, nothing), Vector{ByteSet}[])
 
 # Parse an arm where its branch's length check allows; failing within, it jumps to `end_label`
@@ -413,7 +411,7 @@ function pattern_choice_optional!(exprs::PatternExprs,
     sentinel_ref = Ref{Union{Nothing, OptSentinel}}(nothing)
     seg_start = length(exprs.segments)
     bits_before = state.bits
-    child, oexprs, odetect = walk_arm!(exprs, state, nctx, arm, optvar, end_label, sentinel_ref, exprs.properties)
+    child, oexprs = walk_arm!(exprs, state, nctx, arm, optvar, end_label, sentinel_ref, exprs.properties)
     if isnothing(sentinel_ref[])
         process_segment_output!(oexprs, state, nctx, :presence, selector(1, gensym(:optional), "present"))
         push!(oexprs.parse, emit_pack(state, Bool, optvar, state.bits))
@@ -429,17 +427,7 @@ function pattern_choice_optional!(exprs::PatternExprs,
     push!(exprs.parse, :($savedpos = pos))
     append!(exprs.parse, arm_attempt(popt, optvar, end_label, child, oexprs.parse))
     push!(exprs.parse, :(if !$optvar; pos = $savedpos; $(arm_clear_bits(bits_before, state.bits)...) end))
-    # Each segment's direct print extracts what it prints, where `getval` relies on `odetect`
-    append!(exprs.print.getval, odetect)
-    push!(exprs.print.getval, :($optvar = $check))
-    push!(exprs.print.direct, :($optvar = $check))
-    append!(exprs.print.vars, oexprs.print.vars)
-    push!(exprs.print.vars, optvar => false)
-    for field in (:direct, :getval, :getlen)
-        body = getfield(oexprs.print, field)
-        isempty(body) && continue
-        push!(getfield(exprs.print, field), :(if $optvar; $(body...) end))
-    end
+    isempty(oexprs.print) || push!(exprs.print, :(if $check; $(oexprs.print...) end))
     if !isempty(oexprs.bytespans)
         extend_bytespans!(exprs.bytespans, push!(copy(oexprs.bytespans), ByteSet[]))
     end
@@ -450,7 +438,6 @@ struct ChoiceArm
     end_label::Symbol
     child::ParseBranch
     oexprs::PatternExprs
-    odetect::Vector{ExprVarLine}
     seg_range::UnitRange{Int}
     bits_after::Int
 end
@@ -478,13 +465,13 @@ function pattern_choice_multi!(exprs::PatternExprs,
         end_label = gensym("arm$(k)_end")
         seg_start = length(exprs.segments)
         state.bits = arm_base
-        child, oexprs, odetect = walk_arm!(exprs, state, nctx, arm, armvar, end_label, nothing,
+        child, oexprs = walk_arm!(exprs, state, nctx, arm, armvar, end_label, nothing,
                                            Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}[])
         bits_after = state.bits
         dval = gensym("discrim")
         push!(oexprs.parse, :($dval = $(discrim_type(k))))
         push!(oexprs.parse, emit_pack(state, discrim_type, dval, discrim_pos))
-        push!(arm_data, ChoiceArm(armvar, end_label, child, oexprs, odetect,
+        push!(arm_data, ChoiceArm(armvar, end_label, child, oexprs,
                                   seg_start+1:length(exprs.segments), bits_after))
     end
     state.bits = maximum(Int[ad.bits_after for ad in arm_data])
@@ -516,23 +503,13 @@ function pattern_choice_multi!(exprs::PatternExprs,
         emit_cascade_parse!(exprs, state, nctx, popt, savedpos, arm_data, arm_base,
                             "" in arms, discrim_bits)
     end
-    # Separate `if` blocks (not if/elseif) so rewrite_bufprint! can reach each arm's prints
-    discrim = gensym("discrim")
-    push!(exprs.print.vars, discrim => :(zero($discrim_type)))
     # An arm prints only on its own discriminant, so any other would print nothing
+    discrim = gensym("discrim")
     tagvar = if isnothing(tag_field); :discriminant else Symbol(:attr_, tag_field) end
-    for stream in (exprs.print.direct, exprs.print.getval)
-        push!(stream, :($discrim = $(emit_extract(state, discrim_pos, discrim_bits))),
-              emit_validity_check(state, tagvar, discrim, 1:length(arm_data)))
-    end
-    for (k, ad) in enumerate(arm_data)
-        odetect = ad.odetect
-        cond = :($discrim == $(discrim_type(k)))
-        push!(exprs.print.direct, :(if $cond; $(ad.oexprs.print.direct...) end))
-        append!(exprs.print.vars, ad.oexprs.print.vars)
-        push!(exprs.print.getval, :(if $cond; $(odetect...); $(ad.oexprs.print.getval...) end))
-        push!(exprs.print.getlen, :(if $cond; $(ad.oexprs.print.getlen...) end))
-    end
+    push!(exprs.print, :($discrim = $(emit_extract(state, discrim_pos, discrim_bits))),
+          emit_validity_check(state, tagvar, discrim, 1:narms),
+          ifchain(Tuple{Any, Any}[(:($discrim == $(discrim_type(k))), Expr(:block, ad.oexprs.print...))
+                                  for (k, ad) in enumerate(arm_data)]))
     # Propagated so an enclosing choice can dispatch on this one's content
     all_alts = reduce(vcat, arm_spans)
     extend_bytespans!(exprs.bytespans, all_alts)

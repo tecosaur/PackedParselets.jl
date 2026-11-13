@@ -34,11 +34,10 @@ the position after it on success, or an error code and position on failure.
 function parsebytes end
 
 """
-    tobytes(val) -> Memory{UInt8}
     tobytes(buf::Memory{UInt8}, val[, pos::Int]) -> Int
 
-Buffer-based output. The first form returns a `StringMemory` of exact length; the
-second writes into `buf` after byte `pos` (default 0) and returns the new end position.
+Write `val` into `buf` after byte `pos` (default 0) and return the new end position.
+`buf` must have room for the `printbounds` maximum past `pos`.
 """
 function tobytes end
 
@@ -286,18 +285,14 @@ function process_segment_output!(exprs::PatternExprs, state::ParserState,
     b.parsed_max += last(bounds.parsed)
     b.print_min += first(bounds.printed)
     b.print_max += last(bounds.printed)
-    (; direct, vars, getval, getlen) = codegen.print
-    append!(exprs.print.direct, direct)
-    append!(exprs.print.vars, vars)
-    append!(if isnothing(option) exprs.print.getval else nctx[:oprint_detect] end, getval)
-    append!(exprs.print.getlen, getlen)
+    append!(exprs.print, codegen.print)
     argvar = something(meta.argvar, :_)
     push!(exprs.layout, Segment((bounds.nbits, kind, meta.label, meta.desc, meta.shortform)))
     push!(exprs.segments, ValueSegment(
         bounds.nbits, kind, meta.label, meta.desc, meta.shortform,
         meta.argtype, argvar,
         codegen.extract, codegen.impart, if !isnothing(option) nctx[:current_branch] end))
-    push!(exprs.print.direct, :(__segment_printed = $(length(exprs.segments))))
+    push!(exprs.print, :(markend!(marks, $(length(exprs.segments)), pos)))
     push!(state.segment_outputs, kind => output)
     extend_bytespans!(exprs.bytespans, output.bytespans)
 end

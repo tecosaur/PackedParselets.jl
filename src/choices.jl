@@ -76,23 +76,9 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
     fextract = :($fieldvar = $(emit_extract(state, bitpos, cbits)))
     present = :(!iszero($fieldvar))
     valid = emit_validity_check(state, fieldvar, fieldvar, 1:length(sopts))
-    opttuple = Tuple(sopts)
-    printexpr = :(print(io, @inbounds $opttuple[$fieldvar]))
-    optlens = map(ncodeunits, sopts)
-    lenexpr = if allequal(optlens)
-        :(pos += $(first(optlens)))
-    else
-        :(pos += $(GlobalRef(Base, :ncodeunits))(@inbounds $opttuple[$fieldvar]))
-    end
+    printexpr = :(pos = bufprint(buf, pos, @inbounds $(Tuple(sopts))[$fieldvar]))
     emptyguard = allowempty && isnothing(option)
     guard(ex) = if emptyguard; :(if $present; $ex end) else ex end
-    # Index checked, as statements rewrite_bufprint! can still reach the print in
-    checked(ex) = if emptyguard
-        ExprVarLine[Expr(:if, present, Expr(:block, copy(valid), ex))]
-    else
-        ExprVarLine[copy(valid), ex]
-    end
-    vars = Pair{Symbol,Any}[fieldvar => :(zero($cint))]
     argvar = gensym("arg_choice")
     extract_value, impart_core, argtype = choice_value_codegen(
         state, valtype, sopts, fieldvar, argvar, cint, bitpos)
@@ -109,11 +95,7 @@ function compile_choice_value(state::ParserState, nctx::NodeCtx, @nospecialize(c
     SegmentOutput(
         SegmentBounds(pmin:pmax, pmin:pmax, cbits, sentinel),
         SegmentCodegen(pexprs, seg_extract,
-            PrintExprs(direct = ExprVarLine[fextract, checked(copy(printexpr))...],
-                       vars = vars,
-                       getval = ExprVarLine[fextract],
-                       getlen = checked(lenexpr)),
-            seg_impart),
+                       ExprVarLine[fextract, guard(Expr(:block, copy(valid), printexpr))], seg_impart),
         SegmentMeta(label, desc, desc, argtype, argvar),
         arrangements)
 end
@@ -145,13 +127,9 @@ function compile_choice_fixed(::ParserState, nctx::NodeCtx, @nospecialize(ctx))
     label = Symbol(chopprefix(String(fieldvar), "attr_"))
     casefold = get(nctx, :casefold, false) === true
     arrangements = string_bytespans(sopts, casefold)
-    printout = ExprVarLine[:(print(io, $target))]
     SegmentOutput(
         SegmentBounds(pmin:maximum(ncodeunits, sopts), tlen:tlen, 0, nothing),
-        SegmentCodegen(pexprs, ExprVarLine[],
-            PrintExprs(direct=printout,
-                       getlen=ExprVarLine[:(pos += $tlen)]),
-            Expr[]),
+        SegmentCodegen(pexprs, ExprVarLine[], bufprint_static(target), Expr[]),
         SegmentMeta(label,
                     string("Choice of literal string \"", target, "\" vs ", join(sopts, ", ")),
                     join(sopts, " | "), nothing, nothing),

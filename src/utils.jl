@@ -36,11 +36,12 @@ end
 
 ## Compat
 
-@static if VERSION < v"1.13-"
-    takestring!(io::IO) = String(take!(io))
-end
-
 const unsafe_takestring = @static if VERSION < v"1.12-"; String else Base.unsafe_takestring end
+
+# The first `len` bytes of the `StringMemory` `buf` as a `String`, which takes it over:
+# `Base.unsafe_takestring`, but for the length, as `String(::Vector{UInt8})` truncates
+takestring(buf::Memory{UInt8}, len::Int) =
+    ccall(:jl_genericmemory_to_string, Ref{String}, (Any, Int), buf, len)
 
 ## Load bounds
 
@@ -343,29 +344,6 @@ end
     end
     byte
 end
-
-function printchars(io::IO, packed::P, nchars::Int,
-                    ranges::NTuple{N, UnitRange{UInt8}},
-                    oneindexed::Bool = false) where {P <: Unsigned, N}
-    nvals = sum(length, ranges)
-    bpc = cardbits(nvals + oneindexed)
-    topshift = 8 * sizeof(P) - bpc
-    packed <<= 8 * sizeof(P) - nchars * bpc
-    offset = UInt8(oneindexed)
-    for _ in 1:nchars
-        write(io, charbyte(ranges, UInt8(packed >> topshift) - offset))
-        packed <<= bpc
-    end
-end
-
-"""
-    printdigits(io::IO, num::Integer, base, pad, maxdigits)
-
-Write `num` in `base`, zero-padded to `pad` digits. `maxdigits` bounds the digit
-count of the field's values; only the buffer form (`bufprint`) uses it, to drop
-the widths no value can have.
-"""
-printdigits(io::IO, num::Integer, base::Int, pad::Int, ::Int) = print(io, string(num; base, pad = Base.max(pad, 1)))
 
 function chars2string(packed::P, nchars::Int,
                       ranges::NTuple{N, UnitRange{UInt8}},

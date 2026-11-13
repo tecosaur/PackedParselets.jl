@@ -36,40 +36,19 @@ struct SegmentBounds
 end
 
 """
-    PrintExprs(; direct, vars, getval, getlen)
-
-Print-phase expression bundle produced by segment handlers.
-
-- `direct`: self-contained extract+write (for `tobytes(buf, id)` and `print(io, id)`)
-- `vars`: variables shared across phases, with default values (`Symbol => init`)
-- `getval`: extract bit-packed values to variables declared in `vars`
-- `getlen`: increment `pos` by the output byte count (using variables from `getval`)
-"""
-const PrintExprs = @NamedTuple{
-    direct::Vector{ExprVarLine},
-    vars::Vector{Pair{Symbol, Any}},
-    getval::Vector{ExprVarLine},
-    getlen::Vector{ExprVarLine},
-}
-
-PrintExprs(; direct=ExprVarLine[], vars=Pair{Symbol,Any}[],
-             getval=ExprVarLine[], getlen=ExprVarLine[]) =
-    (direct=direct, vars=vars, getval=getval, getlen=getlen)
-
-"""
     SegmentCodegen(parse, extract, print, impart)
 
 Expression vectors produced by a segment handler.
 
 - `parse`: input bytes -> value variable (appended to the parse expression list)
 - `extract`: raw bits -> user-facing value (for getproperty, show, segments)
-- `print`: output expressions as a `PrintExprs` named tuple
+- `print`: packed bits -> output bytes, written to `buf` after byte `pos`, advancing `pos`
 - `impart`: user argument -> raw value for bit-packing (for the constructor)
 """
 struct SegmentCodegen
     parse::Vector{ExprVarLine}
     extract::Vector{ExprVarLine}
-    print::PrintExprs
+    print::Vector{ExprVarLine}
     impart::Vector{Expr}
 end
 
@@ -236,13 +215,13 @@ vectors.
 """
 struct PatternExprs
     parse::Vector{ExprVarLine}
-    print::PrintExprs
+    print::Vector{ExprVarLine}
     segments::Vector{ValueSegment}
     properties::Vector{Pair{Symbol, Union{Symbol, Vector{ExprVarLine}}}}
     bytespans::Vector{Vector{ByteSet}}
     layout::Layout
 end
-PatternExprs() = PatternExprs([], PrintExprs(), [], [], [], [])
+PatternExprs() = PatternExprs([], [], [], [], [], [])
 
 # A digit field's values and how they're stored: `dI` holds a value, `dT` its encoding,
 # which offsets values by `vmin`, and by one more when zero is claimed to mark absence

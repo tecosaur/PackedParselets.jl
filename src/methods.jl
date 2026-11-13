@@ -20,7 +20,7 @@ or manipulate individual components before assembling.
 - `typedef`: primitive type declaration
 - `nbits`, `parsebounds`, `printbounds`: type-level query methods
 - `parsebytes`: `parsebytes` method
-- `tobytes`: `tobytes` methods (buf+val and allocating)
+- `tobytes`: `tobytes` method
 - `print`: `Base.write`, `Base.print`, and `Base.string` methods
 - `propertynames`: `Base.propertynames` method
 - `properties`: `Base.getproperty` method
@@ -54,9 +54,7 @@ end
 function assemble_type(exprs::PatternExprs, state::ParserState)
     (; name, segments) = state
     numbits = 8 * cld(state.bits, 8)
-    for field in (:direct, :getval, :getlen)
-        implement_casting!(state, getfield(exprs.print, field))
-    end
+    implement_casting!(state, exprs.print)
     root = state.branches[1]
     M = PackedParselets
     # Run finalize hooks, collecting extra expressions
@@ -89,8 +87,8 @@ function assemble_type(exprs::PatternExprs, state::ParserState)
         parsebounds = :($(GlobalRef(M, :parsebounds))(::Type{$(esc(name))}) = $((root.parsed_min, root.parsed_max))),
         printbounds = :($(GlobalRef(M, :printbounds))(::Type{$(esc(name))}) = $((root.print_min, root.print_max))),
         parsebytes = assemble_parsebytes(exprs.parse, exprs.segments, state, name),
-        tobytes = assemble_tobytes(exprs.print, state, name),
-        print = assemble_print(exprs.print, state, name),
+        tobytes = assemble_tobytes(exprs.print, name),
+        print = assemble_print(state, name),
         propertynames = :($(GlobalRef(Base, :propertynames))(::$(esc(name))) = $(Tuple(Symbol[first(p) for p in props]))),
         properties = assemble_properties(props, exprs.segments, state, name),
         segments_type = assemble_segments_type(exprs.layout, name),
@@ -150,50 +148,16 @@ function assemble_parsebytes(pexprs::Vector{ExprVarLine}, segments::Vector{Value
       end)
 end
 
-## tobytes
+## tobytes / print / string
 
-# Copies of print expressions, without their `__segment_printed` markers
-strip_print_markers(pexprs::Vector) = strip_segsets!(Expr(:block, copyexprs(pexprs)...)).args
+# `segments(val)` collects where each segment ends in `marks`
+assemble_tobytes(print::Vector{ExprVarLine}, name::Symbol) =
+    :(Base.@constprop :none function $(GlobalRef(PackedParselets, :tobytes))(buf::Memory{UInt8}, val::$(esc(name)), pos::Int, marks = nothing)
+          $(print...)
+          pos
+      end)
 
-function assemble_tobytes(print::PrintExprs, state::ParserState, name::Symbol)
-    root = state.branches[1]
-    fixedlen = root.print_min == root.print_max
-    M = PackedParselets
-    directexprs = copyexprs(print.direct)
-    foreach(mark_segment_ends!, directexprs)
-    rewrite_bufprint!(directexprs)
-    allocating = if fixedlen
-        :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
-              buf = Base.StringMemory($(root.print_max))
-              $(GlobalRef(M, :tobytes))(buf, val)
-              buf
-          end)
-    else
-        # Measure the exact length, then write through the buffer method rather than
-        # a second copy of the print code.
-        localdecls = Expr[Expr(:(=), v, d) for (v, d) in print.vars]
-        :(function $(GlobalRef(M, :tobytes))(val::$(esc(name)))
-              $(if !isempty(localdecls) Expr(:local, localdecls...) end)
-              pos = 0
-              $(print.getval...)
-              $(print.getlen...)
-              buf = Base.StringMemory(pos)
-              $(GlobalRef(M, :tobytes))(buf, val)
-              buf
-          end)
-    end
-    Expr(:block,
-        # `segments(val)` collects where each segment ends in `marks`
-        :(Base.@constprop :none function $(GlobalRef(M, :tobytes))(buf::Memory{UInt8}, val::$(esc(name)), pos::Int, marks = nothing)
-              $(directexprs...)
-              pos
-          end),
-        allocating)
-end
-
-## print / string
-
-function assemble_print(::PrintExprs, state::ParserState, name::Symbol)
+function assemble_print(state::ParserState, name::Symbol)
     maxbytes = state.branches[1].print_max
     M = PackedParselets
     Expr(:block,
@@ -204,18 +168,10 @@ function assemble_print(::PrintExprs, state::ParserState, name::Symbol)
           end),
         :($(GlobalRef(Base, :print))(io::IO, val::$(esc(name))) =
               ($(GlobalRef(Base, :write))(io, val); nothing)),
-        :($(GlobalRef(Base, :string))(val::$(esc(name))) =
-              $(GlobalRef(M, :unsafe_takestring))($(GlobalRef(M, :tobytes))(val))))
-end
-
-function resolve_print_markers!(exprs)
-    for item in exprs
-        item isa Expr || continue
-        if Meta.isexpr(item, :call) && !isempty(item.args) && item.args[1] == :__tobytes_print
-            item.args[1] = :print
-        end
-        resolve_print_markers!(item.args)
-    end
+        :(function $(GlobalRef(Base, :string))(val::$(esc(name)))
+              buf = Base.StringMemory($maxbytes)
+              $(GlobalRef(M, :takestring))(buf, $(GlobalRef(M, :tobytes))(buf, val))
+          end))
 end
 
 ## getproperty
@@ -350,16 +306,6 @@ assemble_segments_value(nsegs::Int, state::ParserState, name::Symbol) =
     :($(GlobalRef(PackedParselets, :segments))(val::$(esc(name))) =
           $(GlobalRef(PackedParselets, :printsegments))(val, Val($nsegs), $(state.branches[1].print_max)))
 
-# Replace each `__segment_printed = i` marker with a note of where segment `i` ends
-function mark_segment_ends!(@nospecialize(expr))
-    expr isa Expr || return
-    if Meta.isexpr(expr, :(=)) && first(expr.args) === :__segment_printed
-        expr.head, expr.args = :call, Any[:markend!, :marks, expr.args[2], :pos]
-    else
-        foreach(mark_segment_ends!, expr.args)
-    end
-end
-
 ## Property-segment resolution
 
 # Map properties to `(name, segment_indices)` pairs, by their first value: a segment's
@@ -383,153 +329,7 @@ function resolve_property_segments(props, segs::Vector{ValueSegment})
     result
 end
 
-## Segment-set stripping
-
-# Remove `__segment_printed = N` markers from expression trees
-function strip_segsets!(expr::ExprVarLine)
-    expr isa Expr || return expr
-    remove = Int[]
-    for (i, arg) in enumerate(expr.args)
-        arg isa Expr || continue
-        if Meta.isexpr(arg, :(=), 2) && first(arg.args) === :__segment_printed
-            push!(remove, i)
-        else
-            strip_segsets!(arg)
-        end
-    end
-    isempty(remove) || deleteat!(expr.args, remove)
-    expr
-end
-
-## Buffer printing
-
-# Rewrite `io` print calls into writes to `buf`, for the `tobytes` method
-function rewrite_bufprint!(pexprs::Union{Vector{<:ExprVarLine}, Vector{Any}})
-    # Spliced in reverse to preserve indices; nested calls are rewritten in their own `args`
-    splices = Tuple{Int, Vector{Any}}[]
-    for (i, expr) in enumerate(pexprs)
-        if Meta.isexpr(expr, :call) && length(expr.args) >= 3 && expr.args[2] == :io
-            fname, _, args... = expr.args
-            replacement = if fname == :print
-                rewrite_print_call(args)
-            elseif fname == :write && length(args) == 1
-                Any[:(@inbounds buf[pos += 1] = $(args[1]))]
-            elseif fname == :printchars
-                rewrite_printchars(args)
-            elseif fname == :printdigits
-                Any[:(pos = bufprint(buf, pos, $(args...)))]
-            elseif fname == :__tobytes_print
-                tobytes_ref = GlobalRef(PackedParselets, :tobytes)
-                ebuf = gensym("ebuf")
-                Any[:($ebuf = $tobytes_ref($(args...))),
-                    :(Base.unsafe_copyto!(pointer(buf, pos + 1), pointer($ebuf), length($ebuf))),
-                    :(pos += length($ebuf))]
-            end
-            push!(splices, (i, replacement))
-        elseif expr isa Expr
-            for arg in expr.args
-                if arg isa Expr
-                    rewrite_bufprint!(arg.args)
-                end
-            end
-        end
-    end
-    for (i, replacement) in reverse(splices)
-        splice!(pexprs, i, replacement)
-    end
-end
-
-
-function rewrite_printchars(args)
-    if length(args) == 4 && args[2] isa Int && args[3] isa Tuple &&
-            args[4] isa Bool && !args[4] && length(args[3]) in (1, 2)
-        var, nchars, ranges, _ = args
-        return gen_swar_bufprintchars(var, nchars, cardbits(sum(length, ranges)), ranges)
-    end
-    Any[:(pos = unpackchars!(buf, pos, $(args...)))]
-end
-
-function gen_swar_bufprintchars(@nospecialize(var), nchars::Int, bpc::Int, @nospecialize(ranges))
-    exprs = Any[]
-    remaining = nchars
-    consumed = 0
-    for nf in (8, 4, 2)
-        remaining >= nf || continue
-        sT = register_type(nf)
-        svar = gensym("spread")
-        rshift = (remaining - nf) * bpc
-        lshift = 8 * nf - nf * bpc
-        extract = if iszero(rshift) var else :($var >> $rshift) end
-        init = :($extract % $sT)
-        if !iszero(lshift)
-            init = :($init << $lshift & $(typemax(sT) << lshift))
-        end
-        push!(exprs, Expr(:(=), svar, init))
-        append!(exprs, gen_reverse_swar(sT, svar, bpc, nf, ranges))
-        push!(exprs, :(Base.unsafe_store!(Ptr{$sT}(pointer(buf, pos + 1)), $svar)))
-        push!(exprs, :(pos += $nf))
-        consumed += nf
-        remaining -= nf
-    end
-    fmask = (1 << bpc) - 1
-    base1 = UInt8(first(first(ranges)))
-    len1 = UInt8(length(first(ranges)))
-    delta = if length(ranges) >= 2 UInt8(first(ranges[2])) - base1 - len1 else 0x00 end
-    for i in consumed:nchars-1
-        shift = (nchars - 1 - i) * bpc
-        shifted = if iszero(shift) var else :($var >> $shift) end
-        idx = :(UInt8($shifted & $fmask))
-        byte = if length(ranges) == 1
-            :($base1 + $idx)
-        else
-            :($base1 + $idx + ($idx >= $len1) * $delta)
-        end
-        push!(exprs, :(@inbounds buf[pos += 1] = $byte))
-    end
-    exprs
-end
-
-function rewrite_print_call(args::Vector)
-    if length(args) == 1
-        arg = first(args)
-        if Meta.isexpr(arg, :call) && first(arg.args) == :string
-            sargs = arg.args[2:end]
-            positional = Any[]
-            base, pad = 10, 0
-            for sa in sargs
-                if Meta.isexpr(sa, :kw, 2) && sa.args[1] == :base
-                    base = sa.args[2]
-                elseif Meta.isexpr(sa, :kw, 2) && sa.args[1] == :pad
-                    pad = sa.args[2]
-                else
-                    push!(positional, sa)
-                end
-            end
-            Any[:(pos = bufprint(buf, pos, $(positional...), $base, $pad))]
-        elseif arg isa String
-            Any[bufprint_static(arg)...]
-        else
-            Any[:(pos = bufprint(buf, pos, $arg))]
-        end
-    else
-        Any[:(pos = bufprint(buf, pos, $arg)) for arg in args]
-    end
-end
-
-function bufprint_static(str::String)
-    exprs = Expr[]
-    for (; offset, width, iT) in register_chunks(ncodeunits(str))
-        value = pack_bytes(str, offset, width, iT)
-        if iT === UInt8
-            push!(exprs, :(@inbounds buf[pos += 1] = $value))
-        else
-            push!(exprs,
-                  :(Base.unsafe_store!(Ptr{$iT}(pointer(buf, pos + 1)), htol($value))),
-                  :(pos += $width))
-        end
-    end
-    exprs
-end
+## Compat
 
 # Before Julia 1.12, `@inbounds`'s hygienic `local val` clashes with parameters named `val`
 function expand_macrocall_inbounds!(ex)

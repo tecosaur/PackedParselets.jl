@@ -421,11 +421,9 @@ end
 
 Spread `nfields` packed `bpc`-bit fields (MSB-aligned in `var::T`) into
 individual bytes with ASCII offsets from `ranges`, `hton`-ed for storage.
-Supports 1 or 2 contiguous ranges; 2-range uses branchless SWAR comparison.
 """
 function gen_reverse_swar(T::DataType, var::Symbol, bpc::Int, nfields::Int,
                           @nospecialize(ranges::Tuple{Vararg{UnitRange{UInt8}}}))
-    rep = bytelanes(T, 0x01)
     nbits = 8 * sizeof(T)
     exprs = ExprVarLine[]
     groupsize, groupwidth = nfields, nfields * bpc
@@ -441,19 +439,49 @@ function gen_reverse_swar(T::DataType, var::Symbol, bpc::Int, nfields::Int,
         groupwidth = half * 8
         groupsize = half
     end
-    push!(exprs, Expr(:(=), var, :($var >> $(8 - bpc) & $(T((1 << bpc) - 1) * rep))))
-    base1 = T(first(ranges[1]))
-    if length(ranges) == 1
-        push!(exprs, Expr(:(=), var, :(hton($var + $(base1 * rep)))))
-    else
-        len1 = T(length(ranges[1]))
-        delta = T(first(ranges[2])) - base1 - len1
-        hibits = T(0x80) * rep
-        mvar = gensym("rmask")
-        # (⊻ must be parenthesised: & binds tighter)
-        push!(exprs, Expr(:(=), mvar, :(($var | $hibits - $(len1 * rep) ⊻ $var) & $hibits)))
-        push!(exprs, Expr(:(=), var, :(hton($var + $(base1 * rep) + $mvar >> 7 * $delta))))
+    push!(exprs, :($var = $var >> $(8 - bpc) & $(bytelanes(T, (1 << bpc) - 1))))
+    # Each range a lane's index lies beyond adds the gap before the next, which may be negative
+    hibits = bytelanes(T, 0x80)
+    bytes, edge = :($var + $(bytelanes(T, first(ranges[1])))), 0
+    for i in 2:length(ranges)
+        edge += length(ranges[i - 1])
+        beyond = :(((($var | $hibits) - $(bytelanes(T, edge))) & $hibits) >> 7)
+        bytes = :($bytes + $beyond * $((Int(first(ranges[i])) - Int(last(ranges[i - 1])) - 1) % T))
+    end
+    push!(exprs, :($var = hton($bytes)))
+end
+
+# Print `nchars` characters packed in `var`: a fixed count not offset by a claimed zero
+# spreads in registers, else byte by byte
+function gen_printchars(@nospecialize(var), @nospecialize(nchars), @nospecialize(ranges::Tuple), oneindexed::Bool)
+    nchars isa Int && !oneindexed &&
+        return gen_swar_bufprintchars(var, nchars, cardbits(sum(length, ranges)), ranges)
+    Any[:(pos = unpackchars!(buf, pos, $var, $nchars, $ranges, $oneindexed))]
+end
+
+function gen_swar_bufprintchars(@nospecialize(var), nchars::Int, bpc::Int, @nospecialize(ranges))
+    exprs = Any[]
+    remaining = nchars
+    for nf in (8, 4, 2)
+        remaining >= nf || continue
+        sT = register_type(nf)
+        svar = gensym("spread")
+        rshift = (remaining - nf) * bpc
+        lshift = 8 * nf - nf * bpc
+        extract = if iszero(rshift) var else :($var >> $rshift) end
+        init = :($extract % $sT)
+        if !iszero(lshift)
+            init = :($init << $lshift & $(typemax(sT) << lshift))
+        end
+        push!(exprs, Expr(:(=), svar, init))
+        append!(exprs, gen_reverse_swar(sT, svar, bpc, nf, ranges))
+        push!(exprs, :(Base.unsafe_store!(Ptr{$sT}(pointer(buf, pos + 1)), $svar)))
+        push!(exprs, :(pos += $nf))
+        remaining -= nf
+    end
+    for left in remaining-1:-1:0
+        idx = if iszero(left) var else :($var >> $(left * bpc)) end
+        push!(exprs, :(@inbounds buf[pos += 1] = charbyte($ranges, UInt8($idx & $((1 << bpc) - 1)))))
     end
     exprs
 end
-

@@ -102,3 +102,18 @@ function gen_masked_compare(iT::DataType, @nospecialize(posexpr), @nospecialize(
     end
 end
 
+# Write `str` to `buf` after `pos`, a register at a time
+function bufprint_static(str::String)
+    exprs = Expr[]
+    for (; offset, width, iT) in register_chunks(ncodeunits(str))
+        value = pack_bytes(str, offset, width, iT)
+        if iT === UInt8
+            push!(exprs, :(@inbounds buf[pos += 1] = $value))
+        else
+            push!(exprs,
+                  :(Base.unsafe_store!(Ptr{$iT}(pointer(buf, pos + 1)), htol($value))),
+                  :(pos += $width))
+        end
+    end
+    exprs
+end

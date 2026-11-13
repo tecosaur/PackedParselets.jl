@@ -566,22 +566,18 @@ function emit_dispatch_parse!(exprs::PatternExprs, state::ParserState, nctx::Nod
                              $reg_var = $load
                              $arm_idx_var = $idx
                          end))
-    for (k, ad) in enumerate(arm_data)
-        rewind = :(if !$(ad.armvar); pos = $savedpos; $(arm_clear_bits(arm_base, ad.bits_after)...) end)
-        push!(exprs.parse, :($(ad.armvar) = false))
-        push!(exprs.parse, :(if $arm_idx_var == $(UInt8(k))
-                                 $(arm_attempt(popt, ad.armvar, ad.end_label, ad.child, ad.oexprs.parse)...)
-                                 $rewind
-                             end))
+    # Only the arm the window selects is tried; failing, it leaves the choice unmatched
+    fail = if !has_empty || !isnothing(popt) build_fail_expr!(state, nctx, "No choice arm matched") end
+    orfail() = if isnothing(fail); () else (copy(fail),) end
+    chain = orfail()
+    for k in reverse(eachindex(arm_data))
+        ad = arm_data[k]
+        body = Expr(:block, arm_attempt(popt, ad.armvar, ad.end_label, ad.child, ad.oexprs.parse)...,
+                    :(if !$(ad.armvar); pos = $savedpos; $(arm_clear_bits(arm_base, ad.bits_after)...); $(orfail()...) end))
+        chain = (Expr(:elseif, :($arm_idx_var == $(UInt8(k))), body, chain...),)
     end
-    if !has_empty || !isnothing(popt)
-        any_ok = false
-        for ad in arm_data
-            any_ok = :($any_ok || $(ad.armvar))
-        end
-        fail = build_fail_expr!(state, nctx, "No choice arm matched")
-        push!(exprs.parse, :(if !($any_ok); $fail end))
-    end
+    only(chain).head = :if
+    push!(exprs.parse, only(chain))
 end
 
 """

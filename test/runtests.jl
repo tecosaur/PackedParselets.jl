@@ -3718,7 +3718,7 @@ end
 @testset "structured choice" begin
     @testset "two-arm basic" begin
         iddef = :(@defpacked StructChoice1 (:id(choice(("A", digits(2)), ("B", digits(3))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:43)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:26)
         eval(iddef)
         @test string(parse(StructChoice1, "A42")) == "A42"
         @test string(parse(StructChoice1, "B007")) == "B007"
@@ -3728,7 +3728,7 @@ end
     end
     @testset "two-arm with fields" begin
         iddef = :(@defpacked StructChoice2 (choice(:a(digits(2)), ("X", :b(digits(3))))))
-        @test parsebytes_complexity(iddef) == (branches=6:13, branch_total=13, ops=3:40)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=11, ops=3:25)
         eval(iddef)
         @test parse(StructChoice2, "42").a == 42
         @test parse(StructChoice2, "42").b === nothing
@@ -3766,7 +3766,7 @@ end
     end
     @testset "letter-range dispatch" begin
         iddef = :(@defpacked LetterChoice (choice(("X", :a(digits(3))), ("Y", :b(digits(2))), ("Z", :c(digits(1))))))
-        @test parsebytes_complexity(iddef) == (branches=6:20, branch_total=20, ops=3:59)
+        @test parsebytes_complexity(iddef) == (branches=5:9, branch_total=17, ops=3:26)
         eval(iddef)
         @test parse(LetterChoice, "X042").a == 42
         @test parse(LetterChoice, "Y07").b == 7
@@ -3778,7 +3778,7 @@ end
         iddef = :(@defpacked ComplexChoice (choice(
             (choice("O", "P", "Q"), :d1(digits(1)), :a1(alphnum(3)), :d2(digits(1))),
             (charset(1, 'A':'N', 'R':'Z'), :d3(digits(1)), :a2(alphnum(8))))))
-        @test parsebytes_complexity(iddef) == (branches=6:18, branch_total=18, ops=3:139)
+        @test parsebytes_complexity(iddef) == (branches=4:10, branch_total=16, ops=3:77)
         eval(iddef)
         @test string(parse(ComplexChoice, "P3ABC5")) == "P3abc5"
         @test string(parse(ComplexChoice, "A1ABCDEFGH")) == "a1abcdefgh"
@@ -3788,7 +3788,7 @@ end
     end
     @testset "casefold dispatch" begin
         iddef = :(@defpacked CaseFoldChoice (choice(("ab", :x(digits(2))), ("cd", :y(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:41)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:24)
         eval(iddef)
         @test parse(CaseFoldChoice, "ab42").x == 42
         @test parse(CaseFoldChoice, "AB42").x == 42
@@ -3806,7 +3806,7 @@ end
     end
     @testset "cascade fallback" begin
         iddef = :(@defpacked CascadeChoice (choice((:a(digits(2)), "X"), (:b(digits(2)), "Y"))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:39)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:22)
         eval(iddef)
         @test parse(CascadeChoice, "42X").a == 42
         @test parse(CascadeChoice, "42X").b === nothing
@@ -3880,7 +3880,7 @@ end
     end
     @testset "multi-byte window dispatch" begin
         iddef = :(@defpacked MultiByteChoice (choice(("AX", :x(digits(2))), ("AY", :y(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:40)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:23)
         eval(iddef)
         @test parse(MultiByteChoice, "AX42").x == 42
         @test parse(MultiByteChoice, "AX42").y === nothing
@@ -3893,7 +3893,7 @@ end
         iddef = :(@defpacked FourArm (choice(
             ("A", :a(digits(2))), ("B", :b(digits(2))),
             ("C", :c(digits(2))), ("D", :d(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:26, branch_total=26, ops=3:73)
+        @test parsebytes_complexity(iddef) == (branches=5:10, branch_total=22, ops=3:22)
         eval(iddef)
         @test parse(FourArm, "A42").a == 42
         @test parse(FourArm, "B07").b == 7
@@ -3938,7 +3938,7 @@ end
     end
     @testset "digit vs letter discrimination" begin
         iddef = :(@defpacked DigitLetterChoice (choice((:n(digits(3))), (letters(1), :m(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:55)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:33)
         eval(iddef)
         @test parse(DigitLetterChoice, "042").n == 42
         @test parse(DigitLetterChoice, "042").m === nothing
@@ -3958,7 +3958,7 @@ end
     end
     @testset "field wrapping structured choice" begin
         iddef = :(@defpacked FieldChoice (:id(choice(("A", digits(2)), ("B", digits(3))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:43)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:26)
         eval(iddef)
         @test parse(FieldChoice, "A42").id == "A42"
         @test parse(FieldChoice, "B007").id == "B007"
@@ -3969,7 +3969,7 @@ end
         iddef = :(@defpacked TaggedChoice (choice(:kind,
             :alpha => seq("A", :val(digits(2))),
             :beta  => seq("B", :val(digits(3))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:43)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:26)
         eval(iddef)
         a = parse(TaggedChoice, "A42")
         b = parse(TaggedChoice, "B007")
@@ -4008,7 +4008,7 @@ end
                     seq("y", :id(digits(3))))),
                 seq("B", :id(digits(4))),
                 seq("C", :tag(choice("p", "q")), :id(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:36, branch_total=36, ops=3:96)
+        @test parsebytes_complexity(iddef) == (branches=5:14, branch_total=31, ops=3:34)
         eval(iddef)
         # Each arm parses and extracts :id correctly
         @test parse(NestedDupField, "Ax01").id == 1
@@ -4032,7 +4032,7 @@ end
     end
     @testset "string choice inside arm" begin
         iddef = :(@defpacked InnerChoice (choice((:tag(choice("alpha", "beta")), :n(digits(1))), ("X", :m(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:19, branch_total=19, ops=3:47)
+        @test parsebytes_complexity(iddef) == (branches=4:12, branch_total=17, ops=3:30)
         eval(iddef)
         @test parse(InnerChoice, "alpha3").tag == :alpha
         @test parse(InnerChoice, "beta5").tag == :beta
@@ -4043,7 +4043,7 @@ end
     end
     @testset "optional inside arm" begin
         iddef = :(@defpacked OptInArm (choice(("A", :x(digits(2)), optional("-", :y(digits(1)))), ("B", :z(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:19, branch_total=19, ops=3:52)
+        @test parsebytes_complexity(iddef) == (branches=4:12, branch_total=17, ops=3:35)
         eval(iddef)
         @test parse(OptInArm, "A42").x == 42
         @test parse(OptInArm, "A42").y === nothing
@@ -4054,7 +4054,7 @@ end
     end
     @testset "variable-length arms" begin
         iddef = :(@defpacked VarArms (choice(("A", :x(digits(1:3))), ("B", :y(digits(2:4, pad=2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:16, branch_total=16, ops=3:49)
+        @test parsebytes_complexity(iddef) == (branches=4:9, branch_total=14, ops=3:28)
         eval(iddef)
         @test parse(VarArms, "A1").x == 1
         @test parse(VarArms, "A123").x == 123
@@ -4066,7 +4066,7 @@ end
     end
     @testset "cross-alternative dispatch" begin
         iddef = :(@defpacked CrossAlt (choice((choice("AB", "CD"), :x(digits(1))), (choice("AD", "CB"), :y(digits(1))))))
-        @test parsebytes_complexity(iddef) == (branches=6:18, branch_total=18, ops=3:50)
+        @test parsebytes_complexity(iddef) == (branches=4:10, branch_total=16, ops=3:29)
         eval(iddef)
         @test parse(CrossAlt, "AB3").x == 3
         @test parse(CrossAlt, "CD7").x == 7
@@ -4079,7 +4079,7 @@ end
     @testset "nested: structured choice inside optional" begin
         iddef = :(@defpacked ChoiceInOpt (:id(digits(max=99)),
             optional("-", choice(("A", :x(digits(2))), ("B", :y(digits(2)))))))
-        @test parsebytes_complexity(iddef) == (branches=5:21, branch_total=21, ops=15:61)
+        @test parsebytes_complexity(iddef) == (branches=5:14, branch_total=19, ops=15:41)
         eval(iddef)
         bare = parse(ChoiceInOpt, "42")
         @test bare.id == 42
@@ -4098,7 +4098,7 @@ end
         iddef = :(@defpacked OverlapBits (choice(
             seq("S", :x(digits(2))),
             seq("L", :y(digits(4))))))
-        @test parsebytes_complexity(iddef) == (branches=6:14, branch_total=14, ops=3:42)
+        @test parsebytes_complexity(iddef) == (branches=4:8, branch_total=12, ops=3:25)
         eval(iddef)
         # discriminant: ceil(log2(3)) = 2, arm1: 7 bits, arm2: 14 bits → 2 + 14 = 16
         @test PP.nbits(OverlapBits) <= 16
@@ -4113,7 +4113,7 @@ end
             :new => :num(digits(4)),
             :old => seq(choice(:kind, :a => "AA", :b => "BB"),
                         :num(digits(2))))))
-        @test parsebytes_complexity(iddef) == (branches=6:25, branch_total=25, ops=3:47)
+        @test parsebytes_complexity(iddef) == (branches=4:14, branch_total=21, ops=3:27)
         eval(:(@defpacked NestedTag (choice(:format,
             :new => :num(digits(4)),
             :old => seq(choice(:kind, :a => "AA", :b => "BB"),
@@ -4155,7 +4155,7 @@ end
         # check: the nested branch has already consumed some of it.
         iddef = :(@defpacked TruncDispatch (choice(("A", :a(digits(2))), ("B", :b(digits(3)))),
                    "x", :c(digits(2))))
-        @test parsebytes_complexity(iddef) == (branches=6:17, branch_total=17, ops=4:54)
+        @test parsebytes_complexity(iddef) == (branches=6:11, branch_total=15, ops=4:37)
         eval(iddef)
         @test parses_within(TruncDispatch, "B123x45", 7)
         @test !parses_within(TruncDispatch, "B123x45", 5)
@@ -4196,7 +4196,7 @@ end
             seq(:year(digits(2)), ".", :num(digits(4))),
             seq(choice(seq("math.", :class(choice("GT", "CO"))), "gr-qc"),
                 "/", :num(digits(7))))))
-        @test parsebytes_complexity(iddef) == (branches=6:34, branch_total=34, ops=3:81)
+        @test parsebytes_complexity(iddef) == (branches=4:19, branch_total=30, ops=3:46)
         eval(:(@defpacked NestedDispatch (choice(
             seq(:year(digits(2)), ".", :num(digits(4))),
             seq(choice(seq("math.", :class(choice("GT", "CO"))), "gr-qc"),
